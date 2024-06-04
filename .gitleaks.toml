@@ -1,0 +1,2 @@
+[file.exclude]
+patterns = ["environment.yaml"]

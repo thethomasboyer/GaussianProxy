@@ -1,0 +1,3 @@
+_target_: utils.training.DMSB
+num_BI_stages: 100
+num_epochs_per_BP_group: 2

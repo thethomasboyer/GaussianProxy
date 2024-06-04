@@ -1,0 +1,15 @@
+__pycache__
+.vscode
+datasets
+experiments
+wandb
+*.log
+my_conf
+*.backup
+outputs
+.ipynb_checkpoints
+core-rg-*
+.env
+conf/encoding_conf
+*.code-workspace
+notebooks/make_traj_vids_saved_plots

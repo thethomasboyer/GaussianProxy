@@ -1,0 +1,571 @@
+import json
+import os
+import shutil
+from dataclasses import dataclass, field, fields
+from logging import FileHandler, makeLogRecord  # , INFO
+from pathlib import Path
+from typing import Generator, Optional
+
+import numpy as np
+import torch
+import wandb
+from accelerate import Accelerator
+from accelerate.logging import MultiProcessAdapter
+from diffusers.models.unets.unet_2d import UNet2DModel
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from enlighten import Manager, get_manager
+from torch import Tensor
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
+from torch.profiler import profile as torch_profile
+from torch.profiler import schedule, tensorboard_trace_handler
+from torch.utils.data import DataLoader, Dataset
+
+from conf.conf import Checkpointing, Config, Training
+from utils.misc import get_evenly_spaced_timesteps  # , save_trajectories_log_videos
+from utils.models import VideoTimeEncoding
+
+
+@dataclass
+class ResumingArgs:
+    """
+    Arguments to resume training from a checkpoint.
+
+    Must default to "natural" starting values when training from scratch.
+    """
+
+    start_instant_batch_idx: int = 0
+    start_global_optimization_step: int = 0
+    start_global_epoch: int = 0
+    best_model_to_date: bool = True
+
+
+@dataclass
+class TimeDiffusion:
+    """
+    A diffusion model with an additional time conditioning for per-sample video generation
+
+    What's used for the encoding of time passed to the model is a Transformer-like sinusoidal encoding followed by a simple MLP,
+    which is actually exactly the same architecture as for the diffusion discretization timesteps.
+
+    Note that "time" here refers to the "biological process" time, or "video" time,
+    *not* the "diffusion process" discretization time(step).
+    """
+
+    # compulsory arguments
+    dynamic: DDIMScheduler
+    net: UNet2DModel
+    video_time_encoding: VideoTimeEncoding
+    accelerator: Accelerator
+    debug: bool
+    # populated arguments when calling .fit
+    _training_cfg: Training = field(init=False)
+    _checkpointing_cfg: Checkpointing = field(init=False)
+    optimizer: Optimizer = field(init=False)
+    lr_scheduler: LRScheduler = field(init=False)
+    logger: MultiProcessAdapter = field(init=False)
+    output_dir: str = field(init=False)
+    model_save_folder: Path = field(init=False)
+    saved_trajectories_folder: Path = field(init=False)
+    # inferred constant attributes
+    _nb_empirical_dists: int = field(init=False)
+    _empirical_dists_timesteps: list[float] = field(init=False)
+    # resuming args
+    _resuming_args: ResumingArgs = field(init=False)
+    # instant state for checkpointing
+    instant_batch_idx: int = field(init=False)
+    # global training state
+    global_epoch: int = field(init=False)
+    global_optimization_step: int = field(init=False)
+    best_model_to_date: bool = True  # TODO
+
+    @property
+    def nb_empirical_dists(self) -> int:
+        if not hasattr(self, "_nb_empirical_dists"):
+            raise RuntimeError("nb_empirical_dists is not set; fit should be called before trying to access it")
+        return self._nb_empirical_dists
+
+    @property
+    def empirical_dists_timesteps(self) -> list[float]:
+        if self._empirical_dists_timesteps is None:
+            raise RuntimeError("empirical_dists_timesteps is not set; fit should be called before trying to access it")
+        return self._empirical_dists_timesteps
+
+    @property
+    def training_cfg(self) -> Training:
+        if self._training_cfg is None:
+            raise RuntimeError("training_cfg is not set; fit should be called before trying to access it")
+        return self._training_cfg
+
+    @property
+    def checkpointing_cfg(self) -> Checkpointing:
+        if self._checkpointing_cfg is None:
+            raise RuntimeError("checkpointing_cfg is not set; fit should be called before trying to access it")
+        return self._checkpointing_cfg
+
+    @property
+    def resuming_args(self) -> ResumingArgs:
+        if self._resuming_args is None:
+            raise RuntimeError("resuming_args is not set; fit should be called before trying to access it")
+        return self._resuming_args
+
+    def fit(
+        self,
+        train_datasets: dict[int, Dataset],
+        test_dataloaders: dict[int, DataLoader],
+        optimizer: Optimizer,
+        lr_scheduler: LRScheduler,
+        logger: MultiProcessAdapter,
+        output_dir: str,
+        model_save_folder: Path,
+        saved_trajectories_folder: Path,
+        training_cfg: Training,
+        checkpointing_cfg: Checkpointing,
+        resuming_args: Optional[ResumingArgs] = None,
+        profile: bool = False,
+    ):
+        """
+        Global high-level fitting method.
+        """
+        logger.debug(
+            f"Starting TimeDiffusion fitting on {self.accelerator.device}",
+            main_process_only=False,
+        )
+        # Set some attributes relative to the data
+        self._fit_init(
+            train_datasets,
+            training_cfg,
+            checkpointing_cfg,
+            optimizer,
+            lr_scheduler,
+            logger,
+            model_save_folder,
+            saved_trajectories_folder,
+            resuming_args,
+        )
+
+        # Modify dataloaders dicts to use the empirical distribution timesteps as keys, instead of a mere numbering
+        train_timestep_datasets: dict[float, Dataset] = {}
+        test_timestep_dataloaders: dict[float, DataLoader] = {}
+        for split, dls in [("train", train_datasets), ("test", test_dataloaders)]:
+            assert np.all(
+                np.diff(list(dls.keys())) > 0
+            ), "Expecting original dataloaders to be numbered in increasing order."
+            timestep_dataloaders = train_timestep_datasets if split == "train" else test_timestep_dataloaders
+            for dataloader_idx, dl in enumerate(dls.values()):
+                timestep_dataloaders[self.empirical_dists_timesteps[dataloader_idx]] = dl
+            assert (
+                len(timestep_dataloaders) == self.nb_empirical_dists == len(dls)
+            ), f"Got {len(timestep_dataloaders)} dataloaders, nb_empirical_dists={self.nb_empirical_dists} and len(dls)={len(dls)}; they should be equal"
+            assert np.all(
+                np.diff(list(dls.keys())) > 0
+            ), "Expecting newly key-ed dataloaders to be numbered in increasing order."
+
+        pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
+
+        epochs_pbar = pbar_manager.counter(
+            total=self.training_cfg.nb_epochs,
+            desc="Epoch",
+            position=1,
+            enable=self.accelerator.is_main_process,
+            leave=False,
+        )
+
+        # profiling # TODO: move to train.py
+        if profile:
+            profiler = torch_profile(
+                schedule=schedule(skip_first=1, wait=1, warmup=3, active=20, repeat=3),
+                on_trace_ready=tensorboard_trace_handler(Path(output_dir, "profile").as_posix()),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            )
+            profiler.start()
+        else:
+            profiler = None
+
+        for epoch in range(self.training_cfg.nb_epochs):
+            self.epoch = epoch
+            if epoch < self.resuming_args.start_global_epoch:
+                epochs_pbar.update()
+                continue
+            epochs_pbar.refresh()
+            self._fit_epoch(
+                train_timestep_datasets,
+                test_timestep_dataloaders,
+                pbar_manager,
+                profiler,
+            )
+            epochs_pbar.update()
+            # evaluate models every n epochs
+            if self.training_cfg.eval_every_n_epochs is not None and epoch % self.training_cfg.eval_every_n_epochs == 0:
+                self._evaluate(
+                    test_timestep_dataloaders,
+                    pbar_manager,
+                )
+            self.accelerator.wait_for_everyone()
+        if profiler is not None:
+            profiler.stop()
+
+    def _fit_init(
+        self,
+        train_datasets: dict[int, Dataset],
+        training_cfg: Training,
+        checkpointing_cfg: Checkpointing,
+        optimizer: Optimizer,
+        lr_scheduler: LRScheduler,
+        logger: MultiProcessAdapter,
+        model_save_folder: Path,
+        saved_trajectories_folder: Path,
+        resuming_args: Optional[ResumingArgs],
+    ):
+        """Fit some remaining attributes before fitting."""
+        assert not hasattr(self, "._nb_empirical_dists"), "Already fitted"
+        self._nb_empirical_dists = len(train_datasets)
+        assert self._nb_empirical_dists > 1, "Expecting at least 2 empirical distributions to train the model."
+        self._empirical_dists_timesteps = get_evenly_spaced_timesteps(self.nb_empirical_dists)
+        self._training_cfg = training_cfg
+        self._checkpointing_cfg = checkpointing_cfg
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self.logger = logger
+        self.model_save_folder = model_save_folder
+        self.saved_trajectories_folder = saved_trajectories_folder
+        # resuming args
+        if resuming_args is None:
+            self._resuming_args = ResumingArgs()
+        else:
+            self._resuming_args = resuming_args
+        self.global_optimization_step = self.resuming_args.start_global_optimization_step
+        self.global_epoch = self.resuming_args.start_global_epoch
+        self.best_model_to_date = self.resuming_args.best_model_to_date
+
+    def _fit_epoch(
+        self,
+        train_datasets: dict[float, Dataset],
+        test_dataloaders: dict[float, DataLoader],
+        pbar_manager: Manager,
+        profiler: Optional[torch_profile] = None,
+    ):
+        """
+        Fit a whole epoch of data.
+        """
+        # loop through batches
+        batches_pbar = pbar_manager.counter(
+            total=self.training_cfg.nb_time_samplings,
+            position=4,
+            desc="Iterating over training data batches" + 14 * " ",
+            enable=self.accelerator.is_main_process,
+            leave=False,
+        )
+        for batch_idx, (time, batch) in enumerate(
+            self._yield_data_batches(train_datasets, self.logger, self.training_cfg.nb_time_samplings)
+        ):
+            self.instant_batch_idx = batch_idx
+            if (
+                self.epoch == self.resuming_args.start_global_epoch
+                and batch_idx < self.resuming_args.start_instant_batch_idx
+            ):  # we're resuming
+                batches_pbar.update()
+                continue
+            batches_pbar.refresh()
+            # set network to the right mode
+            self.net.train()
+            # gradient step here
+            self._fit_one_batch(batch, time)
+            # take one profiler step
+            if profiler is not None:
+                profiler.step()
+            # checkpoint
+            if self.global_optimization_step % self.checkpointing_cfg.checkpoint_every_n_steps == 0:
+                self._checkpoint()
+            # update pbar
+            batches_pbar.update()
+            # evaluate models every n optimisation steps
+            if (
+                self.training_cfg.eval_every_n_opt_steps is not None
+                and self.global_optimization_step % self.training_cfg.eval_every_n_opt_steps == 0
+            ):
+                self._evaluate(
+                    test_dataloaders,
+                    pbar_manager,
+                )
+            self.accelerator.wait_for_everyone()
+        batches_pbar.close()
+        # update epoch
+        self.global_epoch += 1
+
+    def _yield_data_batches(
+        self, datasets: dict[float, Dataset], logger: MultiProcessAdapter, nb_time_samplings: int
+    ) -> Generator[tuple[float, Tensor], None, None]:
+        """
+        Yield `nb_time_samplings` data batches from the given datasets.
+
+        Each batch has an associated timestep uniformly sampled between 0 and 1,
+        and the corresponding batch is formed by "interpolating" the two empirical distributions
+        of closest timesteps, where "interpolating" means that for timestep:
+
+        t = x * t- + (1-x) * t+
+
+        where x ∈ [0;1], and t- and t+ are the two immediately inferior and superior empirical timesteps to t, the
+        returned batch is formed by sampling true data samples of empirical distributions t- and t+
+        with probability x and 1-x, respectively.
+
+        Note that such behavior is only "stable" when the batch size is large enough. Typically, if batch size is 1
+        then each batch will always have samples from one empirical distribution only: quite bad for training along
+        continuous time... Along many epochs the theoretical end result will of course be the same.
+
+        If the datasets are of different sizes, only the common maximum number of *complete* batches
+        will be yielded, so it's important to shuffle the dataloaders somewhere during training...
+        """
+        # TODO: not actually needed! Just here for sanity check but actually this assert is wrong
+        assert all(
+            len(list(datasets.values())[0]) == len(ds) for ds in datasets.values()
+        ), "All datasets should have the same length"
+        assert (
+            list(datasets.keys()) == self.empirical_dists_timesteps and list(datasets.keys()) == sorted(datasets.keys())
+        ), f"Expecting datasets to be ordered by timestep, got list(datasets.keys())={list(datasets.keys())} vs self.empirical_dists_timesteps={self.empirical_dists_timesteps}"
+
+        for _ in range(nb_time_samplings):
+            # sample a time between 0 and 1
+            t = torch.rand(1).item()
+
+            # get the two closest empirical distributions
+            t_minus, t_plus = None, None
+            for i in range(len(self.empirical_dists_timesteps) - 1):
+                if self.empirical_dists_timesteps[i] <= t < self.empirical_dists_timesteps[i + 1]:
+                    t_minus = self.empirical_dists_timesteps[i]
+                    t_plus = self.empirical_dists_timesteps[i + 1]
+                    break
+            assert (
+                t_minus is not None and t_plus is not None
+            ), f"Could not find the two closest empirical distributions for time {t}"
+
+            # get distance from each time (x such that t = x * t- + (1-x) * t+)
+            x = (t_plus - t) / (t_plus - t_minus)
+
+            # form the batch
+            batch = []
+            for _ in range(self.training_cfg.train_batch_size):
+                if torch.rand(1) < x:
+                    sample = datasets[t_minus][torch.randint(len(datasets[t_minus]), (1,))].to(self.accelerator.device)
+                else:
+                    sample = datasets[t_plus][torch.randint(len(datasets[t_plus]), (1,))].to(self.accelerator.device)
+                batch.append(sample)
+            batch = torch.stack(batch)
+
+            yield t, batch
+
+    def _fit_one_batch(
+        self,
+        batch: Tensor,
+        time: float,
+    ):
+        """
+        Perform one training step on one batch at one timestep.
+
+        Computes the loss w.r.t. true targets and backpropagates the error
+        """
+        # Sample Gaussian noise
+        noise = torch.randn_like(batch)
+
+        # Sample a random diffusion timestep
+        diff_timesteps = torch.randint(
+            0, self.dynamic.num_train_timesteps, (batch.shape[0],), device=self.accelerator.device
+        )
+
+        # Forward diffusion process
+        noisy_batch = self.dynamic.add_noise(batch, noise, diff_timesteps)  # type: ignore
+
+        # Encode time
+        video_time_codes = self.video_time_encoding(time, batch.shape[0])
+
+        # Get model predictions
+        pred = self.net(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]
+
+        # Compute loss
+        loss = self._loss(pred, noise)
+
+        # Backward pass
+        self.accelerator.backward(loss)
+
+        # Gradient clipping
+        grad_norm = None
+        if self.accelerator.sync_gradients:
+            grad_norm = self.accelerator.clip_grad_norm_(
+                self.net.parameters(),
+                self.training_cfg.max_grad_norm,
+            )
+
+        # Optimization step
+        self.optimizer.step()
+        self.lr_scheduler.step()
+        self.optimizer.zero_grad()
+
+        # Update global opt step & log the loss
+        self.global_optimization_step += 1
+        self.accelerator.log(
+            {
+                "loss": loss.item(),
+                "lr": self.lr_scheduler.get_last_lr()[0],
+                "epoch": self.epoch,
+                "step": self.global_optimization_step,
+                "time": time,
+                "L2 gradient norm": grad_norm,
+            },
+            step=self.global_optimization_step,
+        )
+        # Wake me up at 3am if loss is NaN
+        if torch.isnan(loss) and self.accelerator.is_main_process:
+            msg = f"Loss is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+            wandb.alert(
+                title="NaN loss",
+                text=msg,
+                level=wandb.AlertLevel.ERROR,
+                wait_duration=21600,  # 6 hours
+            )
+            self.logger.critical(msg)
+            # TODO: restart from previous checkpoint
+
+    def _loss(self, pred, target):
+        """All the hard work should happen before..."""
+        criterion = torch.nn.MSELoss()
+        loss = criterion(pred, target)
+        return loss
+
+    @torch.inference_mode()
+    def _evaluate(
+        self,
+        dataloaders: dict[float, DataLoader],
+        pbar_manager: Manager,
+    ):
+        """
+        Generate inference trajectories, compute metrics and save the model if best to date.
+
+        Should be called by all processes.
+        """
+        torch.cuda.empty_cache()
+        self.logger.info(f"Starting evaluation on process ({self.accelerator.device})", main_process_only=False)
+        # TODO
+        pass
+        # raise NotImplementedError
+
+    def _save_model(self):
+        """
+        Save the net to disk as an independent pretrained model.
+
+        Can be called by all processes (only main will actually save).
+        """
+        self.accelerator.unwrap_model(self.net).save_pretrained(
+            self.model_save_folder, is_main_process=self.accelerator.is_main_process
+        )
+        self.logger.info(f"Saved model to {self.model_save_folder}")
+
+    def _checkpoint(self):
+        """
+        Save the current state of the models, optimizers, schedulers, and dataloaders.
+
+        Should be called by all processes as `accelerator.save_state` handles checkpointing
+        in DDP setting internally.
+
+        Used to resume training.
+        """
+        this_chkpt_subfolder = Path(self.checkpointing_cfg.chckpt_save_path) / f"step_{self.global_optimization_step}"
+        self.accelerator.save_state(this_chkpt_subfolder.as_posix())
+
+        # Resuming args saved in json file
+        training_info_for_resume = {
+            "start_instant_batch_idx": self.instant_batch_idx,
+            "start_global_optimization_step": self.global_optimization_step,
+            "start_global_epoch": self.global_epoch,
+            "best_model_to_date": self.best_model_to_date,
+        }
+        if self.accelerator.is_main_process:  # resuming args are common to all processes
+            self.logger.info(
+                f"Checkpointing resuming args at step {self.global_optimization_step}: {training_info_for_resume}"
+            )
+            with open(this_chkpt_subfolder / "training_state_info.json", "w", encoding="utf-8") as f:
+                json.dump(training_info_for_resume, f)
+        self.accelerator.wait_for_everyone()
+        # check consistency between processes
+        with open(this_chkpt_subfolder / "training_state_info.json", "r", encoding="utf-8") as f:
+            assert (
+                training_info_for_resume == json.load(f)
+            ), f"Expected consistency of resuming args between process {self.accelerator.process_index} and main process; got {training_info_for_resume} != {json.load(f)}"
+
+        # Delete old checkpoints if needed
+        if self.accelerator.is_main_process:
+            checkpoints_list = list(Path(self.checkpointing_cfg.chckpt_save_path).iterdir())
+            nb_checkpoints = len(checkpoints_list)
+            if nb_checkpoints > self.checkpointing_cfg.checkpoints_total_limit:
+                sorted_chkpt_subfolders = sorted(checkpoints_list, key=lambda x: int(x.name.split("_")[1]))
+                to_del = sorted_chkpt_subfolders[: -self.checkpointing_cfg.checkpoints_total_limit]
+                if len(to_del) > 1:
+                    self.logger.error(f"\033[1;33mMORE THAN 1 CHECKPOINT TO DELETE:\033[0m\n {to_del}")
+                for d in to_del:
+                    self.logger.info(f"Deleting checkpoint {d.name}...")
+                    shutil.rmtree(d)
+
+        self.accelerator.wait_for_everyone()
+
+
+def resume_from_checkpoint(
+    cfg: Config,
+    logger: MultiProcessAdapter,
+    accelerator: Accelerator,
+) -> ResumingArgs | None:
+    """Should be called by all processes"""
+    resume_arg = cfg.checkpointing.resume_from_checkpoint
+    # 1. first find the correct subfolder to resume from
+    chckpt_save_path = Path(cfg.checkpointing.chckpt_save_path)
+    if type(resume_arg) == int:
+        path = chckpt_save_path / f"step_{resume_arg}"
+    else:
+        assert resume_arg is True, "Expected resume_from_checkpoint to be True here"
+        # Get the most recent checkpoint
+        if not chckpt_save_path.exists() and accelerator.is_main_process:
+            logger.warning("No 'checkpoints' directory found in run folder; creating one.")
+            chckpt_save_path.mkdir()
+        accelerator.wait_for_everyone()
+        dirs = os.listdir(chckpt_save_path)
+        dirs = sorted(dirs, key=lambda x: int(x.split("_")[1]))
+        path = Path(chckpt_save_path, dirs[-1]) if len(dirs) > 0 else None
+    # 2. load state and other resuming args if applicable
+    if path is None:
+        logger.warning(f"No checkpoint found in {chckpt_save_path}. Starting a new training run.")
+        resuming_args = None
+    else:
+        logger.info(f"Resuming from checkpoint {path}")
+        accelerator.load_state(path.as_posix())
+        with open(path / "training_state_info.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        resuming_args = ResumingArgs(**data)
+        # check consistency
+        field_names = [field.name for field in fields(ResumingArgs)]
+        assert (
+            field_names == list(data.keys())
+        ), f"Expected matching field names between ResumingArgs and the loaded JSON file , but got {field_names} and {data.keys()}"
+
+    return resuming_args
+
+
+def _log_to_file_only(logger: MultiProcessAdapter, msg: str, level: int) -> None:
+    """
+    Logs a message to file handlers only.
+
+    This function iterates over all handlers attached to the logger,
+    and if the handler is a FileHandler, it directly calls its emit
+    method to log the message. This way, only the file handlers will
+    log the message.
+
+    Args:
+        logger (MultiProcessAdapter): The logger instance with attached handlers.
+        msg (str): The message to log.
+        level (int): The logging level.
+
+    Returns:
+        None
+    """
+    for handler in logger.logger.handlers:
+        if isinstance(handler, FileHandler):  # TODO: doesn't work
+            handler.emit(makeLogRecord({"msg": msg, "level": level}))
