@@ -10,12 +10,12 @@ repos:
   - id: debug-statements
 
 - repo: https://github.com/gitleaks/gitleaks
-  rev: v8.18.3
+  rev: v8.18.4
   hooks:
   - id: gitleaks
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.4.7
+  rev: v0.4.9
   hooks:
   # Run the linter, fixing issues and sorting imports
   - id: ruff
