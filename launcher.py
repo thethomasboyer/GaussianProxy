@@ -220,10 +220,15 @@ class Task:
             else:
                 accelerate_cfg += f"--{cfg_item_name} {cfg_item_value} "
 
-        # that's only to host the "accelerate launch" command (~ 160MB still!!!),
-        # it bothers me that it's not on the first GPU that's actually used otherwise...
-        first_gpu = launch_args.gpu_ids.split(",")[0] if launch_args.gpu_ids != "all" else "0"
-        prefixed_vars = f"CUDA_VISIBLE_DEVICES={first_gpu}, "
+        if self.cfg.slurm.enabled:
+            prefixed_vars = ""
+        else:
+            # that's only to host the "accelerate launch" command (~ 160MB still!!!),
+            # it bothers me that it's not on the first GPU that's actually used otherwise...
+            first_gpu = launch_args.gpu_ids.split(",")[0] if launch_args.gpu_ids != "all" else "0"
+            prefixed_vars = f"CUDA_VISIBLE_DEVICES={first_gpu}, "
+            # also for some reason I have a invalid device ordinal error on slurm cluster
+            # so skipping this hack in that case
 
         if self.cfg.debug:
             accelerate_cfg += "--debug "
