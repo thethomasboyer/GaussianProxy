@@ -12,4 +12,4 @@ core-rg-*
 .env
 conf/encoding_conf
 *.code-workspace
-notebooks/make_traj_vids_saved_plots
+notebooks/*.mp4

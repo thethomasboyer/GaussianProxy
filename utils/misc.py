@@ -1,13 +1,13 @@
 from pathlib import Path
 
-import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
+from numpy import ndarray
 from omegaconf import OmegaConf
+from PIL import Image
 from termcolor import colored
 from torch import Tensor
 from wandb.sdk.wandb_run import Run as WandBRun
@@ -20,7 +20,7 @@ def create_repo_structure(
     accelerator: Accelerator,
     logger: MultiProcessAdapter,
     this_run_folder: Path,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path]:
     """
     The repo structure is as follows:
     ```
@@ -55,20 +55,10 @@ def create_repo_structure(
     if accelerator.is_main_process:
         models_save_folder.mkdir(exist_ok=True)
 
-    # Create a temporary folder to save the generated trajectories during training
-    # for a temporary cachefolder
-    if cfg.tmp_dataloader_path is None:
-        tmp_dataloader_path = Path(this_run_folder, ".tmp_dataloader")
-    else:
-        tmp_dataloader_path = Path(cfg.tmp_dataloader_path)
-
-    if accelerator.is_main_process:
-        tmp_dataloader_path.mkdir(exist_ok=True, parents=True)
-
     # Create a folder to save trajectories
-    saved_trajectories_folder = Path(this_run_folder, "saved_trajectories")
+    saved_artifacts_folder = Path(this_run_folder, "saved_artifacts")
     if accelerator.is_main_process:
-        saved_trajectories_folder.mkdir(exist_ok=True)
+        saved_artifacts_folder.mkdir(exist_ok=True)
 
     # verify that the checkpointing folder is empty if not resuming run from a checkpoint
     # this is specific to this *run*
@@ -88,11 +78,7 @@ def create_repo_structure(
             )
             logger.warning(msg)
 
-    return (
-        tmp_dataloader_path,
-        models_save_folder,
-        saved_trajectories_folder,
-    )
+    return models_save_folder, saved_artifacts_folder
 
 
 def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: bool = True) -> None:
@@ -100,8 +86,8 @@ def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: boo
     if cfg.eval_every_n_epochs is None and cfg.eval_every_n_BI_stages is None:
         logger.warning("No evaluation will be performed during training.")
     assert (
-        cfg.training.inference_batch_size >= cfg.training.train_batch_size
-    ), f"Expected inference_batch_size >= train_batch_size, got {cfg.training.inference_batch_size} < {cfg.training.train_batch_size}"
+        cfg.training.eval_batch_size >= cfg.training.train_batch_size
+    ), f"Expected inference_batch_size >= train_batch_size, got {cfg.training.eval_batch_size} < {cfg.training.train_batch_size}"
 
 
 def modify_args_for_debug(
@@ -118,7 +104,7 @@ def modify_args_for_debug(
     changes: dict[tuple[str, ...], int] = {
         ("dynamic", "num_train_timesteps"): 100,
         ("training", "nb_epochs"): 5,
-        ("training", "nb_time_samplings"): 100,
+        ("training", "nb_time_samplings"): 30,
         ("checkpointing", "checkpoint_every_n_steps"): 100,
         (
             "training",
@@ -128,6 +114,7 @@ def modify_args_for_debug(
             "training",
             "eval_every_n_opt_steps",
         ): 300,
+        ("training", "eval_nb_diffusion_timesteps"): 10,
     }
     for param_name_tuple, new_param_value in changes.items():
         # Navigate through the levels of cfg
@@ -169,108 +156,134 @@ def sample_with_replacement(
     return data
 
 
-def save_trajectories_log_videos(
-    tmp_dataloader_path: Path,
-    saved_trajectories_folder: Path,
-    nb_discretization_steps: int,
+ACCEPTED_NAMES_FOR_LOGGING = ("trajectories", "inversions", "starting_samples", "regenerations")
+
+
+@torch.inference_mode()
+def save_eval_artifacts_log_to_wandb(
+    tensors_to_save: Tensor,
+    save_folder: Path,
     global_optimization_step: int,
-    direction: str,
     accelerator: Accelerator,
     logger: MultiProcessAdapter,
-    max_nb_traj: int = 10,
+    name: str,
+    logging_normalization: list[str],
+    max_nb_to_save_and_log: int = 16,
 ):
     """
-    Save trajectories to disk and log videos to W&B.
+    Save trajectories (videos) to disk and log images and videos to W&B.
 
     Can be called by all processes.
     """
-    # Save some trajectories to disk
-    traj_files = list((tmp_dataloader_path / f"proc_{accelerator.process_index}" / "trajectory").iterdir())
-    assert len(traj_files) > 0, f"Did not find any trajectories to log on process {accelerator.process_index}"
-    logger.debug(
-        f"Found {len(list(traj_files))} trajectories to save & log on process {accelerator.process_index}",
-        main_process_only=False,
-    )
+    # checks
+    assert name in ACCEPTED_NAMES_FOR_LOGGING, f"Expected name in {ACCEPTED_NAMES_FOR_LOGGING}, got {name}"
+    assert tensors_to_save.ndim in (
+        4,
+        5,
+    ), f"Expected 4D or 5D tensor, got {tensors_to_save.ndim}D with shape {tensors_to_save.shape}"
 
-    sel_traj_to_save = [torch.load(p.as_posix(), map_location="cpu", mmap=True)[:max_nb_traj] for p in traj_files]
-    sel_traj_to_save = torch.stack(sel_traj_to_save, dim=1)
-    assert (
-        nb_discretization_steps == sel_traj_to_save.shape[1]
-    ), f"Expected trajectory to save to have nb_discretization_steps={nb_discretization_steps} timesteps, got {sel_traj_to_save.shape[1]}"
-    this_proc_saved_trajectories_folder = saved_trajectories_folder / f"proc_{accelerator.process_index}"
-    this_proc_saved_trajectories_folder.mkdir(exist_ok=True)
-    torch.save(
-        sel_traj_to_save,
-        this_proc_saved_trajectories_folder / f"{direction}_traj_step_{global_optimization_step}.pt",
-    )
+    # Save some raw images / trajectories to disk
+    sel_to_save = tensors_to_save[:max_nb_to_save_and_log]
+    this_proc_save_folder = save_folder / f"proc_{accelerator.process_index}"
+    file_path = this_proc_save_folder / name / f"step_{global_optimization_step}.pt"
+    file_path.parent.mkdir(exist_ok=True, parents=True)
+    if file_path.exists():  # must manually remove it as it's most probably read-only
+        file_path.unlink()
+    torch.save(sel_to_save, file_path)
     logger.info(
-        f"Saved trajectories of shape {sel_traj_to_save.shape} to {this_proc_saved_trajectories_folder} on process {accelerator.process_index}",
+        f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}", main_process_only=False
+    )
+    logger.debug(
+        f"On process {accelerator.process_index}: shape={sel_to_save.shape} | min={sel_to_save.min()} | max={sel_to_save.max()}",
         main_process_only=False,
     )
 
-    # Log some videos to W&B
+    # Log to W&B (main process only)
     assert (
-        sel_traj_to_save.shape[2] == 3
-    ), f"Expected trajectories to contain 3 channels for RGB images, got {sel_traj_to_save.shape[2]}"
-    vids = (sel_traj_to_save.cpu().numpy() * 255).astype(np.uint8)
-    kwargs = {
-        "fps": max(int(nb_discretization_steps / 10), 1),  # ~ 10s
-        "format": "gif",
-    }
-    nb_elems = len(sel_traj_to_save)
-    # position
-    videos = wandb.Video(vids, **kwargs)  # type: ignore
-    accelerator.log(
-        {f"generated_videos/{direction}": videos},
-        step=global_optimization_step,
-    )
-    logger.info(f"Logged {nb_elems} {direction} trajectories to W&B on main process")
+        sel_to_save.shape[tensors_to_save.ndim - 3] == 3
+    ), f"Expected trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3} for RGB images, got shape {sel_to_save.shape}"
+    normalized_elements_for_logging = _normalize_elements_for_logging(sel_to_save, logging_normalization)
+    # videos case
+    if tensors_to_save.ndim == 5:
+        assert name == "trajectories", f"Expected name to be 'trajectories' for 5D tensors, got {name}"
+        kwargs = {
+            "fps": max(int(tensors_to_save.shape[1] / 20), 1),  # ~ 20s
+            "format": "mp4",
+        }
+        for norm_method, normed_vids in normalized_elements_for_logging.items():
+            videos = wandb.Video(normed_vids, **kwargs)  # type: ignore
+            accelerator.log(
+                {f"Generated videos/{norm_method} normalized": videos},
+                step=global_optimization_step,
+            )
+        logger.info(f"Logged {len(sel_to_save)} trajectories to W&B on main process")
+    # images case (inverted Gaussians)
+    else:
+        match name:
+            case "inversions":
+                wandb_title = "Inverted Gaussians"
+            case "starting_samples":
+                wandb_title = "Starting samples"
+            case "regenerations":
+                wandb_title = "Regenerated samples"
+            case _:
+                raise ValueError(
+                    f"Unknown name: {name}; expected one of 'inversions' or 'starting_samples' for 4D tensors"
+                )
+        for norm_method, normed_vids in normalized_elements_for_logging.items():
+            # PIL RGB mode expects 3x8-bit pixels in (H, W, C) format
+            images = [
+                Image.fromarray(image.transpose(1, 2, 0), mode="RGB")
+                for image in normalized_elements_for_logging[norm_method]
+            ]
+            accelerator.log(
+                {f"{wandb_title}/{norm_method} normalized": [wandb.Image(image) for image in images]},
+                step=global_optimization_step,
+            )
+        logger.info(f"Logged {len(sel_to_save)} {wandb_title[0].lower() + wandb_title[1:]} to W&B on main process")
 
 
-def _create_videos_toy_case(
-    traj: Tensor,
-    saved_trajectories_folder: Path,
-    global_optimization_step: int,
-    nb_discretization_steps: int,
-) -> tuple[str, str, int]:
-    assert traj.shape[3] == 2, "Expected 2 channels"
-    assert traj.ndim == 4, "Expected 4D tensor"
-    sel_idxes_to_log = list(range(min(1000, traj.shape[0])))
-    vid_paths = []
-    for channel_idx, channel_name in [(0, "positions"), (1, "velocities")]:
-        sel_vids = traj[sel_idxes_to_log, :, channel_idx, ...].cpu().numpy()
-        # plot the 2D points
-        (saved_trajectories_folder / ".tmp").mkdir(exist_ok=True)
-        for time in range(traj.shape[1]):
-            fig = plt.figure()
-            plt.scatter(sel_vids[:, time, 0], sel_vids[:, time, 1], s=0.15)
-            plt.title(f"Time: {time}")
-            if channel_name == "positions":
-                plt.xlim(-1.5, 1.5)
-                plt.ylim(-1.5, 1.5)
-            elif channel_name == "velocities":
-                plt.xlim(-4, 4)
-                plt.ylim(-4, 4)
-            fig.savefig((saved_trajectories_folder / ".tmp" / f"frame_{time}.png").as_posix())
-            plt.close()
-        # make a video out of it
-        height, width, _ = cv2.imread((saved_trajectories_folder / ".tmp" / "frame_0.png").as_posix()).shape
-        (saved_trajectories_folder / f"step_{global_optimization_step}").mkdir(exist_ok=True)
-        vids = (
-            saved_trajectories_folder / f"step_{global_optimization_step}" / f"2d_points_video{channel_name}.webm"
-        ).as_posix()
-        # TODO: find a codec that doesn't output fake error messages...
-        video = cv2.VideoWriter(
-            vids,
-            cv2.VideoWriter_fourcc(*"vp90"),  # type: ignore
-            int(nb_discretization_steps / 10),
-            (width, height),
-        )
-        for time in range(traj.shape[1]):
-            video.write(cv2.imread((saved_trajectories_folder / ".tmp" / f"frame_{time}.png").as_posix()))
-        video.release()
-        vid_paths.append(vids)
-    return *vid_paths, len(sel_idxes_to_log)
+@torch.inference_mode()
+def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[str]) -> dict[str, ndarray]:
+    """
+    Normalize images or videos for logging to W&B.
+
+    Output range and type is always `[0;255]` and `np.uint8`.
+    """
+    # 1. Determine the dimensions for normalization based on the number of dimensions in the tensor
+    match elems.ndim:
+        case 5:
+            per_image_norm_dims = (2, 3, 4)
+        case 4:
+            per_image_norm_dims = (1, 2, 3)
+        case _:
+            raise ValueError(f"Unsupported number of dimensions. Expected 4 or 5, got shape {elems.shape}")
+    # 2. Normalize the elements for logging
+    normalized_elems_for_logging = {}
+    for norm in logging_normalization:
+        # normalize to [0;1] using some method
+        match norm:
+            case "image min-max":
+                norm_elems = elems.clone() - elems.amin(dim=per_image_norm_dims, keepdim=True)
+                norm_elems /= norm_elems.amax(dim=per_image_norm_dims, keepdim=True)
+            case "video min-max":
+                assert elems.ndim == 5, f"Expected 5D tensor for video normalization, got shape {elems.shape}"
+                norm_elems = elems.clone() - elems.amin(dim=(1, 2, 3, 4), keepdim=True)
+                norm_elems /= norm_elems.amax(dim=(1, 2, 3, 4), keepdim=True)
+            case "[-1;1] raw":
+                norm_elems = elems.clone() / 2
+                norm_elems += 0.5
+            case "[-1;1] clipped":
+                norm_elems = elems.clone() / 2
+                norm_elems += 0.5
+                norm_elems = norm_elems.clamp(0, 1)
+            case _:
+                raise ValueError(f"Unknown normalization: {norm}")
+        # convert to [0;255] np.uint8 arrays for wandb / PIL
+        norm_elems = (norm_elems.cpu().numpy() * 255).astype(np.uint8)
+        normalized_elems_for_logging[norm] = norm_elems
+
+    return normalized_elems_for_logging
 
 
 def bold(s: str | int) -> str:

@@ -53,15 +53,6 @@ class Accelerate:
 
 
 @dataclass
-class TorchCompile:
-    do_compile: bool
-    fullgraph: bool
-    dynamic: bool | None
-    backend: str
-    mode: str
-
-
-@dataclass
 class DataSet:
     selected_dists: list[int]
     # data_shape should be tuple[int, int, int] | tuple[int, int], but unions of containers
@@ -88,12 +79,14 @@ class DataLoader:
 class Training:
     gradient_accumulation_steps: int
     train_batch_size: int
-    inference_batch_size: int
     max_grad_norm: int
     nb_epochs: int
     nb_time_samplings: int
     eval_every_n_epochs: int | None
     eval_every_n_opt_steps: int | None
+    eval_batch_size: int
+    eval_nb_diffusion_timesteps: int
+    eval_nb_video_timesteps: int
 
 
 @dataclass
@@ -168,9 +161,6 @@ class Config:
     # Accelerate
     accelerate: Accelerate
 
-    # TorchCompile
-    torch_compile: TorchCompile
-
     # Metrics
     compute_fid: bool
     compute_isc: bool
@@ -182,7 +172,6 @@ class Config:
     # Miscellaneous
     debug: bool
     profile: bool
-    tmp_dataloader_path: Optional[Path | str]
 
     # Logging
     logger: str

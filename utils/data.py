@@ -67,23 +67,24 @@ def _biotine_2D_image_builder(
     transforms = instantiate(cfg.dataset.transforms)
     logger.warning(f"Using transforms: {transforms} over expected initial data range={expected_initial_data_range}")
     if debug:
-        logger.warning(">>> DEBUG MODE: LIMITING DATASET TO 50 BATCHES PER WORKER AND TRAIN/TEST SPLIT TO 50%/50%<<<")
-        train_split_frac = 0.5
+        logger.warning(">>> DEBUG MODE: LIMITING TEST DATALOADER TO 1 BATCH <<<")
     # Time per time
     for timestamp, files in files_dict_per_time.items():
         if debug:
-            if 50 * cfg.training.train_batch_size * num_workers <= len(files):
-                idxes = np.random.default_rng().choice(
-                    len(files),
-                    50 * cfg.training.train_batch_size * num_workers,
-                    replace=False,
-                )  # idxes are different between processes but that's fine for debug
-                files = [files[i] for i in idxes]
-        # Compute the split index
-        split_idx = int(train_split_frac * len(files))
-        train_files = files[:split_idx]
-        test_files = files[split_idx:]
-        assert train_files + test_files == files
+            # test_idxes are different between processes but that's fine for debug
+            test_idxes = (
+                np.random.default_rng().choice(len(files), cfg.training.train_batch_size, replace=False).tolist()
+            )
+            test_files = [files[i] for i in test_idxes]
+            train_files = [f for f in files if f not in test_files]
+        else:
+            # Compute the split index
+            split_idx = int(train_split_frac * len(files))
+            train_files = files[:split_idx]
+            test_files = files[split_idx:]
+        assert (
+            set(train_files) | (set(test_files)) == set(files)
+        ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
         # Create train dataset
         train_ds = NumpyDataset(train_files, transforms, expected_initial_data_range)
         assert (
@@ -99,7 +100,7 @@ def _biotine_2D_image_builder(
         logger.info(f"Built test dataset for timestamp {timestamp}:\n{test_ds}")
         test_dataloaders_dict[timestamp] = DataLoader(
             test_ds,
-            batch_size=cfg.training.train_batch_size,
+            batch_size=cfg.training.eval_batch_size,
             shuffle=False,  # keep the order for consistent logging
             num_workers=num_workers,
             prefetch_factor=cfg.dataloaders.prefetch_factor,

@@ -57,7 +57,7 @@ def main(cfg: Config) -> None:
     hydra_cfg = HydraConfig.get()
 
     # Logging
-    logger: Logger = getLogger(__name__)
+    logger: Logger = getLogger(Path(__file__).stem)
 
     try:
         terminal_width = get_terminal_size().columns
@@ -360,7 +360,7 @@ THINGS_TO_GITIGNORE = [
     "checkpoints",
     "logs.log",
     "saved_model",
-    "saved_trajectories",
+    "saved_artifacts",
     ".tmp_dataloader",
     ".gitignore",
     ".hydra",
@@ -416,8 +416,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
         source_path = Path(cfg.path_to_script_parent_folder, file_or_folder_name)
         destination_path = Path(this_experiment_folder, file_or_folder_name)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
-        p = Path(file_or_folder_name)
-        if p.is_file():
+        if source_path.is_file():
             if destination_path.exists():
                 destination_path.unlink()
             shutil.copy2(source_path, destination_path)

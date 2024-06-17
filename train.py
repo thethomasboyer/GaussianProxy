@@ -19,8 +19,6 @@ from rich.traceback import install
 from termcolor import colored
 from torch.optim import AdamW, Optimizer
 from torch.optim.lr_scheduler import LinearLR, LRScheduler
-
-# from torchinfo import summary
 from wandb.sdk.wandb_run import Run as WandBRun
 
 from conf.conf import Config
@@ -52,7 +50,7 @@ def main(cfg: Config) -> None:
     hydra_cfg = HydraConfig.get()
 
     # ------------------------------------ Logging -----------------------------------
-    logger: MultiProcessAdapter = get_logger(__name__)
+    logger: MultiProcessAdapter = get_logger(Path(__file__).stem)
 
     # ---------------------------------- Accelerator ---------------------------------
     this_run_folder = Path(cfg.exp_parent_folder, cfg.project, cfg.run_name)
@@ -78,9 +76,8 @@ def main(cfg: Config) -> None:
 
     # ----------------------------- Repository Structure -----------------------------
     (
-        tmp_dataloader_path,
         models_save_folder,
-        saved_trajectories_folder,
+        saved_artifacts_folder,
     ) = create_repo_structure(cfg, accelerator, logger, this_run_folder)
     accelerator.wait_for_everyone()
 
@@ -157,7 +154,7 @@ def main(cfg: Config) -> None:
             args_checker(cfg, logger, False)  # check again after debug modifications 😈
 
     # ------------------------------------- Net -------------------------------------
-    net = UNet2DModel(**OmegaConf.to_container(cfg.net))
+    net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # type: ignore
 
     # video time encoding
     num_channels_out_of_first_block_UNet = net.time_proj.num_channels
@@ -167,29 +164,6 @@ def main(cfg: Config) -> None:
         flip_sin_to_cos=True,
         downscale_freq_shift=1,
     )
-
-    # prepare the net here so that fused optimizers can be used
-    net: UNet2DModel = accelerator.prepare(net)
-
-    # video time encoder prepared later
-
-    # compile models
-    if cfg.torch_compile.do_compile:
-        net = torch.compile(
-            net,  # type: ignore
-            fullgraph=cfg.torch_compile.fullgraph,
-            dynamic=cfg.torch_compile.dynamic,
-            backend=cfg.torch_compile.backend,
-            mode=cfg.torch_compile.mode,
-        )
-
-        video_time_encoding = torch.compile(
-            video_time_encoding,
-            fullgraph=cfg.torch_compile.fullgraph,
-            dynamic=cfg.torch_compile.dynamic,
-            backend=cfg.torch_compile.backend,
-            mode=cfg.torch_compile.mode,
-        )
 
     # --------------------------------- Miscellaneous --------------------------------
     # # Create EMA for the models
@@ -236,18 +210,17 @@ def main(cfg: Config) -> None:
 
     # ---------------------------- Learning Rate Scheduler ----------------------------
     lr_scheduler: LRScheduler = LinearLR(optimizer=optimizer, total_iters=cfg.training.nb_time_samplings)
-    accelerator.register_for_checkpointing(lr_scheduler)
+    # accelerator.register_for_checkpointing(lr_scheduler)
 
     # ----------------------------- Distributed Compute  -----------------------------
-    # dataloaders:
-    for key, dl in train_datasets.items():
-        train_datasets[key] = accelerator.prepare(dl)
+    # dataloaders (test only, train is raw dataset):
     for key, dl in test_dataloaders.items():
         test_dataloaders[key] = accelerator.prepare(dl)
 
-    # nets: done before, when instantiating them
+    # net (includes torch.compile):
+    net = accelerator.prepare(net)
 
-    # video time encoding:
+    # video time encoding (includes torch.compile):
     video_time_encoding = accelerator.prepare(video_time_encoding)
 
     # optimizer:
@@ -274,44 +247,6 @@ def main(cfg: Config) -> None:
     # ------------------------------------ Dynamic -----------------------------------
     dyn = DDIMScheduler(**vars(cfg.dynamic))
 
-    # ----------------------------- Nets characteristics -----------------------------
-    # if accelerator.is_main_process:
-    #     video_time_codes = self.video_time_encoding(time)
-    #     s = summary(
-    #         net,
-    #         input_size=(
-    #             cfg.training.train_batch_size,
-    #             cfg.dataset.data_shape[0],
-    #             *cfg.dataset.data_shape[1:],
-    #         ),
-    #         timestep=0,
-    #         encoder_hidden_states=torch.zeros((cfg.training.train_batch_size, 1, 1)),
-    #         class_labels=
-    #         device=accelerator.device,
-    #         depth=10,  # Increase this value to show more details
-    #         col_names=[
-    #             "input_size",
-    #             "output_size",
-    #             "num_params",
-    #             "params_percent",
-    #             "kernel_size",
-    #             "mult_adds",
-    #             "trainable",
-    #         ],
-    #         verbose=0,
-    #     )
-    #     net_summary_file = (this_run_folder / "net_summary.txt").as_posix()
-    #     with open(net_summary_file, "w", encoding="utf-8") as f:
-    #         print(s, file=f)
-    #     # Save the file with wandb
-    #     wandb.save(net_summary_file)
-    #     # Log memory usage (gives weird numbers...)
-    #     max_mem = round(torch.cuda.max_memory_allocated(accelerator.device) / 1024**3, 1)
-    #     logger.info(
-    #         f"{max_mem}GB allocated during forward pass with inference_batch_size={cfg.training.inference_batch_size} on device {accelerator.device}"
-    #     )
-    # accelerator.wait_for_everyone()
-
     # --------------------------------- Training loop --------------------------------
     trainer: TimeDiffusion = TimeDiffusion(
         dynamic=dyn,
@@ -328,7 +263,7 @@ def main(cfg: Config) -> None:
         logger,
         hydra_cfg.run.dir,
         models_save_folder,
-        saved_trajectories_folder,
+        saved_artifacts_folder,
         cfg.training,
         cfg.checkpointing,
         resuming_args,

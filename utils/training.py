@@ -13,6 +13,7 @@ from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
 from torch import Tensor
 from torch.optim import Optimizer
@@ -22,7 +23,7 @@ from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader, Dataset
 
 from conf.conf import Checkpointing, Config, Training
-from utils.misc import get_evenly_spaced_timesteps  # , save_trajectories_log_videos
+from utils.misc import get_evenly_spaced_timesteps, save_eval_artifacts_log_to_wandb
 from utils.models import VideoTimeEncoding
 
 
@@ -66,7 +67,7 @@ class TimeDiffusion:
     logger: MultiProcessAdapter = field(init=False)
     output_dir: str = field(init=False)
     model_save_folder: Path = field(init=False)
-    saved_trajectories_folder: Path = field(init=False)
+    saved_artifacts_folder: Path = field(init=False)
     # inferred constant attributes
     _nb_empirical_dists: int = field(init=False)
     _empirical_dists_timesteps: list[float] = field(init=False)
@@ -118,7 +119,7 @@ class TimeDiffusion:
         logger: MultiProcessAdapter,
         output_dir: str,
         model_save_folder: Path,
-        saved_trajectories_folder: Path,
+        saved_artifacts_folder: Path,
         training_cfg: Training,
         checkpointing_cfg: Checkpointing,
         resuming_args: Optional[ResumingArgs] = None,
@@ -140,7 +141,7 @@ class TimeDiffusion:
             lr_scheduler,
             logger,
             model_save_folder,
-            saved_trajectories_folder,
+            saved_artifacts_folder,
             resuming_args,
         )
 
@@ -165,7 +166,7 @@ class TimeDiffusion:
 
         epochs_pbar = pbar_manager.counter(
             total=self.training_cfg.nb_epochs,
-            desc="Epoch",
+            desc="Epochs" + 32 * " ",
             position=1,
             enable=self.accelerator.is_main_process,
             leave=False,
@@ -216,7 +217,7 @@ class TimeDiffusion:
         lr_scheduler: LRScheduler,
         logger: MultiProcessAdapter,
         model_save_folder: Path,
-        saved_trajectories_folder: Path,
+        saved_artifacts_folder: Path,
         resuming_args: Optional[ResumingArgs],
     ):
         """Fit some remaining attributes before fitting."""
@@ -230,7 +231,7 @@ class TimeDiffusion:
         self.lr_scheduler = lr_scheduler
         self.logger = logger
         self.model_save_folder = model_save_folder
-        self.saved_trajectories_folder = saved_trajectories_folder
+        self.saved_artifacts_folder = saved_artifacts_folder
         # resuming args
         if resuming_args is None:
             self._resuming_args = ResumingArgs()
@@ -253,8 +254,8 @@ class TimeDiffusion:
         # loop through batches
         batches_pbar = pbar_manager.counter(
             total=self.training_cfg.nb_time_samplings,
-            position=4,
-            desc="Iterating over training data batches" + 14 * " ",
+            position=2,
+            desc="Iterating over training data batches" + 2 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
         )
@@ -286,9 +287,18 @@ class TimeDiffusion:
                 self.training_cfg.eval_every_n_opt_steps is not None
                 and self.global_optimization_step % self.training_cfg.eval_every_n_opt_steps == 0
             ):
+                batches_pbar.close()  # close otherwise interference w/ evaluation pbar
                 self._evaluate(
                     test_dataloaders,
                     pbar_manager,
+                )
+                batches_pbar = pbar_manager.counter(
+                    total=self.training_cfg.nb_time_samplings,
+                    position=2,
+                    desc="Iterating over training data batches" + 2 * " ",
+                    enable=self.accelerator.is_main_process,
+                    leave=False,
+                    count=self.instant_batch_idx,
                 )
             self.accelerator.wait_for_everyone()
         batches_pbar.close()
@@ -371,7 +381,7 @@ class TimeDiffusion:
 
         # Sample a random diffusion timestep
         diff_timesteps = torch.randint(
-            0, self.dynamic.num_train_timesteps, (batch.shape[0],), device=self.accelerator.device
+            0, self.dynamic.config["num_train_timesteps"], (batch.shape[0],), device=self.accelerator.device
         )
 
         # Forward diffusion process
@@ -443,12 +453,117 @@ class TimeDiffusion:
         Generate inference trajectories, compute metrics and save the model if best to date.
 
         Should be called by all processes.
+
+        Two steps are performed on each batch of the first dataloader:
+            1. Perform inversion to obtain the starting Gaussian
+            2. Generate te trajectory from that inverted Gaussian sample
+
+        Note that any other dataloader than the first one is actually not used for evaluation.
         """
+        # Checks
+        assert (
+            list(dataloaders.keys())[0] == 0
+        ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
+
+        # Setup schedulers
+        inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # type: ignore
+        inverted_scheduler.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
+        self.dynamic.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
+
+        # Use only 1st dataloader for now TODO
+        first_dl = list(dataloaders.values())[0]
+
+        # Misc.
         torch.cuda.empty_cache()
         self.logger.info(f"Starting evaluation on process ({self.accelerator.device})", main_process_only=False)
-        # TODO
-        pass
-        # raise NotImplementedError
+        eval_batches_pbar = pbar_manager.counter(
+            total=len(first_dl),
+            position=2,
+            desc="Iterating over evaluation data batches",
+            enable=self.accelerator.is_main_process,
+            leave=False,
+        )
+
+        # Generate & evaluate the trajectories
+        for batch_idx, batch in enumerate(iter(first_dl)):
+            inverted_gauss = batch
+            inversion_video_time = self.video_time_encoding(0, batch.shape[0])
+
+            # 0. Save the to-be inverted images
+            if batch_idx == 0:
+                # PIL RGB mode expects 3x8-bit pixels in (H, W, C) format
+                save_eval_artifacts_log_to_wandb(
+                    batch,
+                    self.saved_artifacts_folder,
+                    self.global_optimization_step,
+                    self.accelerator,
+                    self.logger,
+                    "starting_samples",
+                    ["[-1;1] raw"],
+                )
+
+            # 1. Generate the inverted Gaussians
+            for t in inverted_scheduler.timesteps:
+                model_output = self.net(inverted_gauss, t, inversion_video_time, return_dict=False)[0]
+                inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
+            if batch_idx == 0:
+                save_eval_artifacts_log_to_wandb(
+                    inverted_gauss,
+                    self.saved_artifacts_folder,
+                    self.global_optimization_step,
+                    self.accelerator,
+                    self.logger,
+                    "inversions",
+                    ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+                )
+
+            # 1.5 Regenerate the starting samples from their inversion
+            regen = inverted_gauss.clone()
+            for t in self.dynamic.timesteps:
+                model_output = self.net(regen, t, inversion_video_time, return_dict=False)[0]
+                regen = self.dynamic.step(model_output, int(t), regen, return_dict=False)[0]
+            if batch_idx == 0:
+                save_eval_artifacts_log_to_wandb(
+                    regen,
+                    self.saved_artifacts_folder,
+                    self.global_optimization_step,
+                    self.accelerator,
+                    self.logger,
+                    "regenerations",
+                    ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+                )
+
+            # 2. Generate the trajectory from it
+            image = inverted_gauss
+            video = []
+            # TODO: parallelize the generation along video time?
+            for video_timestep in torch.linspace(0, 1, self.training_cfg.eval_nb_video_timesteps):
+                video_time = self.video_time_encoding(video_timestep, batch.shape[0])
+                for t in self.dynamic.timesteps:
+                    model_output = self.net(image, t, video_time, return_dict=False)[0]
+                    image = self.dynamic.step(model_output, int(t), image, return_dict=False)[0]
+                video.append(image)
+            video = torch.stack(video)
+            if batch_idx == 0:
+                save_eval_artifacts_log_to_wandb(
+                    video,
+                    self.saved_artifacts_folder,
+                    self.global_optimization_step,
+                    self.accelerator,
+                    self.logger,
+                    "trajectories",
+                    ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+                )
+
+            eval_batches_pbar.update()
+            break  # TODO: keep generating on the entire test set and evaluate the trajectories
+
+        # 3. Evaluate the trajectories
+        self.logger.warning_once("Should implement evaluation metrics here.")
+        # TODO: compute metric on full test data
+
+        eval_batches_pbar.close()
+        self.logger.info(f"Finished evaluation on process ({self.accelerator.device})", main_process_only=False)
 
     def _save_model(self):
         """
