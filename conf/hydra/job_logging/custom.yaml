@@ -27,4 +27,9 @@ root:
   handlers:
   - console
   - file
+logger:
+  matplotlib:
+    level: INFO
+  PIL:
+    level: INFO
 disable_existing_loggers: true
