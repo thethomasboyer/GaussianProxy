@@ -2,7 +2,8 @@ import json
 import os
 import shutil
 from dataclasses import dataclass, field, fields
-from logging import FileHandler, makeLogRecord  # , INFO
+
+# from logging import INFO, FileHandler, makeLogRecord
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -468,7 +469,9 @@ class TimeDiffusion:
         # Setup schedulers
         inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # type: ignore
         inverted_scheduler.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
-        self.dynamic.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
+        # duplicate the scheduler to not mess with the training one
+        inference_scheduler = DDIMScheduler.from_config(self.dynamic.config)
+        inference_scheduler.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
 
         # Use only 1st dataloader for now TODO
         first_dl = list(dataloaders.values())[0]
@@ -519,9 +522,9 @@ class TimeDiffusion:
 
             # 1.5 Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
-            for t in self.dynamic.timesteps:
+            for t in inference_scheduler.timesteps:
                 model_output = self.net(regen, t, inversion_video_time, return_dict=False)[0]
-                regen = self.dynamic.step(model_output, int(t), regen, return_dict=False)[0]
+                regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
                     regen,
@@ -534,15 +537,37 @@ class TimeDiffusion:
                 )
 
             # 2. Generate the trajectory from it
+            # TODO: parallelize the generation along video time?
             image = inverted_gauss
             video = []
-            # TODO: parallelize the generation along video time?
-            for video_timestep in torch.linspace(0, 1, self.training_cfg.eval_nb_video_timesteps):
+            video_time_pbar = pbar_manager.counter(
+                total=self.training_cfg.eval_nb_video_timesteps,
+                position=3,
+                desc="Generating trajectories" + " " * 15,
+                enable=self.accelerator.is_main_process,
+                leave=False,
+            )
+
+            for video_t_idx, video_timestep in enumerate(
+                torch.linspace(0, 1, self.training_cfg.eval_nb_video_timesteps)
+            ):
+                self.logger.debug(f"Video timestep index {video_t_idx} / {self.training_cfg.eval_nb_video_timesteps}")
                 video_time = self.video_time_encoding(video_timestep, batch.shape[0])
-                for t in self.dynamic.timesteps:
+
+                for t in inference_scheduler.timesteps:
                     model_output = self.net(image, t, video_time, return_dict=False)[0]
-                    image = self.dynamic.step(model_output, int(t), image, return_dict=False)[0]
+                    image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+
                 video.append(image)
+                video_time_pbar.update()
+                # _log_to_file_only(
+                #     self.logger,
+                #     f"Video time {video_timestep}/{self.training_cfg.eval_nb_video_timesteps}",
+                #     INFO,
+                # )
+
+            video_time_pbar.close()
+
             video = torch.stack(video)
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -664,23 +689,26 @@ def resume_from_checkpoint(
     return resuming_args
 
 
-def _log_to_file_only(logger: MultiProcessAdapter, msg: str, level: int) -> None:
-    """
-    Logs a message to file handlers only.
+# def _log_to_file_only(logger: MultiProcessAdapter, msg: str, level: int) -> None:
+#     """
+#     Logs a message to file handlers only.
 
-    This function iterates over all handlers attached to the logger,
-    and if the handler is a FileHandler, it directly calls its emit
-    method to log the message. This way, only the file handlers will
-    log the message.
+#     This function iterates over all handlers attached to the logger,
+#     and if the handler is a FileHandler, it directly calls its emit
+#     method to log the message. This way, only the file handlers will
+#     log the message.
 
-    Args:
-        logger (MultiProcessAdapter): The logger instance with attached handlers.
-        msg (str): The message to log.
-        level (int): The logging level.
+#     Args:
+#         logger (MultiProcessAdapter): The logger instance with attached handlers.
+#         msg (str): The message to log.
+#         level (int): The logging level.
 
-    Returns:
-        None
-    """
-    for handler in logger.logger.handlers:
-        if isinstance(handler, FileHandler):  # TODO: doesn't work
-            handler.emit(makeLogRecord({"msg": msg, "level": level}))
+#     Returns:
+#         None
+#     """
+#     logger.debug(f"DEBUG: logger.handlers={logger.handlers}")
+#     for handler in logger.logger.handlers:
+#         if isinstance(handler, FileHandler):  # TODO: doesn't work
+#             handler.emit(makeLogRecord({"msg": msg, "level": level}))
+#         else:
+#             logger.debug(f"Skipping handler of type {type(handler)}")
