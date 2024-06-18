@@ -30,6 +30,8 @@ root:
 logger:
   matplotlib:
     level: INFO
+  PIL.PngImagePlugin:
+    level: INFO
   PIL:
     level: INFO
 disable_existing_loggers: true
