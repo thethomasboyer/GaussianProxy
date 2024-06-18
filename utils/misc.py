@@ -115,6 +115,7 @@ def modify_args_for_debug(
             "eval_every_n_opt_steps",
         ): 300,
         ("training", "eval_nb_diffusion_timesteps"): 10,
+        ("training", "eval_nb_video_timesteps"): 30,
     }
     for param_name_tuple, new_param_value in changes.items():
         # Navigate through the levels of cfg
