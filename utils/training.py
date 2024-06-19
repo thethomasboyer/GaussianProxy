@@ -470,7 +470,7 @@ class TimeDiffusion:
         inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # type: ignore
         inverted_scheduler.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
         # duplicate the scheduler to not mess with the training one
-        inference_scheduler = DDIMScheduler.from_config(self.dynamic.config)
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
         inference_scheduler.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
 
         # Use only 1st dataloader for now TODO
@@ -502,7 +502,7 @@ class TimeDiffusion:
                     self.accelerator,
                     self.logger,
                     "starting_samples",
-                    ["[-1;1] raw"],
+                    ["[-1;1] raw", "image min-max"],
                 )
 
             # 1. Generate the inverted Gaussians
@@ -517,7 +517,7 @@ class TimeDiffusion:
                     self.accelerator,
                     self.logger,
                     "inversions",
-                    ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    ["image min-max"],
                 )
 
             # 1.5 Regenerate the starting samples from their inversion
