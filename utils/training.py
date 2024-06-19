@@ -569,6 +569,18 @@ class TimeDiffusion:
             video_time_pbar.close()
 
             video = torch.stack(video)
+            # wandb expects (batch_size, video_time, channels, height, width)
+            video = video.permute(1, 0, 2, 3, 4)
+            expected_video_shape = (
+                self.training_cfg.eval_batch_size,
+                self.training_cfg.eval_nb_video_timesteps,
+                self.accelerator.unwrap_model(self.net).config["out_channels"],
+                self.accelerator.unwrap_model(self.net).config["sample_size"],
+                self.accelerator.unwrap_model(self.net).config["sample_size"],
+            )
+            assert (
+                video.shape == expected_video_shape
+            ), f"Expected video shape {expected_video_shape}, got {video.shape}"
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
                     video,

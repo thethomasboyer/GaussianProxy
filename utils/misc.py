@@ -195,7 +195,7 @@ def save_eval_artifacts_log_to_wandb(
         f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}", main_process_only=False
     )
     logger.debug(
-        f"On process {accelerator.process_index}: shape={sel_to_save.shape} | min={sel_to_save.min()} | max={sel_to_save.max()}",
+        f"On process {accelerator.process_index}, data to save is: shape={sel_to_save.shape} | min={sel_to_save.min()} | max={sel_to_save.max()}",
         main_process_only=False,
     )
 
