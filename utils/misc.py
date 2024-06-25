@@ -157,7 +157,7 @@ def sample_with_replacement(
     return data
 
 
-ACCEPTED_NAMES_FOR_LOGGING = ("trajectories", "inversions", "starting_samples", "regenerations")
+ACCEPTED_NAMES_FOR_LOGGING = ("trajectories", "inversions", "starting_samples", "regenerations", "simple_generations")
 
 
 @torch.inference_mode()
@@ -170,6 +170,7 @@ def save_eval_artifacts_log_to_wandb(
     name: str,
     logging_normalization: list[str],
     max_nb_to_save_and_log: int = 16,
+    captions: None | list[None] | list[str] = None,
 ):
     """
     Save trajectories (videos) to disk and log images and videos to W&B.
@@ -185,6 +186,8 @@ def save_eval_artifacts_log_to_wandb(
 
     # Save some raw images / trajectories to disk
     sel_to_save = tensors_to_save[:max_nb_to_save_and_log]
+    if captions is None:
+        captions = [None] * len(sel_to_save)
     this_proc_save_folder = save_folder / f"proc_{accelerator.process_index}"
     file_path = this_proc_save_folder / name / f"step_{global_optimization_step}.pt"
     file_path.parent.mkdir(exist_ok=True, parents=True)
@@ -227,6 +230,8 @@ def save_eval_artifacts_log_to_wandb(
                 wandb_title = "Starting samples"
             case "regenerations":
                 wandb_title = "Regenerated samples"
+            case "simple_generations":
+                wandb_title = "Pure sample generations"
             case _:
                 raise ValueError(
                     f"Unknown name: {name}; expected one of 'inversions' or 'starting_samples' for 4D tensors"
@@ -238,7 +243,11 @@ def save_eval_artifacts_log_to_wandb(
                 for image in normalized_elements_for_logging[norm_method]
             ]
             accelerator.log(
-                {f"{wandb_title}/{norm_method} normalized": [wandb.Image(image) for image in images]},
+                {
+                    f"{wandb_title}/{norm_method} normalized": [
+                        wandb.Image(image, caption=captions[img_idx]) for img_idx, image in enumerate(images)
+                    ]
+                },
                 step=global_optimization_step,
             )
         logger.info(f"Logged {len(sel_to_save)} {wandb_title[0].lower() + wandb_title[1:]} to W&B on main process")

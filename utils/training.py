@@ -171,6 +171,7 @@ class TimeDiffusion:
             position=1,
             enable=self.accelerator.is_main_process,
             leave=False,
+            min_delta=1,
         )
 
         # profiling # TODO: move to train.py
@@ -259,6 +260,7 @@ class TimeDiffusion:
             desc="Iterating over training data batches" + 2 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
+            min_delta=1,
         )
         for batch_idx, (time, batch) in enumerate(
             self._yield_data_batches(train_datasets, self.logger, self.training_cfg.nb_time_samplings)
@@ -300,12 +302,14 @@ class TimeDiffusion:
                     enable=self.accelerator.is_main_process,
                     leave=False,
                     count=self.instant_batch_idx,
+                    min_delta=1,
                 )
             self.accelerator.wait_for_everyone()
         batches_pbar.close()
         # update epoch
         self.global_epoch += 1
 
+    @torch.no_grad()
     def _yield_data_batches(
         self, datasets: dict[float, Dataset], logger: MultiProcessAdapter, nb_time_samplings: int
     ) -> Generator[tuple[float, Tensor], None, None]:
@@ -355,7 +359,7 @@ class TimeDiffusion:
             # get distance from each time (x such that t = x * t- + (1-x) * t+)
             x = (t_plus - t) / (t_plus - t_minus)
 
-            # form the batch
+            # form the batch # TODO: build in parallel!
             batch = []
             for _ in range(self.training_cfg.train_batch_size):
                 if torch.rand(1) < x:
@@ -389,12 +393,15 @@ class TimeDiffusion:
         noisy_batch = self.dynamic.add_noise(batch, noise, diff_timesteps)  # type: ignore
 
         # Encode time
-        video_time_codes = self.video_time_encoding(time, batch.shape[0])
+        video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
 
         # Get model predictions
-        pred = self.net(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]
+        pred = self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]
 
         # Compute loss
+        assert (
+            self.dynamic.config["prediction_type"] == "epsilon"
+        ), f"Expecting epsilon prediction type, got {self.dynamic.config['prediction_type']}"
         loss = self._loss(pred, noise)
 
         # Backward pass
@@ -473,28 +480,61 @@ class TimeDiffusion:
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
         inference_scheduler.set_timesteps(self.training_cfg.eval_nb_diffusion_timesteps)
 
-        # Use only 1st dataloader for now TODO
-        first_dl = list(dataloaders.values())[0]
-
         # Misc.
         torch.cuda.empty_cache()
         self.logger.info(f"Starting evaluation on process ({self.accelerator.device})", main_process_only=False)
+
+        # At first perform some pure sample generation
+        # sample Gaussian noise (always the same one throughout training)
+        rng = torch.Generator(self.accelerator.device).manual_seed(42)
+        noise = torch.randn(
+            self.training_cfg.eval_batch_size,
+            self.accelerator.unwrap_model(self.net).config["in_channels"],
+            self.accelerator.unwrap_model(self.net).config["sample_size"],
+            self.accelerator.unwrap_model(self.net).config["sample_size"],
+            device=self.accelerator.device,
+            generator=rng,
+        )
+
+        # sample a random video time (always the same one throughout training)
+        random_video_time = torch.rand(self.training_cfg.eval_batch_size, device=self.accelerator.device, generator=rng)
+        random_video_time_enc = self.video_time_encoding.forward(random_video_time)
+
+        # generate a sample
+        image = noise
+        for t in inference_scheduler.timesteps:
+            model_output = self.net.forward(image, t, random_video_time_enc, return_dict=False)[0]
+            image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+        save_eval_artifacts_log_to_wandb(
+            image,
+            self.saved_artifacts_folder,
+            self.global_optimization_step,
+            self.accelerator,
+            self.logger,
+            "simple_generations",
+            ["[-1;1] raw", "image min-max", "[-1;1] clipped"],
+            captions=[f"time: {t}" for t in random_video_time],
+        )
+
+        # Use only 1st dataloader for now TODO
+        first_dl = list(dataloaders.values())[0]
         eval_batches_pbar = pbar_manager.counter(
             total=len(first_dl),
             position=2,
             desc="Iterating over evaluation data batches",
             enable=self.accelerator.is_main_process,
             leave=False,
+            min_delta=1,
         )
+        eval_batches_pbar.refresh()
 
-        # Generate & evaluate the trajectories
+        # Now generate & evaluate the trajectories
         for batch_idx, batch in enumerate(iter(first_dl)):
             inverted_gauss = batch
-            inversion_video_time = self.video_time_encoding(0, batch.shape[0])
+            inversion_video_time = self.video_time_encoding.forward(0, batch.shape[0])
 
-            # 0. Save the to-be inverted images
+            # 1. Save the to-be inverted images
             if batch_idx == 0:
-                # PIL RGB mode expects 3x8-bit pixels in (H, W, C) format
                 save_eval_artifacts_log_to_wandb(
                     batch,
                     self.saved_artifacts_folder,
@@ -505,9 +545,9 @@ class TimeDiffusion:
                     ["[-1;1] raw", "image min-max"],
                 )
 
-            # 1. Generate the inverted Gaussians
+            # 2. Generate the inverted Gaussians
             for t in inverted_scheduler.timesteps:
-                model_output = self.net(inverted_gauss, t, inversion_video_time, return_dict=False)[0]
+                model_output = self.net.forward(inverted_gauss, t, inversion_video_time, return_dict=False)[0]
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -520,10 +560,10 @@ class TimeDiffusion:
                     ["image min-max"],
                 )
 
-            # 1.5 Regenerate the starting samples from their inversion
+            # 3. Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
             for t in inference_scheduler.timesteps:
-                model_output = self.net(regen, t, inversion_video_time, return_dict=False)[0]
+                model_output = self.net.forward(regen, t, inversion_video_time, return_dict=False)[0]
                 regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -536,26 +576,25 @@ class TimeDiffusion:
                     ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
                 )
 
-            # 2. Generate the trajectory from it
+            # 4. Generate the trajectory from it
             # TODO: parallelize the generation along video time?
             image = inverted_gauss
             video = []
             video_time_pbar = pbar_manager.counter(
                 total=self.training_cfg.eval_nb_video_timesteps,
                 position=3,
-                desc="Generating trajectories" + " " * 15,
+                desc="Generating trajectory: video timesteps ",
                 enable=self.accelerator.is_main_process,
                 leave=False,
+                min_delta=1,
             )
 
-            for video_t_idx, video_timestep in enumerate(
-                torch.linspace(0, 1, self.training_cfg.eval_nb_video_timesteps)
-            ):
+            for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.training_cfg.eval_nb_video_timesteps)):
                 self.logger.debug(f"Video timestep index {video_t_idx} / {self.training_cfg.eval_nb_video_timesteps}")
-                video_time = self.video_time_encoding(video_timestep, batch.shape[0])
+                video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
-                    model_output = self.net(image, t, video_time, return_dict=False)[0]
+                    model_output = self.net.forward(image, t, video_time_enc, return_dict=False)[0]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
@@ -566,7 +605,7 @@ class TimeDiffusion:
                 #     INFO,
                 # )
 
-            video_time_pbar.close()
+            video_time_pbar.close(clear=True)
 
             video = torch.stack(video)
             # wandb expects (batch_size, video_time, channels, height, width)
