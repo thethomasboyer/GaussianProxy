@@ -4,12 +4,12 @@
 # This script acts as a wrapper-launcher.
 #
 # It performs the following tasks:
+# - configure SLURM args (if enabled)
 # - copy the code and experiment config to the experiment folder
 # (to ensure that is is not modified if the actual job launch is delayed,
 # which is quite expected...)
-# - backup any older code/config present in the project/run directory
+# - show a git diff on the code & config and ask for confirmation
 # - configure accelerate
-# - configure SLURM (if enabled)
 # - set some environment variables
 # - submit the task (or run it directly)
 
@@ -17,6 +17,7 @@
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from logging import Logger, getLogger
 from os import get_terminal_size
 from pathlib import Path
@@ -391,6 +392,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     hydra_cfg = HydraConfig.get()
     this_experiment_folder = Path(hydra_cfg.run.dir)
     this_experiment_folder.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Copying code and config to {this_experiment_folder}")
 
     # 3. Get git hash of current state of affairs
     repo = Repo.init(this_experiment_folder)
@@ -408,28 +410,28 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     dst_config_path = Path(this_experiment_folder, launcher_config_path.name)
     if dst_config_path.exists():
         shutil.rmtree(dst_config_path)
-
     task_config_path = shutil.copytree(
         launcher_config_path,
         dst_config_path,
         dirs_exist_ok=True,
     )
     _set_files_read_only(dst_config_path)
+    logger.debug(f"Copied config {launcher_config_name} to {this_experiment_folder}")
 
     # 5. Copy the code to the experiment folder
     for file_or_folder_name in CODE_TO_COPY:
         source_path = Path(cfg.path_to_script_parent_folder, file_or_folder_name)
         destination_path = Path(this_experiment_folder, file_or_folder_name)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
-        if source_path.is_file():
+        p = Path(file_or_folder_name)
+        if p.is_file():
             if destination_path.exists():
                 destination_path.unlink()
             shutil.copy2(source_path, destination_path)
         else:
             if destination_path.exists():
                 shutil.rmtree(destination_path)
-            shutil.copytree(source_path, destination_path)
-
+            shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
     _set_files_read_only(this_experiment_folder)
     logger.debug(f"Copied files or folders: {CODE_TO_COPY} to {this_experiment_folder}")
 
@@ -438,7 +440,8 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
         # we need to add everything in case the repo was not initialized yet
         repo.git.add(f)
     if repo.is_dirty():
-        repo.git.commit("-m", "automated diff at launch")
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        repo.git.commit("-m", f"automated commit of dirty repo at launch time: {current_time}")
         logger.debug(f"Committed changes at {this_experiment_folder} with hash {repo.head.commit.hexsha}")
 
     # first instanciation of this repo
@@ -451,12 +454,20 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     # otherwise show diff and ask for confirmation
     new_commit = repo.head.commit
     diff = repo.git.diff("--unified=0", "--color", prev_commit, new_commit)
-    logger.info(f"Git diff with previous commit at {this_experiment_folder}:\n{diff}")
+    logger.info(f"Git diff with previous commit: {prev_commit.message}\n{diff}")
 
     # 7. Get confirmation of launch
     confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/): ")
     if confirmation != "y":
         logger.info("Launch aborted")
+        if prev_commit is not None:
+            logger.warning(f"Reverting changes in the experiment folder {this_experiment_folder}")
+            repo.git.reset("--hard", prev_commit)
+        else:
+            repo.git.update_ref("-d", "HEAD")
+            logger.warning(
+                f"Deleting HEAD ref in the experiment folder {this_experiment_folder} as it was the first commit"
+            )
         sys.exit()
 
     return task_config_path, launcher_config_name, this_experiment_folder
