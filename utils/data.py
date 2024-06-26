@@ -89,9 +89,11 @@ def _biotine_2D_image_builder(
             train_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
         logger.info(f"Built train dataset for timestamp {timestamp}:\n{train_ds}")
+        # batch_size does *NOT* correspond to the actual train batch size
+        # *Time-interpolated* batches will be manually built afterwards!
         train_dataloaders_dict[timestamp] = DataLoader(
             train_ds,
-            batch_size=1,  # batch_size *MUST* be 1 here! *Time-interpolated* batches will be manually built afterwards!
+            batch_size=max(1, cfg.training.train_batch_size // 2),
             shuffle=True,
             num_workers=num_workers,
             prefetch_factor=cfg.dataloaders.train_prefetch_factor,

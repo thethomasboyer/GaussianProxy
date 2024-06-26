@@ -179,7 +179,9 @@ class TimeDiffusion:
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
+            count=self.resuming_args.start_global_epoch,
         )
+        epochs_pbar.refresh()
 
         # profiling # TODO: move to train.py
         if profile:
@@ -194,12 +196,8 @@ class TimeDiffusion:
         else:
             profiler = None
 
-        for epoch in range(self.training_cfg.nb_epochs):
+        for epoch in range(self.resuming_args.start_global_epoch, self.training_cfg.nb_epochs):
             self.epoch = epoch
-            if epoch < self.resuming_args.start_global_epoch:
-                epochs_pbar.update()
-                continue
-            epochs_pbar.refresh()
             self._fit_epoch(
                 train_timestep_dataloaders,
                 test_timestep_dataloaders,
@@ -267,7 +265,9 @@ class TimeDiffusion:
         """
         Fit a whole epoch of data.
         """
-        # loop through batches
+        init_count = (
+            self.resuming_args.start_instant_batch_idx if self.epoch == self.resuming_args.start_global_epoch else 0
+        )
         batches_pbar = pbar_manager.counter(
             total=self.training_cfg.nb_time_samplings,
             position=2,
@@ -275,18 +275,14 @@ class TimeDiffusion:
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
+            count=init_count,
         )
+        batches_pbar.refresh()
+        # loop through training batches
         for batch_idx, (time, batch) in enumerate(
-            self._yield_data_batches(train_dataloaders, self.logger, self.training_cfg.nb_time_samplings)
+            self._yield_data_batches(train_dataloaders, self.logger, self.training_cfg.nb_time_samplings - init_count)
         ):
             self.instant_batch_idx = batch_idx
-            if (
-                self.epoch == self.resuming_args.start_global_epoch
-                and batch_idx < self.resuming_args.start_instant_batch_idx
-            ):  # we're resuming
-                batches_pbar.update()
-                continue
-            batches_pbar.refresh()
             # set network to the right mode
             self.net.train()
             # gradient step here
@@ -376,36 +372,46 @@ class TimeDiffusion:
 
             # form the batch
             batch = []
-            for _ in range(self.training_cfg.train_batch_size):
-                # sample from t- with probability x, from t+ with probability 1-x
-                if torch.rand(1) < x:
-                    t_to_sample_from = t_minus
-                else:
-                    t_to_sample_from = t_plus
+            # sample from t- with probability x, from t+ with probability 1-x
+            random_sampling = torch.rand((self.training_cfg.train_batch_size,))
+
+            # now sample from the two dataloaders
+            nb_t_minus_samples = (random_sampling < x).int().sum().item()
+            nb_t_plus_samples = self.training_cfg.train_batch_size - nb_t_minus_samples
+            nb_samples_to_get = {t_minus: nb_t_minus_samples, t_plus: nb_t_plus_samples}
+            nb_samples_got = {t_minus: 0, t_plus: 0}
+
+            for t_to_sample_from in (t_minus, t_plus):
                 dl_to_sample_from = dataloaders_iterators[t_to_sample_from]
+                while nb_samples_got[t_to_sample_from] != nb_samples_to_get[t_to_sample_from]:
+                    # Sample a new batch and add it to the batch
+                    try:
+                        max_nb_samples_to_get = nb_samples_to_get[t_to_sample_from] - nb_samples_got[t_to_sample_from]
+                        new_sample = next(dl_to_sample_from)[:max_nb_samples_to_get]
+                        batch += new_sample
+                        nb_samples_got[t_to_sample_from] += len(new_sample)
+                    # DataLoaders will quickly be exhausted (resulting in silent hangs then undebuggable NCCL timeouts 🙃)
+                    # so reform them when they needed
+                    except StopIteration:
+                        self.logger.debug(
+                            f"Reforming dataloader for timestep {t_to_sample_from} on process {self.accelerator.process_index}",
+                            main_process_only=False,
+                        )
+                        dataloaders_iterators[t_to_sample_from] = iter(dataloaders[t_to_sample_from])
+                        dl_to_sample_from = dataloaders_iterators[t_to_sample_from]
 
-                # DataLoaders will quickly be exhausted (resulting in silent hangs then undebuggable NCCL timeouts 🙃)
-                # so reform them when they needed
-                try:
-                    sample = next(dl_to_sample_from)
-                except StopIteration:
-                    self.logger.debug(
-                        f"Reforming dataloader for timestep {t_to_sample_from} on process {self.accelerator.process_index}",
-                        main_process_only=False,
-                    )
-                    dataloaders_iterators[t_to_sample_from] = iter(dataloaders[t_to_sample_from])
-                    sample = next(dataloaders_iterators[t_to_sample_from])
+            # now concatenate tensors and manually move to device
+            # since training dataloaders are not prepared
+            batch = torch.stack(batch).to(self.accelerator.device)
 
-                # check shape and append
-                assert sample.shape == (
-                    1,
-                    *self.data_shape,
-                ), f"Expecting sample shape {(1, *self.data_shape)}, got {sample.shape}"
-                batch.append(sample)
+            # finally shuffle the batch so that seen empirical times are mixed
+            batch = batch[torch.randperm(batch.shape[0])]
 
-            # we concatenate tensors since each sample already has a fake batch size of 1
-            # and need to manually move to device since training dataloaders are not prepared
-            batch = torch.cat(batch).to(self.accelerator.device)
+            # check shape and append
+            assert batch.shape == (
+                self.training_cfg.train_batch_size,
+                *self.data_shape,
+            ), f"Expecting sample shape {(self.training_cfg.train_batch_size, *self.data_shape)}, got {batch.shape}"
 
             yield t, batch
 
