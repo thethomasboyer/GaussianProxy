@@ -21,7 +21,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from conf.conf import Checkpointing, Config, Training
 from utils.misc import get_evenly_spaced_timesteps, save_eval_artifacts_log_to_wandb
@@ -72,6 +72,7 @@ class TimeDiffusion:
     # inferred constant attributes
     _nb_empirical_dists: int = field(init=False)
     _empirical_dists_timesteps: list[float] = field(init=False)
+    _data_shape: tuple[int, int, int] = field(init=False)
     # resuming args
     _resuming_args: ResumingArgs = field(init=False)
     # instant state for checkpointing
@@ -111,9 +112,15 @@ class TimeDiffusion:
             raise RuntimeError("resuming_args is not set; fit should be called before trying to access it")
         return self._resuming_args
 
+    @property
+    def data_shape(self) -> tuple[int, int, int]:
+        if self._data_shape is None:
+            raise RuntimeError("data_shape is not set; fit should be called before trying to access it")
+        return self._data_shape
+
     def fit(
         self,
-        train_datasets: dict[int, Dataset],
+        train_dataloaders: dict[int, DataLoader],
         test_dataloaders: dict[int, DataLoader],
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
@@ -135,7 +142,7 @@ class TimeDiffusion:
         )
         # Set some attributes relative to the data
         self._fit_init(
-            train_datasets,
+            train_dataloaders,
             training_cfg,
             checkpointing_cfg,
             optimizer,
@@ -147,13 +154,13 @@ class TimeDiffusion:
         )
 
         # Modify dataloaders dicts to use the empirical distribution timesteps as keys, instead of a mere numbering
-        train_timestep_datasets: dict[float, Dataset] = {}
+        train_timestep_dataloaders: dict[float, DataLoader] = {}
         test_timestep_dataloaders: dict[float, DataLoader] = {}
-        for split, dls in [("train", train_datasets), ("test", test_dataloaders)]:
+        for split, dls in [("train", train_dataloaders), ("test", test_dataloaders)]:
             assert np.all(
                 np.diff(list(dls.keys())) > 0
             ), "Expecting original dataloaders to be numbered in increasing order."
-            timestep_dataloaders = train_timestep_datasets if split == "train" else test_timestep_dataloaders
+            timestep_dataloaders = train_timestep_dataloaders if split == "train" else test_timestep_dataloaders
             for dataloader_idx, dl in enumerate(dls.values()):
                 timestep_dataloaders[self.empirical_dists_timesteps[dataloader_idx]] = dl
             assert (
@@ -194,7 +201,7 @@ class TimeDiffusion:
                 continue
             epochs_pbar.refresh()
             self._fit_epoch(
-                train_timestep_datasets,
+                train_timestep_dataloaders,
                 test_timestep_dataloaders,
                 pbar_manager,
                 profiler,
@@ -212,7 +219,7 @@ class TimeDiffusion:
 
     def _fit_init(
         self,
-        train_datasets: dict[int, Dataset],
+        train_dataloaders: dict[int, DataLoader],
         training_cfg: Training,
         checkpointing_cfg: Checkpointing,
         optimizer: Optimizer,
@@ -224,7 +231,7 @@ class TimeDiffusion:
     ):
         """Fit some remaining attributes before fitting."""
         assert not hasattr(self, "._nb_empirical_dists"), "Already fitted"
-        self._nb_empirical_dists = len(train_datasets)
+        self._nb_empirical_dists = len(train_dataloaders)
         assert self._nb_empirical_dists > 1, "Expecting at least 2 empirical distributions to train the model."
         self._empirical_dists_timesteps = get_evenly_spaced_timesteps(self.nb_empirical_dists)
         self._training_cfg = training_cfg
@@ -242,10 +249,17 @@ class TimeDiffusion:
         self.global_optimization_step = self.resuming_args.start_global_optimization_step
         self.global_epoch = self.resuming_args.start_global_epoch
         self.best_model_to_date = self.resuming_args.best_model_to_date
+        # expected data shape
+        unwrapped_net_config = self.accelerator.unwrap_model(self.net).config
+        self._data_shape = (
+            unwrapped_net_config["in_channels"],
+            unwrapped_net_config["sample_size"],
+            unwrapped_net_config["sample_size"],
+        )
 
     def _fit_epoch(
         self,
-        train_datasets: dict[float, Dataset],
+        train_dataloaders: dict[float, DataLoader],
         test_dataloaders: dict[float, DataLoader],
         pbar_manager: Manager,
         profiler: Optional[torch_profile] = None,
@@ -263,7 +277,7 @@ class TimeDiffusion:
             min_delta=1,
         )
         for batch_idx, (time, batch) in enumerate(
-            self._yield_data_batches(train_datasets, self.logger, self.training_cfg.nb_time_samplings)
+            self._yield_data_batches(train_dataloaders, self.logger, self.training_cfg.nb_time_samplings)
         ):
             self.instant_batch_idx = batch_idx
             if (
@@ -311,10 +325,10 @@ class TimeDiffusion:
 
     @torch.no_grad()
     def _yield_data_batches(
-        self, datasets: dict[float, Dataset], logger: MultiProcessAdapter, nb_time_samplings: int
+        self, dataloaders: dict[float, DataLoader], logger: MultiProcessAdapter, nb_time_samplings: int
     ) -> Generator[tuple[float, Tensor], None, None]:
         """
-        Yield `nb_time_samplings` data batches from the given datasets.
+        Yield `nb_time_samplings` data batches from the given dataloaders.
 
         Each batch has an associated timestep uniformly sampled between 0 and 1,
         and the corresponding batch is formed by "interpolating" the two empirical distributions
@@ -329,17 +343,18 @@ class TimeDiffusion:
         Note that such behavior is only "stable" when the batch size is large enough. Typically, if batch size is 1
         then each batch will always have samples from one empirical distribution only: quite bad for training along
         continuous time... Along many epochs the theoretical end result will of course be the same.
-
-        If the datasets are of different sizes, only the common maximum number of *complete* batches
-        will be yielded, so it's important to shuffle the dataloaders somewhere during training...
         """
         # TODO: not actually needed! Just here for sanity check but actually this assert is wrong
+        first_dl = list(dataloaders.values())[0]
         assert all(
-            len(list(datasets.values())[0]) == len(ds) for ds in datasets.values()
-        ), "All datasets should have the same length"
+            len(first_dl) == len(dl) for dl in dataloaders.values()
+        ), "All dataloaders should have the same length"
         assert (
-            list(datasets.keys()) == self.empirical_dists_timesteps and list(datasets.keys()) == sorted(datasets.keys())
-        ), f"Expecting datasets to be ordered by timestep, got list(datasets.keys())={list(datasets.keys())} vs self.empirical_dists_timesteps={self.empirical_dists_timesteps}"
+            list(dataloaders.keys()) == self.empirical_dists_timesteps
+            and list(dataloaders.keys()) == sorted(dataloaders.keys())
+        ), f"Expecting dataloaders to be ordered by timestep, got list(dataloaders.keys())={list(dataloaders.keys())} vs self.empirical_dists_timesteps={self.empirical_dists_timesteps}"
+
+        dataloaders_iterators = {t: iter(dl) for t, dl in dataloaders.items()}
 
         for _ in range(nb_time_samplings):
             # sample a time between 0 and 1
@@ -359,15 +374,38 @@ class TimeDiffusion:
             # get distance from each time (x such that t = x * t- + (1-x) * t+)
             x = (t_plus - t) / (t_plus - t_minus)
 
-            # form the batch # TODO: build in parallel!
+            # form the batch
             batch = []
             for _ in range(self.training_cfg.train_batch_size):
+                # sample from t- with probability x, from t+ with probability 1-x
                 if torch.rand(1) < x:
-                    sample = datasets[t_minus][torch.randint(len(datasets[t_minus]), (1,))].to(self.accelerator.device)
+                    t_to_sample_from = t_minus
                 else:
-                    sample = datasets[t_plus][torch.randint(len(datasets[t_plus]), (1,))].to(self.accelerator.device)
+                    t_to_sample_from = t_plus
+                dl_to_sample_from = dataloaders_iterators[t_to_sample_from]
+
+                # DataLoaders will quickly be exhausted (resulting in silent hangs then undebuggable NCCL timeouts 🙃)
+                # so reform them when they needed
+                try:
+                    sample = next(dl_to_sample_from)
+                except StopIteration:
+                    self.logger.debug(
+                        f"Reforming dataloader for timestep {t_to_sample_from} on process {self.accelerator.process_index}",
+                        main_process_only=False,
+                    )
+                    dataloaders_iterators[t_to_sample_from] = iter(dataloaders[t_to_sample_from])
+                    sample = next(dataloaders_iterators[t_to_sample_from])
+
+                # check shape and append
+                assert sample.shape == (
+                    1,
+                    *self.data_shape,
+                ), f"Expecting sample shape {(1, *self.data_shape)}, got {sample.shape}"
                 batch.append(sample)
-            batch = torch.stack(batch)
+
+            # we concatenate tensors since each sample already has a fake batch size of 1
+            # and need to manually move to device since training dataloaders are not prepared
+            batch = torch.cat(batch).to(self.accelerator.device)
 
             yield t, batch
 
@@ -381,6 +419,12 @@ class TimeDiffusion:
 
         Computes the loss w.r.t. true targets and backpropagates the error
         """
+        # checks
+        assert batch.shape == (
+            self.training_cfg.train_batch_size,
+            *self.data_shape,
+        ), f"Expecting batch shape {(self.training_cfg.train_batch_size, *self.data_shape)}, got {batch.shape}"
+
         # Sample Gaussian noise
         noise = torch.randn_like(batch)
 
@@ -418,7 +462,7 @@ class TimeDiffusion:
         # Optimization step
         self.optimizer.step()
         self.lr_scheduler.step()
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
         # Update global opt step & log the loss
         self.global_optimization_step += 1

@@ -70,7 +70,7 @@ class DataSet:
 @dataclass
 class DataLoader:
     num_workers: Optional[int]
-    prefetch_factor: int
+    train_prefetch_factor: int
     pin_memory: bool
     persistent_workers: bool
 

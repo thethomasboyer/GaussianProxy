@@ -145,7 +145,7 @@ def main(cfg: Config) -> None:
     # ---------------------------------- Dataloaders ---------------------------------
     num_workers = cfg.dataloaders.num_workers if cfg.dataloaders.num_workers is not None else accelerator.num_processes
 
-    train_datasets, test_dataloaders = setup_dataloaders(cfg, num_workers, logger, cfg.debug)
+    train_dataloaders, test_dataloaders = setup_dataloaders(cfg, num_workers, logger, cfg.debug)
 
     # ------------------------------------ Debug -------------------------------------
     if cfg.debug:
@@ -203,7 +203,7 @@ def main(cfg: Config) -> None:
         wandb_tracker.config.update({"learning_rate": cfg.learning_rate}, allow_val_change=True)
 
     optimizer: Optimizer = AdamW(
-        params=net.parameters(),
+        params=list(net.parameters()) + list(video_time_encoding.parameters()),
         lr=cfg.learning_rate,
         fused=cfg.adam_use_fused,
     )
@@ -213,7 +213,10 @@ def main(cfg: Config) -> None:
     # accelerator.register_for_checkpointing(lr_scheduler)
 
     # ----------------------------- Distributed Compute  -----------------------------
-    # dataloaders (test only, train is raw dataset):
+    # We do NOT prepare *training* dataloaders!
+    # they are "fake" dataloader!
+
+    # test dataloaders:
     for key, dl in test_dataloaders.items():
         test_dataloaders[key] = accelerator.prepare(dl)
 
@@ -256,7 +259,7 @@ def main(cfg: Config) -> None:
         debug=cfg.debug,
     )
     trainer.fit(
-        train_datasets,
+        train_dataloaders,
         test_dataloaders,
         optimizer,
         lr_scheduler,
