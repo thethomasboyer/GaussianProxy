@@ -156,10 +156,13 @@ def main(cfg: Config) -> None:
 
     # ------------------------------------- Net -------------------------------------
     # it's ugly but Hydra's instantiate produces weird errors (even with _convert="all"!?) TODO
+    # also need saving model here type because that info is apparently lost when compiling?!
     if type(OmegaConf.to_object(cfg.net)) == UNet2DModelConfig:
         net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+        net_type = UNet2DModel
     elif type(OmegaConf.to_object(cfg.net)) == UNet2DConditionModelConfig:
         net = UNet2DConditionModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+        net_type = UNet2DConditionModel
     else:
         raise ValueError(f"Invalid type for 'cfg.net': {type(cfg.net)}")
 
@@ -255,6 +258,7 @@ def main(cfg: Config) -> None:
     trainer: TimeDiffusion = TimeDiffusion(
         dynamic=dyn,
         net=net,
+        net_type=net_type,
         video_time_encoding=video_time_encoding,
         accelerator=accelerator,
         debug=cfg.debug,

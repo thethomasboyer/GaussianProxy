@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, fields
 
 # from logging import INFO, FileHandler, makeLogRecord
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Generator, Optional, Type
 
 import numpy as np
 import torch
@@ -58,6 +58,7 @@ class TimeDiffusion:
     # compulsory arguments
     dynamic: DDIMScheduler
     net: UNet2DModel | UNet2DConditionModel
+    net_type: Type[UNet2DModel | UNet2DConditionModel]
     video_time_encoding: VideoTimeEncoding
     accelerator: Accelerator
     debug: bool
@@ -118,6 +119,15 @@ class TimeDiffusion:
         if self._data_shape is None:
             raise RuntimeError("data_shape is not set; fit should be called before trying to access it")
         return self._data_shape
+
+    def __post_init__(self):
+        # Assign the appropriate function based on net_type
+        if self.net_type is UNet2DModel:
+            self._net_pred = self._unet2d_pred
+        elif self.net_type is UNet2DConditionModel:
+            self._net_pred = self._unet2d_condition_pred
+        else:
+            raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {self.net_type}")
 
     def fit(
         self,
@@ -447,7 +457,7 @@ class TimeDiffusion:
         video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
 
         # Get model predictions
-        pred = self._get_net_pred(noisy_batch, diff_timesteps, video_time_codes)
+        pred = self._net_pred(noisy_batch, diff_timesteps, video_time_codes)
 
         # Compute loss
         assert (
@@ -496,19 +506,16 @@ class TimeDiffusion:
             self.logger.critical(msg)
             # TODO: restart from previous checkpoint
 
-    def _get_net_pred(self, noisy_batch: Tensor, diff_timesteps: Tensor | float | int, video_time_codes: Tensor):
-        net_type = type(self.accelerator.unwrap_model(self.net))
-        if net_type == UNet2DModel:
-            return self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]  # type: ignore
-        elif net_type == UNet2DConditionModel:
-            return self.net.forward(
-                noisy_batch,
-                diff_timesteps,
-                encoder_hidden_states=video_time_codes.unsqueeze(1),  # type: ignore
-                return_dict=False,
-            )[0]
-        else:
-            raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {net_type}")
+    def _unet2d_pred(self, noisy_batch, diff_timesteps, video_time_codes):
+        return self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]  # type: ignore
+
+    def _unet2d_condition_pred(self, noisy_batch, diff_timesteps, video_time_codes):
+        return self.net.forward(
+            noisy_batch,
+            diff_timesteps,
+            encoder_hidden_states=video_time_codes.unsqueeze(1),  # type: ignore
+            return_dict=False,
+        )[0]
 
     def _loss(self, pred, target):
         """All the hard work should happen before..."""
@@ -571,7 +578,7 @@ class TimeDiffusion:
         # generate a sample
         image = noise
         for t in inference_scheduler.timesteps:
-            model_output = self._get_net_pred(image, t, random_video_time_enc)
+            model_output = self._net_pred(image, t, random_video_time_enc)
             image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
         save_eval_artifacts_log_to_wandb(
             image,
@@ -615,7 +622,7 @@ class TimeDiffusion:
 
             # 2. Generate the inverted Gaussians
             for t in inverted_scheduler.timesteps:
-                model_output = self._get_net_pred(inverted_gauss, t, inversion_video_time)
+                model_output = self._net_pred(inverted_gauss, t, inversion_video_time)
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -631,7 +638,7 @@ class TimeDiffusion:
             # 3. Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
             for t in inference_scheduler.timesteps:
-                model_output = self._get_net_pred(regen, t, inversion_video_time)
+                model_output = self._net_pred(regen, t, inversion_video_time)
                 regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -662,7 +669,7 @@ class TimeDiffusion:
                 video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
-                    model_output = self._get_net_pred(image, t, video_time_enc)
+                    model_output = self._net_pred(image, t, video_time_enc)
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
