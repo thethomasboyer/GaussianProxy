@@ -475,6 +475,17 @@ class TimeDiffusion:
                 self.net.parameters(),
                 self.training_cfg.max_grad_norm,
             )
+            # Wake me up at 3am if grad is NaN
+            if torch.isnan(grad_norm) and self.accelerator.is_main_process:
+                msg = f"Grad is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+                wandb.alert(
+                    title="NaN grad",
+                    text=msg,
+                    level=wandb.AlertLevel.ERROR,
+                    wait_duration=21600,  # 6 hours
+                )
+                self.logger.critical(msg)
+                # TODO: restart from previous checkpoint
 
         # Optimization step
         self.optimizer.step()
