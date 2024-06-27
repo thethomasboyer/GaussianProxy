@@ -11,6 +11,7 @@ from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter, get_logger
 from accelerate.utils import ProjectConfiguration
 from diffusers.models.unets.unet_2d import UNet2DModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from hydra.core.config_store import ConfigStore
 from hydra.core.hydra_config import HydraConfig
@@ -21,7 +22,7 @@ from torch.optim import AdamW, Optimizer
 from torch.optim.lr_scheduler import LinearLR, LRScheduler
 from wandb.sdk.wandb_run import Run as WandBRun
 
-from conf.conf import Config
+from conf.conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
 from my_conf.experiment_conf import config
 from utils.data import setup_dataloaders
 from utils.misc import args_checker, create_repo_structure, modify_args_for_debug
@@ -154,16 +155,16 @@ def main(cfg: Config) -> None:
             args_checker(cfg, logger, False)  # check again after debug modifications 😈
 
     # ------------------------------------- Net -------------------------------------
-    net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+    # it's ugly but Hydra's instantiate produces weird errors (even with _convert="all"!?) TODO
+    if type(OmegaConf.to_object(cfg.net)) == UNet2DModelConfig:
+        net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+    elif type(OmegaConf.to_object(cfg.net)) == UNet2DConditionModelConfig:
+        net = UNet2DConditionModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+    else:
+        raise ValueError(f"Invalid type for 'cfg.net': {type(cfg.net)}")
 
     # video time encoding
-    num_channels_out_of_first_block_UNet = net.time_proj.num_channels
-    video_time_encoding = VideoTimeEncoding(
-        encoding_dim=num_channels_out_of_first_block_UNet,
-        time_embed_dim=num_channels_out_of_first_block_UNet * 4,
-        flip_sin_to_cos=True,
-        downscale_freq_shift=1,
-    )
+    video_time_encoding = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder))  # type: ignore
 
     # --------------------------------- Miscellaneous --------------------------------
     # # Create EMA for the models

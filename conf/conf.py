@@ -120,7 +120,7 @@ class UNet2DModelConfig:
     block_out_channels: tuple[int, ...]
     layers_per_block: int
     act_fn: str
-    class_embed_type: str
+    class_embed_type: Optional[str]
     center_input_sample: bool = False
     time_embedding_type: str = "positional"
     freq_shift: int = 0
@@ -130,9 +130,32 @@ class UNet2DModelConfig:
     dropout: float = 0.0
     attention_head_dim: int = 8
     norm_num_groups: int = 32
-    attn_norm_num_groups: Optional[int] = None
     norm_eps: float = 1e-5
     resnet_time_scale_shift: str = "default"
+
+
+@dataclass
+class UNet2DConditionModelConfig:
+    sample_size: int
+    in_channels: int
+    out_channels: int
+    down_block_types: tuple[str, ...]
+    up_block_types: tuple[str, ...]
+    block_out_channels: tuple[int, ...]
+    layers_per_block: int
+    act_fn: str
+    cross_attention_dim: int
+
+
+NetConfig = UNet2DModelConfig | UNet2DConditionModelConfig
+
+
+@dataclass
+class TimeEncoderConfig:
+    encoding_dim: int
+    time_embed_dim: int
+    flip_sin_to_cos: bool
+    downscale_freq_shift: float
 
 
 @dataclass
@@ -141,7 +164,8 @@ class Config:
     defaults: list[str]
 
     dynamic: DDIMSchedulerConfig
-    net: UNet2DModelConfig
+    net: Any  # Unions of containers are not supported.......
+    time_encoder: TimeEncoderConfig
 
     # Script
     path_to_script_parent_folder: str

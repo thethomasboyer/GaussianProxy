@@ -13,6 +13,7 @@ import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from diffusers.models.unets.unet_2d import UNet2DModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
@@ -56,7 +57,7 @@ class TimeDiffusion:
 
     # compulsory arguments
     dynamic: DDIMScheduler
-    net: UNet2DModel
+    net: UNet2DModel | UNet2DConditionModel
     video_time_encoding: VideoTimeEncoding
     accelerator: Accelerator
     debug: bool
@@ -446,7 +447,7 @@ class TimeDiffusion:
         video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
 
         # Get model predictions
-        pred = self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]
+        pred = self._get_net_pred(noisy_batch, diff_timesteps, video_time_codes)
 
         # Compute loss
         assert (
@@ -494,6 +495,20 @@ class TimeDiffusion:
             )
             self.logger.critical(msg)
             # TODO: restart from previous checkpoint
+
+    def _get_net_pred(self, noisy_batch: Tensor, diff_timesteps: Tensor | float | int, video_time_codes: Tensor):
+        net_type = type(self.accelerator.unwrap_model(self.net))
+        if net_type == UNet2DModel:
+            return self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]  # type: ignore
+        elif net_type == UNet2DConditionModel:
+            return self.net.forward(
+                noisy_batch,
+                diff_timesteps,
+                encoder_hidden_states=video_time_codes.unsqueeze(1),  # type: ignore
+                return_dict=False,
+            )[0]
+        else:
+            raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {net_type}")
 
     def _loss(self, pred, target):
         """All the hard work should happen before..."""
@@ -556,7 +571,7 @@ class TimeDiffusion:
         # generate a sample
         image = noise
         for t in inference_scheduler.timesteps:
-            model_output = self.net.forward(image, t, random_video_time_enc, return_dict=False)[0]
+            model_output = self._get_net_pred(image, t, random_video_time_enc)
             image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
         save_eval_artifacts_log_to_wandb(
             image,
@@ -600,7 +615,7 @@ class TimeDiffusion:
 
             # 2. Generate the inverted Gaussians
             for t in inverted_scheduler.timesteps:
-                model_output = self.net.forward(inverted_gauss, t, inversion_video_time, return_dict=False)[0]
+                model_output = self._get_net_pred(inverted_gauss, t, inversion_video_time)
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -616,7 +631,7 @@ class TimeDiffusion:
             # 3. Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
             for t in inference_scheduler.timesteps:
-                model_output = self.net.forward(regen, t, inversion_video_time, return_dict=False)[0]
+                model_output = self._get_net_pred(regen, t, inversion_video_time)
                 regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -647,7 +662,7 @@ class TimeDiffusion:
                 video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
-                    model_output = self.net.forward(image, t, video_time_enc, return_dict=False)[0]
+                    model_output = self._get_net_pred(image, t, video_time_enc)
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
