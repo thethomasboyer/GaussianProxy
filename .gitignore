@@ -13,3 +13,4 @@ core-rg-*
 conf/encoding_conf
 *.code-workspace
 notebooks/*.mp4
+*_outputs/
