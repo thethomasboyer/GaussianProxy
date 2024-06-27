@@ -625,7 +625,7 @@ class TimeDiffusion:
                     self.accelerator,
                     self.logger,
                     "inversions",
-                    ["image min-max"],
+                    ["image min-max", "image 5perc-95perc"],
                 )
 
             # 3. Regenerate the starting samples from their inversion

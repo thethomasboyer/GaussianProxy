@@ -276,6 +276,10 @@ def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[s
             case "image min-max":
                 norm_elems = elems.clone() - elems.amin(dim=per_image_norm_dims, keepdim=True)
                 norm_elems /= norm_elems.amax(dim=per_image_norm_dims, keepdim=True)
+            case "image 5perc-95perc":
+                norm_elems = elems.clone().cpu().numpy()  # torch does allow quantile computation over multiple dims
+                norm_elems -= np.percentile(norm_elems, 5, axis=per_image_norm_dims, keepdims=True)
+                norm_elems /= np.percentile(norm_elems, 95, axis=per_image_norm_dims, keepdims=True)
             case "video min-max":
                 assert elems.ndim == 5, f"Expected 5D tensor for video normalization, got shape {elems.shape}"
                 norm_elems = elems.clone() - elems.amin(dim=(1, 2, 3, 4), keepdim=True)
@@ -290,7 +294,9 @@ def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[s
             case _:
                 raise ValueError(f"Unknown normalization: {norm}")
         # convert to [0;255] np.uint8 arrays for wandb / PIL
-        norm_elems = (norm_elems.cpu().numpy() * 255).astype(np.uint8)
+        if isinstance(norm_elems, Tensor):
+            norm_elems = norm_elems.cpu().numpy()
+        norm_elems = (norm_elems * 255).astype(np.uint8)
         normalized_elems_for_logging[norm] = norm_elems
 
     return normalized_elems_for_logging
