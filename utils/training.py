@@ -137,7 +137,7 @@ class TimeDiffusion:
         Global high-level fitting method.
         """
         logger.debug(
-            f"Starting TimeDiffusion fitting on {self.accelerator.device}",
+            f"Starting TimeDiffusion fitting on process {self.accelerator.process_index}",
             main_process_only=False,
         )
         # Set some attributes relative to the data
@@ -532,10 +532,11 @@ class TimeDiffusion:
 
         # Misc.
         torch.cuda.empty_cache()
-        self.logger.info(f"Starting evaluation on process ({self.accelerator.device})", main_process_only=False)
+        self.logger.info(f"Starting evaluation on process ({self.accelerator.process_index})", main_process_only=False)
 
         # At first perform some pure sample generation
         # sample Gaussian noise (always the same one throughout training)
+        # TODO: save it once
         rng = torch.Generator(self.accelerator.device).manual_seed(42)
         noise = torch.randn(
             self.training_cfg.eval_batch_size,
@@ -547,7 +548,9 @@ class TimeDiffusion:
         )
 
         # sample a random video time (always the same one throughout training)
+        # TODO: save it once
         random_video_time = torch.rand(self.training_cfg.eval_batch_size, device=self.accelerator.device, generator=rng)
+        random_video_time = torch.sort(random_video_time).values  # sort it for better viz
         random_video_time_enc = self.video_time_encoding.forward(random_video_time)
 
         # generate a sample
@@ -689,7 +692,7 @@ class TimeDiffusion:
         # TODO: compute metric on full test data
 
         eval_batches_pbar.close()
-        self.logger.info(f"Finished evaluation on process ({self.accelerator.device})", main_process_only=False)
+        self.logger.info(f"Finished evaluation on process ({self.accelerator.process_index})", main_process_only=False)
 
     def _save_model(self):
         """
