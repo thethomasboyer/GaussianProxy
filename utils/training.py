@@ -664,7 +664,6 @@ class TimeDiffusion:
 
             # 4. Generate the trajectory from it
             # TODO: parallelize the generation along video time?
-            image = inverted_gauss
             video = []
             video_time_pbar = pbar_manager.counter(
                 total=self.training_cfg.eval_nb_video_timesteps,
@@ -676,6 +675,7 @@ class TimeDiffusion:
             )
 
             for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.training_cfg.eval_nb_video_timesteps)):
+                image = inverted_gauss.clone()
                 self.logger.debug(f"Video timestep index {video_t_idx} / {self.training_cfg.eval_nb_video_timesteps}")
                 video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
 
