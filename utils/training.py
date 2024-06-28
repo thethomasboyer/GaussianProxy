@@ -729,11 +729,11 @@ class TimeDiffusion:
 
         # 4. Save best model
         if self.best_model_to_date:
-            self._save_model()
+            self._save_pipeline()
 
-    def _save_model(self):
+    def _save_pipeline(self):
         """
-        Save the net to disk as an independent pretrained model.
+        Save the net to disk as an independent pretrained pipeline.
 
         Can be called by all processes (only main will actually save).
         """
@@ -742,6 +742,9 @@ class TimeDiffusion:
         )
         self.accelerator.unwrap_model(self.video_time_encoding).save_pretrained(
             self.model_save_folder / "video_time_encoder", is_main_process=self.accelerator.is_main_process
+        )
+        self.dynamic.save_pretrained(
+            self.model_save_folder / "dynamic", is_main_process=self.accelerator.is_main_process
         )
         self.logger.info(f"Saved net and video time encoder to {self.model_save_folder}")
 
