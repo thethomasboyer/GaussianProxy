@@ -234,9 +234,6 @@ class Task:
         if self.cfg.debug:
             accelerate_cfg += "--debug "
             prefixed_vars += "HYDRA_FULL_ERROR=1 "
-            # TODO: add granularity to debug flag / log files because là c'est trop
-            # if launch_args.dynamo_backend != "no" or self.cfg.torch_compile.do_compile:
-            #     prefixed_vars += "TORCH_LOGS='+dynamo' TORCHDYNAMO_VERBOSE=1 "
 
         if self.cfg.accelerate.offline:
             prefixed_vars += "WANDB_MODE=offline HF_DATASETS_OFFLINE=1 "
