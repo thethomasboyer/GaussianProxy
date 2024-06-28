@@ -722,10 +722,14 @@ class TimeDiffusion:
 
         # 3. Evaluate the trajectories
         self.logger.warning_once("Should implement evaluation metrics here.")
-        # TODO: compute metric on full test data
+        # TODO: compute metric on full test data & set self.best_model_to_date accordingly
 
         eval_batches_pbar.close()
         self.logger.info(f"Finished evaluation on process ({self.accelerator.process_index})", main_process_only=False)
+
+        # 4. Save best model
+        if self.best_model_to_date:
+            self._save_model()
 
     def _save_model(self):
         """
@@ -734,9 +738,12 @@ class TimeDiffusion:
         Can be called by all processes (only main will actually save).
         """
         self.accelerator.unwrap_model(self.net).save_pretrained(
-            self.model_save_folder, is_main_process=self.accelerator.is_main_process
+            self.model_save_folder / "net", is_main_process=self.accelerator.is_main_process
         )
-        self.logger.info(f"Saved model to {self.model_save_folder}")
+        self.accelerator.unwrap_model(self.video_time_encoding).save_pretrained(
+            self.model_save_folder / "video_time_encoder", is_main_process=self.accelerator.is_main_process
+        )
+        self.logger.info(f"Saved net and video time encoder to {self.model_save_folder}")
 
     def _checkpoint(self):
         """
