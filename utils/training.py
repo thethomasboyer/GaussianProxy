@@ -599,6 +599,7 @@ class TimeDiffusion:
             self.logger,
             "simple_generations",
             ["[-1;1] raw", "image min-max", "[-1;1] clipped"],
+            rng,
             captions=[f"time: {t}" for t in random_video_time],
         )
 
@@ -629,6 +630,7 @@ class TimeDiffusion:
                     self.logger,
                     "starting_samples",
                     ["[-1;1] raw", "image min-max"],
+                    rng,
                 )
 
             # 2. Generate the inverted Gaussians
@@ -644,6 +646,7 @@ class TimeDiffusion:
                     self.logger,
                     "inversions",
                     ["image min-max", "image 5perc-95perc"],
+                    rng,
                 )
 
             # 3. Regenerate the starting samples from their inversion
@@ -660,10 +663,12 @@ class TimeDiffusion:
                     self.logger,
                     "regenerations",
                     ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    rng,
                 )
 
             # 4. Generate the trajectory from it
             # TODO: parallelize the generation along video time?
+            # usefull if small inference batch size, otherwise useless
             video = []
             video_time_pbar = pbar_manager.counter(
                 total=self.training_cfg.eval_nb_video_timesteps,
@@ -715,6 +720,7 @@ class TimeDiffusion:
                     self.logger,
                     "trajectories",
                     ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    rng,
                 )
 
             eval_batches_pbar.update()

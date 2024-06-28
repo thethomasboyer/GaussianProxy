@@ -9,7 +9,7 @@ from numpy import ndarray
 from omegaconf import OmegaConf
 from PIL import Image
 from termcolor import colored
-from torch import Tensor
+from torch import Generator, Tensor
 from wandb.sdk.wandb_run import Run as WandBRun
 
 from conf.conf import Config
@@ -169,6 +169,7 @@ def save_eval_artifacts_log_to_wandb(
     logger: MultiProcessAdapter,
     name: str,
     logging_normalization: list[str],
+    rng: Generator,
     max_nb_to_save_and_log: int = 16,
     captions: None | list[None] | list[str] = None,
 ):
@@ -185,7 +186,8 @@ def save_eval_artifacts_log_to_wandb(
     ), f"Expected 4D or 5D tensor, got {tensors_to_save.ndim}D with shape {tensors_to_save.shape}"
 
     # Save some raw images / trajectories to disk
-    sel_to_save = tensors_to_save[:max_nb_to_save_and_log]
+    sel_idxes = torch.randint(0, len(tensors_to_save), (max_nb_to_save_and_log,), generator=rng, device=rng.device)
+    sel_to_save = torch.index_select(tensors_to_save, 0, sel_idxes)
     if captions is None:
         captions = [None] * len(sel_to_save)
     this_proc_save_folder = save_folder / f"proc_{accelerator.process_index}"
