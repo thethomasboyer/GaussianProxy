@@ -32,6 +32,9 @@ from utils.training import TimeDiffusion, resume_from_checkpoint
 # nice tracebacks
 install()
 
+# nice wandb
+wandb.require("core")
+
 # hardcoded config paths
 DEFAULT_CONFIG_PATH = "my_conf"
 DEFAULT_CONFIG_NAME = "experiment_conf"
@@ -82,6 +85,17 @@ def main(cfg: Config) -> None:
     ) = create_repo_structure(cfg, accelerator, logger, this_run_folder)
     accelerator.wait_for_everyone()
 
+    # ---------------------------- Resume from Checkpoint ----------------------------
+    if cfg.checkpointing.resume_from_checkpoint is not False:
+        resuming_args = resume_from_checkpoint(
+            cfg,
+            logger,
+            accelerator,
+        )
+        logger.info(f"Loaded resuming arguments: {resuming_args}")
+    else:
+        resuming_args = None
+
     # ------------------------------------- WandB ------------------------------------
     if accelerator.is_main_process:
         # Handle run resuming
@@ -112,6 +126,9 @@ def main(cfg: Config) -> None:
         if cfg.checkpointing.resume_from_checkpoint is True and run_id is not None:
             init_kwargs["wandb"]["id"] = run_id
             init_kwargs["wandb"]["resume"] = "must"
+            if resuming_args is not None:
+                logger.info(f"Rewinding wandb run from step {resuming_args.start_global_optimization_step}")
+                init_kwargs["wandb"]["resume_from"] = f"{run_id}?_step={resuming_args.start_global_optimization_step}"
 
         accelerator.init_trackers(
             project_name=cfg.project,
@@ -235,17 +252,6 @@ def main(cfg: Config) -> None:
 
     # learning rate scheduler:
     lr_scheduler = accelerator.prepare(lr_scheduler)
-
-    # ---------------------------- Resume from Checkpoint ----------------------------
-    if cfg.checkpointing.resume_from_checkpoint is not False:
-        resuming_args = resume_from_checkpoint(
-            cfg,
-            logger,
-            accelerator,
-        )
-        logger.info(f"Loaded resuming arguments: {resuming_args}")
-    else:
-        resuming_args = None
 
     # ----------------------------- Initial best metrics -----------------------------
     # if accelerator.is_main_process:

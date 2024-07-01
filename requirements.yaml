@@ -22,7 +22,7 @@ dependencies:
 - pytorch::torchvision
 - pytorch::pytorch-cuda=12.1
 - conda-forge::enlighten
-- conda-forge::wandb
+- conda-forge::wandb>=0.17.1
 - fastai::opencv-python-headless
 - conda-forge::plotly
 - conda-forge::pandas
