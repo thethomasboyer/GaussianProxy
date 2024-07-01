@@ -100,9 +100,15 @@ class Checkpointing:
 @dataclass
 class DDIMSchedulerConfig:
     num_train_timesteps: int
+    prediction_type: str
+    # clipping
     clip_sample: bool
     clip_sample_range: float
-    prediction_type: str
+    # dynamic thresholding
+    thresholding: bool
+    dynamic_thresholding_ratio: float = 0.995
+    sample_max_value: float = 1
+    # noise scheduler
     beta_start: float = 0.0001
     beta_end: float = 0.02
     beta_schedule: str = "linear"

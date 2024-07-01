@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import shutil
@@ -459,11 +460,19 @@ class TimeDiffusion:
         # Get model predictions
         pred = self._net_pred(noisy_batch, diff_timesteps, video_time_codes)
 
+        # Get target
+        match self.dynamic.config["prediction_type"]:
+            case "epsilon":
+                target = noise
+            case "v_prediction":
+                target = self.dynamic.get_velocity(batch, noise, diff_timesteps)
+            case _:
+                raise ValueError(
+                    f"Expected self.dynamic.config.prediction_type to be 'epsilon' or 'v_prediction', got '{self.dynamic.config['prediction_type']}'"
+                )
+
         # Compute loss
-        assert (
-            self.dynamic.config["prediction_type"] == "epsilon"
-        ), f"Expecting epsilon prediction type, got {self.dynamic.config['prediction_type']}"
-        loss = self._loss(pred, noise)
+        loss = self._loss(pred, target)
 
         # Backward pass
         self.accelerator.backward(loss)
@@ -517,10 +526,10 @@ class TimeDiffusion:
             self.logger.critical(msg)
             # TODO: restart from previous checkpoint
 
-    def _unet2d_pred(self, noisy_batch, diff_timesteps, video_time_codes):
+    def _unet2d_pred(self, noisy_batch: Tensor, diff_timesteps: Tensor, video_time_codes: Tensor):
         return self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]  # type: ignore
 
-    def _unet2d_condition_pred(self, noisy_batch, diff_timesteps, video_time_codes):
+    def _unet2d_condition_pred(self, noisy_batch: Tensor, diff_timesteps: Tensor, video_time_codes: Tensor):
         return self.net.forward(
             noisy_batch,
             diff_timesteps,
@@ -565,6 +574,7 @@ class TimeDiffusion:
 
         # Misc.
         torch.cuda.empty_cache()
+        gc.collect()
         self.logger.info(f"Starting evaluation on process ({self.accelerator.process_index})", main_process_only=False)
 
         # At first perform some pure sample generation
