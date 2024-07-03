@@ -125,10 +125,9 @@ def main(cfg: Config) -> None:
         }
         if cfg.checkpointing.resume_from_checkpoint is True and run_id is not None:
             init_kwargs["wandb"]["id"] = run_id
-            init_kwargs["wandb"]["resume"] = "must"
-            if resuming_args is not None:
-                logger.info(f"Rewinding wandb run from step {resuming_args.start_global_optimization_step}")
-                init_kwargs["wandb"]["resume_from"] = f"{run_id}?_step={resuming_args.start_global_optimization_step}"
+            assert resuming_args is not None, "Expected resuming arguments, got None"
+            logger.info(f"Rewinding wandb run from step {resuming_args.start_global_optimization_step}")
+            init_kwargs["wandb"]["resume_from"] = f"{run_id}?_step={resuming_args.start_global_optimization_step}"
 
         accelerator.init_trackers(
             project_name=cfg.project,
