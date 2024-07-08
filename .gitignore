@@ -12,5 +12,7 @@ core-rg-*
 .env
 conf/encoding_conf
 *.code-workspace
-notebooks/*.mp4
+notebooks/**/*.mp4
+notebooks/**/*.png
+notebooks/**/*.pt
 *_outputs/
