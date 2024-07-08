@@ -17,6 +17,7 @@
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from logging import Logger, getLogger
 from os import get_terminal_size
@@ -221,15 +222,7 @@ class Task:
             else:
                 accelerate_cfg += f"--{cfg_item_name} {cfg_item_value} "
 
-        if self.cfg.slurm.enabled:
-            prefixed_vars = ""
-        else:
-            # that's only to host the "accelerate launch" command (~ 160MB still!!!),
-            # it bothers me that it's not on the first GPU that's actually used otherwise...
-            first_gpu = launch_args.gpu_ids.split(",")[0] if launch_args.gpu_ids != "all" else "0"
-            prefixed_vars = f"CUDA_VISIBLE_DEVICES={first_gpu}, "
-            # also for some reason I have a invalid device ordinal error on slurm cluster
-            # so skipping this hack in that case
+        prefixed_vars = ""
 
         if self.cfg.debug:
             accelerate_cfg += "--debug "
@@ -453,9 +446,23 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     diff = repo.git.diff("--unified=0", "--color", prev_commit, new_commit)
     logger.info(f"Git diff with previous commit: {prev_commit.message}\n{diff}")
 
-    # 7. Get confirmation of launch
-    confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/): ")
-    if confirmation != "y":
+    # 7. Get confirmation of launch, otherwise revert changes
+    # first get confirmation
+    if cfg.debug:
+        try:
+            logger.info(f"Proceeding with launch for debug run {bold(this_experiment_folder.name)} in 3 seconds")
+            time.sleep(3)
+            do_launch = True
+        except KeyboardInterrupt:
+            do_launch = False
+    else:
+        confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/): ")
+        if confirmation != "y":
+            do_launch = False
+        else:
+            do_launch = True
+    # if not, revert changes
+    if not do_launch:
         logger.info("Launch aborted")
         if prev_commit is not None:
             logger.warning(f"Reverting changes in the experiment folder {this_experiment_folder}")
@@ -466,7 +473,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
                 f"Deleting HEAD ref in the experiment folder {this_experiment_folder} as it was the first commit"
             )
         sys.exit()
-
+    # otherwise, proceed with launch
     return task_config_path, launcher_config_name, this_experiment_folder
 
 
