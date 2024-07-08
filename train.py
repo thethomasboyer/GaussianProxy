@@ -228,7 +228,6 @@ def main(cfg: Config) -> None:
     optimizer: Optimizer = AdamW(
         params=list(net.parameters()) + list(video_time_encoding.parameters()),
         lr=cfg.learning_rate,
-        fused=cfg.adam_use_fused,
     )
 
     # ---------------------------- Learning Rate Scheduler ----------------------------
@@ -260,7 +259,7 @@ def main(cfg: Config) -> None:
     #     best_metric = get_initial_best_metric()
 
     # ------------------------------------ Dynamic -----------------------------------
-    dyn = DDIMScheduler(**vars(cfg.dynamic))
+    dyn = DDIMScheduler(**OmegaConf.to_container(cfg.dynamic))  # type: ignore
 
     # --------------------------------- Training loop --------------------------------
     trainer: TimeDiffusion = TimeDiffusion(
@@ -282,6 +281,7 @@ def main(cfg: Config) -> None:
         saved_artifacts_folder,
         cfg.training,
         cfg.checkpointing,
+        cfg.evaluation,
         resuming_args,
         cfg.profile,
     )

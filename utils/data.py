@@ -108,7 +108,7 @@ def _biotine_2D_image_builder(
         logger.info(f"Built test dataset for timestamp {timestamp}:\n{test_ds}")
         test_dataloaders_dict[timestamp] = DataLoader(
             test_ds,
-            batch_size=cfg.training.eval_batch_size,
+            batch_size=cfg.evaluation.batch_size,
             shuffle=False,  # keep the order for consistent logging
         )
     return train_dataloaders_dict, test_dataloaders_dict

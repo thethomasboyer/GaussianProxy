@@ -83,11 +83,11 @@ def create_repo_structure(
 
 def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: bool = True) -> None:
     # warn if no eval_every_... arg is passed is passed
-    if cfg.eval_every_n_epochs is None and cfg.eval_every_n_BI_stages is None:
+    if cfg.evaluation.every_n_epochs is None:
         logger.warning("No evaluation will be performed during training.")
     assert (
-        cfg.training.eval_batch_size >= cfg.training.train_batch_size
-    ), f"Expected inference_batch_size >= train_batch_size, got {cfg.training.eval_batch_size} < {cfg.training.train_batch_size}"
+        cfg.evaluation.batch_size >= cfg.training.train_batch_size
+    ), f"Expected inference_batch_size >= train_batch_size, got {cfg.evaluation.batch_size} < {cfg.training.train_batch_size}"
 
 
 def modify_args_for_debug(
@@ -101,32 +101,37 @@ def modify_args_for_debug(
     """
     assert cfg.debug is True, "Expected debug mode to be enabled"
     logger.warning(">>> DEBUG MODE: CHANGING CONFIGURATION <<<")
+    # this dict hosts the changes to be made to the configuration
     changes: dict[tuple[str, ...], int] = {
         ("dynamic", "num_train_timesteps"): 100,
         ("training", "nb_epochs"): 5,
         ("training", "nb_time_samplings"): 30,
         ("checkpointing", "checkpoint_every_n_steps"): 100,
         (
-            "training",
-            "eval_every_n_epochs",
+            "evaluation",
+            "every_n_epochs",
         ): 1,
         (
-            "training",
-            "eval_every_n_opt_steps",
+            "evaluation",
+            "every_n_opt_steps",
         ): 300,
-        ("training", "eval_nb_diffusion_timesteps"): 10,
-        ("training", "eval_nb_video_timesteps"): 5,
     }
+    # now actually change the configuration,
+    # updating the registered wandb config accordingly
     for param_name_tuple, new_param_value in changes.items():
         # Navigate through the levels of cfg
         cfg_level = cfg
         for level in param_name_tuple[:-1]:
             cfg_level = getattr(cfg_level, level)
-        param_name = param_name_tuple[-1]
-        logger.warning(f"{param_name}: {getattr(cfg_level, param_name)} -> {new_param_value}")
-        setattr(cfg_level, param_name, new_param_value)
-        if is_main_process:
-            wandb_tracker.config.update({"/".join(param_name_tuple): new_param_value}, allow_val_change=True)
+            param_name = param_name_tuple[-1]
+            logger.warning(f"{param_name}: {getattr(cfg_level, param_name)} -> {new_param_value}")
+            setattr(cfg_level, param_name, new_param_value)
+            if is_main_process:
+                wandb_tracker.config.update({"/".join(param_name_tuple): new_param_value}, allow_val_change=True)
+
+
+def camel_to_snake(name: str) -> str:
+    return "".join(["_" + i.lower() if i.isupper() else i for i in name]).lstrip("_")
 
 
 def get_evenly_spaced_timesteps(nb_empirical_dists: int) -> list[float]:
@@ -167,7 +172,8 @@ def save_eval_artifacts_log_to_wandb(
     global_optimization_step: int,
     accelerator: Accelerator,
     logger: MultiProcessAdapter,
-    name: str,
+    eval_strat: str,
+    artifact_name: str,
     logging_normalization: list[str],
     rng: Generator,
     max_nb_to_save_and_log: int = 16,
@@ -179,7 +185,9 @@ def save_eval_artifacts_log_to_wandb(
     Can be called by all processes.
     """
     # checks
-    assert name in ACCEPTED_NAMES_FOR_LOGGING, f"Expected name in {ACCEPTED_NAMES_FOR_LOGGING}, got {name}"
+    assert (
+        artifact_name in ACCEPTED_NAMES_FOR_LOGGING
+    ), f"Expected name in {ACCEPTED_NAMES_FOR_LOGGING}, got {artifact_name}"
     assert tensors_to_save.ndim in (
         4,
         5,
@@ -191,7 +199,7 @@ def save_eval_artifacts_log_to_wandb(
     if captions is None:
         captions = [None] * len(sel_to_save)
     this_proc_save_folder = save_folder / f"proc_{accelerator.process_index}"
-    file_path = this_proc_save_folder / name / f"step_{global_optimization_step}.pt"
+    file_path = this_proc_save_folder / artifact_name / f"step_{global_optimization_step}.pt"
     file_path.parent.mkdir(exist_ok=True, parents=True)
     if file_path.exists():  # must manually remove it as it's most probably read-only
         file_path.unlink()
@@ -211,7 +219,9 @@ def save_eval_artifacts_log_to_wandb(
     normalized_elements_for_logging = _normalize_elements_for_logging(sel_to_save, logging_normalization)
     # videos case
     if tensors_to_save.ndim == 5:
-        assert name == "trajectories", f"Expected name to be 'trajectories' for 5D tensors, got {name}"
+        assert (
+            artifact_name == "trajectories"
+        ), f"Expected name to be 'trajectories' for 5D tensors, got {artifact_name}"
         kwargs = {
             "fps": max(int(tensors_to_save.shape[1] / 20), 1),  # ~ 20s
             "format": "mp4",
@@ -219,13 +229,13 @@ def save_eval_artifacts_log_to_wandb(
         for norm_method, normed_vids in normalized_elements_for_logging.items():
             videos = wandb.Video(normed_vids, **kwargs)  # type: ignore
             accelerator.log(
-                {f"Generated videos/{norm_method} normalized": videos},
+                {f"{eval_strat}/Generated videos/{norm_method} normalized": videos},
                 step=global_optimization_step,
             )
         logger.info(f"Logged {len(sel_to_save)} trajectories to W&B on main process")
     # images case (inverted Gaussians)
     else:
-        match name:
+        match artifact_name:
             case "inversions":
                 wandb_title = "Inverted Gaussians"
             case "starting_samples":
@@ -236,7 +246,7 @@ def save_eval_artifacts_log_to_wandb(
                 wandb_title = "Pure sample generations"
             case _:
                 raise ValueError(
-                    f"Unknown name: {name}; expected one of 'inversions' or 'starting_samples' for 4D tensors"
+                    f"Unknown name: {artifact_name}; expected one of 'inversions' or 'starting_samples' for 4D tensors"
                 )
         for norm_method, normed_vids in normalized_elements_for_logging.items():
             # PIL RGB mode expects 3x8-bit pixels in (H, W, C) format
@@ -246,7 +256,7 @@ def save_eval_artifacts_log_to_wandb(
             ]
             accelerator.log(
                 {
-                    f"{wandb_title}/{norm_method} normalized": [
+                    f"{eval_strat}/{wandb_title}/{norm_method} normalized": [
                         wandb.Image(image, caption=captions[img_idx]) for img_idx, image in enumerate(images)
                     ]
                 },

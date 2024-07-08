@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from omegaconf import MISSING
+
 
 @dataclass
 class Slurm:
@@ -82,11 +84,40 @@ class Training:
     max_grad_norm: int
     nb_epochs: int
     nb_time_samplings: int
-    eval_every_n_epochs: int | None
-    eval_every_n_opt_steps: int | None
-    eval_batch_size: int
-    eval_nb_diffusion_timesteps: int
-    eval_nb_video_timesteps: int
+
+
+@dataclass
+class EvaluationStrategy:
+    nb_diffusion_timesteps: int
+    # we must repeat ourselves because hydra actually passes DictConfig objects instead of plain classes...
+    name: str = field(default=MISSING)
+
+
+@dataclass
+class InvertedRegeneration(EvaluationStrategy):
+    name: str = field(default="InvertedRegeneration")
+
+
+@dataclass
+class SimpleGeneration(EvaluationStrategy):
+    name: str = field(default="SimpleGeneration")
+
+
+@dataclass(kw_only=True)
+class ForwardNoising(EvaluationStrategy):
+    forward_noising_frac: float
+    name: str = field(default="ForwardNoising")
+
+
+@dataclass
+class Evaluation:
+    every_n_epochs: int | None
+    every_n_opt_steps: int | None
+    batch_size: int
+    nb_video_timesteps: int
+    # the naming convention for the strategy variable names is lowercase + underscore
+    # this has to be respected for debug args modification
+    strategies: list[EvaluationStrategy]
 
 
 @dataclass
@@ -100,7 +131,7 @@ class Checkpointing:
 @dataclass
 class DDIMSchedulerConfig:
     num_train_timesteps: int
-    prediction_type: str
+    prediction_type: str  # 'epsilon' or 'v_prediction'
     # clipping
     clip_sample: bool
     clip_sample_range: float
@@ -169,6 +200,7 @@ class Config:
     # Defaults
     defaults: list[str]
 
+    # Model
     dynamic: DDIMSchedulerConfig
     net: Any  # Unions of containers are not supported.......
     time_encoder: TimeEncoderConfig
@@ -191,19 +223,11 @@ class Config:
     # Accelerate
     accelerate: Accelerate
 
-    # Metrics
-    compute_fid: bool
-    compute_isc: bool
-    compute_kid: bool
-    kid_subset_size: int
-    eval_every_n_epochs: Optional[int]
-    eval_every_n_BI_stages: Optional[int]
-
     # Miscellaneous
     debug: bool
     profile: bool
 
-    # Logging
+    # Experiment tracker
     logger: str
     entity: str
 
@@ -219,6 +243,8 @@ class Config:
     # Training
     training: Training
 
+    # Evaluation
+    evaluation: Evaluation
+
     # Optimization
     learning_rate: float
-    adam_use_fused: bool
