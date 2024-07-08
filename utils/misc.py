@@ -85,9 +85,6 @@ def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: boo
     # warn if no eval_every_... arg is passed is passed
     if cfg.evaluation.every_n_epochs is None:
         logger.warning("No evaluation will be performed during training.")
-    assert (
-        cfg.evaluation.batch_size >= cfg.training.train_batch_size
-    ), f"Expected inference_batch_size >= train_batch_size, got {cfg.evaluation.batch_size} < {cfg.training.train_batch_size}"
 
 
 def modify_args_for_debug(
