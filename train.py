@@ -1,5 +1,6 @@
 # Copyright 2024 Thomas Boyer
 
+import logging
 from math import sqrt
 from os import get_terminal_size
 from pathlib import Path
@@ -34,6 +35,10 @@ install()
 
 # nice wandb
 wandb.require("core")
+
+# stop DEBUG log pollution
+logging.getLogger("matplotlib").setLevel(logging.INFO)
+logging.getLogger("PIL").setLevel(logging.INFO)
 
 # hardcoded config paths
 DEFAULT_CONFIG_PATH = "my_conf"
