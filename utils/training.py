@@ -548,14 +548,26 @@ class TimeDiffusion:
             self.logger.critical(msg)
             # TODO: restart from previous checkpoint
 
-    def _unet2d_pred(self, noisy_batch: Tensor, diff_timesteps: Tensor, video_time_codes: Tensor):
-        return self.net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]  # type: ignore
+    def _unet2d_pred(
+        self, noisy_batch: Tensor, diff_timesteps: Tensor, video_time_codes: Tensor, net: Optional[UNet2DModel] = None
+    ):
+        # allow providing evaluation net
+        net = self.net if net is None else net  # type: ignore
+        return net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]
 
-    def _unet2d_condition_pred(self, noisy_batch: Tensor, diff_timesteps: Tensor, video_time_codes: Tensor):
-        return self.net.forward(
+    def _unet2d_condition_pred(
+        self,
+        noisy_batch: Tensor,
+        diff_timesteps: Tensor,
+        video_time_codes: Tensor,
+        net: Optional[UNet2DConditionModel] = None,
+    ):
+        # allow providing evaluation net
+        net = self.net if net is None else net  # type: ignore
+        return net.forward(
             noisy_batch,
             diff_timesteps,
-            encoder_hidden_states=video_time_codes.unsqueeze(1),  # type: ignore
+            encoder_hidden_states=video_time_codes.unsqueeze(1),
             return_dict=False,
         )[0]
 
@@ -576,13 +588,19 @@ class TimeDiffusion:
 
         Should be called by all processes.
         """
+        # unwrap the net and prepare it for inference
+        inference_net = self.accelerator.unwrap_model(self.net)
+        inference_net.eval()
+        # TODO: compile if training net is
+        # inference_net = torch.compile(inference_net)
+
         for eval_strat in self.eval_cfg.strategies:
             if eval_strat.name == "SimpleGeneration":
-                self._simple_gen(dataloaders, pbar_manager, eval_strat)  # type: ignore
+                self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net)  # type: ignore
             elif eval_strat.name == "ForwardNoising":
-                self._forward_noising(dataloaders, pbar_manager, eval_strat)  # type: ignore
+                self._forward_noising(dataloaders, pbar_manager, eval_strat, inference_net)  # type: ignore
             elif eval_strat.name == "InvertedRegeneration":
-                self._inv_regen(dataloaders, pbar_manager, eval_strat)  # type: ignore
+                self._inv_regen(dataloaders, pbar_manager, eval_strat, inference_net)  # type: ignore
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -596,6 +614,7 @@ class TimeDiffusion:
         _: dict[float, DataLoader],
         pbar_manager: Manager,
         eval_strat: SimpleGeneration,
+        eval_net: UNet2DModel | UNet2DConditionModel,
     ):
         """
         Just simple generations.
@@ -645,7 +664,7 @@ class TimeDiffusion:
 
         image = noise
         for t in inference_scheduler.timesteps:
-            model_output = self._net_pred(image, t, random_video_time_enc)
+            model_output = self._net_pred(image, t, random_video_time_enc, eval_net)
             image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
             gen_pbar.update()
 
@@ -670,6 +689,7 @@ class TimeDiffusion:
         dataloaders: dict[float, DataLoader],
         pbar_manager: Manager,
         eval_strat: InvertedRegeneration,
+        eval_net: UNet2DModel | UNet2DConditionModel,
     ):
         """
         Two steps are performed on each batch of the first dataloader:
@@ -730,7 +750,7 @@ class TimeDiffusion:
 
             # 2. Generate the inverted Gaussians
             for t in inverted_scheduler.timesteps:
-                model_output = self._net_pred(inverted_gauss, t, inversion_video_time)
+                model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -748,7 +768,7 @@ class TimeDiffusion:
             # 3. Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
             for t in inference_scheduler.timesteps:
-                model_output = self._net_pred(regen, t, inversion_video_time)
+                model_output = self._net_pred(regen, t, inversion_video_time, eval_net)
                 regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -782,7 +802,7 @@ class TimeDiffusion:
                 video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
-                    model_output = self._net_pred(image, t, video_time_enc)
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
@@ -837,6 +857,7 @@ class TimeDiffusion:
         dataloaders: dict[float, DataLoader],
         pbar_manager: Manager,
         eval_strat: ForwardNoising,
+        eval_net: UNet2DModel | UNet2DConditionModel,
     ):
         """
         Two steps are performed on each batch of the first dataloader:
@@ -933,7 +954,7 @@ class TimeDiffusion:
                 video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps[noise_timestep_idx:]:
-                    model_output = self._net_pred(image, t, video_time_enc)
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
