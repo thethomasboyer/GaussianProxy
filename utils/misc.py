@@ -159,7 +159,14 @@ def sample_with_replacement(
     return data
 
 
-ACCEPTED_NAMES_FOR_LOGGING = ("trajectories", "inversions", "starting_samples", "regenerations", "simple_generations")
+ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING = (
+    "trajectories",
+    "inversions",
+    "starting_samples",
+    "regenerations",
+    "simple_generations",
+    "noised_samples",
+)
 
 
 @torch.inference_mode()
@@ -183,20 +190,19 @@ def save_eval_artifacts_log_to_wandb(
     """
     # checks
     assert (
-        artifact_name in ACCEPTED_NAMES_FOR_LOGGING
-    ), f"Expected name in {ACCEPTED_NAMES_FOR_LOGGING}, got {artifact_name}"
+        artifact_name in ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING
+    ), f"Expected name in {ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING}, got {artifact_name}"
     assert tensors_to_save.ndim in (
         4,
         5,
     ), f"Expected 4D or 5D tensor, got {tensors_to_save.ndim}D with shape {tensors_to_save.shape}"
 
-    # Save some raw images / trajectories to disk
+    # Save some raw images / trajectories to disk (all processes)
     sel_idxes = torch.randint(0, len(tensors_to_save), (max_nb_to_save_and_log,), generator=rng, device=rng.device)
     sel_to_save = torch.index_select(tensors_to_save, 0, sel_idxes)
     if captions is None:
         captions = [None] * len(sel_to_save)
-    this_proc_save_folder = save_folder / f"proc_{accelerator.process_index}"
-    file_path = this_proc_save_folder / artifact_name / f"step_{global_optimization_step}.pt"
+    file_path = save_folder / artifact_name / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
     file_path.parent.mkdir(exist_ok=True, parents=True)
     if file_path.exists():  # must manually remove it as it's most probably read-only
         file_path.unlink()
@@ -229,7 +235,9 @@ def save_eval_artifacts_log_to_wandb(
                 {f"{eval_strat}/Generated videos/{norm_method} normalized": videos},
                 step=global_optimization_step,
             )
-        logger.info(f"Logged {len(sel_to_save)} trajectories to W&B on main process")
+        logger.info(
+            f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B on main process"
+        )
     # images case (inverted Gaussians)
     else:
         match artifact_name:
@@ -241,6 +249,8 @@ def save_eval_artifacts_log_to_wandb(
                 wandb_title = "Regenerated samples"
             case "simple_generations":
                 wandb_title = "Pure sample generations"
+            case "noised_samples":
+                wandb_title = "Slightly noised starting samples"
             case _:
                 raise ValueError(
                     f"Unknown name: {artifact_name}; expected one of 'inversions' or 'starting_samples' for 4D tensors"
