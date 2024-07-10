@@ -195,7 +195,7 @@ class TimeEncoderConfig:
     downscale_freq_shift: float
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Config:
     # Defaults
     defaults: list[str]
@@ -226,6 +226,9 @@ class Config:
     # Miscellaneous
     debug: bool
     profile: bool
+
+    # Caches
+    tmpdir_location: Optional[str] = None
 
     # Experiment tracker
     logger: str

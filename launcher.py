@@ -231,6 +231,10 @@ class Task:
         if self.cfg.accelerate.offline:
             prefixed_vars += "WANDB_MODE=offline HF_DATASETS_OFFLINE=1 "
 
+        if self.cfg.tmpdir_location is not None:
+            Path(self.cfg.tmpdir_location).mkdir(parents=True, exist_ok=True)
+            prefixed_vars += f"TMPDIR={self.cfg.tmpdir_location} "
+
         # Launched command
         final_cmd = f"{prefixed_vars}WANDB_SILENT=true accelerate launch {accelerate_cfg} {self.code_parent_folder.as_posix()}/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
 
