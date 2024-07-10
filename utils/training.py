@@ -452,7 +452,7 @@ class TimeDiffusion:
                         batch += new_sample
                         nb_samples_got[t_to_sample_from] += len(new_sample)
                     # DataLoaders will quickly be exhausted (resulting in silent hangs then undebuggable NCCL timeouts 🙃)
-                    # so reform them when they needed
+                    # so reform them when needed
                     except StopIteration:
                         self.logger.debug(
                             f"Reforming dataloader for timestep {t_to_sample_from} on process {self.accelerator.process_index}",
@@ -465,7 +465,9 @@ class TimeDiffusion:
             # since training dataloaders are not prepared
             batch = torch.stack(batch).to(self.accelerator.device)
 
-            # finally shuffle the batch so that seen empirical times are mixed
+            # finally shuffle the batch so that seen *empirical times* are mixed
+            # (otherwise we'd always have samples from t- before those from t+,
+            # not that bad but it's probably better to interleave as much as possible)
             batch = batch[torch.randperm(batch.shape[0])]
 
             # check shape and append

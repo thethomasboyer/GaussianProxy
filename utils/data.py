@@ -93,6 +93,10 @@ def _biotine_2D_image_builder(
         # *Time-interpolated* batches will be manually built afterwards!
         train_dataloaders_dict[timestamp] = DataLoader(
             train_ds,
+            # in average we need train_batch_size/2 samples per empirical dataset to form a train batch;
+            # with this batch size, 2 empirical batches max will be needed per train batch and dataset,
+            # so with at least 1 prefetch we should get decent perf
+            # (at max 3 dataloader batch samplings per train batch)
             batch_size=max(1, cfg.training.train_batch_size // 2),
             shuffle=True,
             num_workers=num_workers,
