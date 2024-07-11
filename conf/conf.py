@@ -62,10 +62,6 @@ class DataSet:
     data_shape: tuple[int, ...]
     path: str | Path
     transforms: Any
-    empirical_dists_centers: list[list[int]]
-    empirical_dists_vars: list[float]
-    nb_samples_per_time: int
-    test_split_frac: float
     name: str
 
 
