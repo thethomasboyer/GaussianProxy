@@ -348,7 +348,9 @@ CODE_TO_COPY = [
     "utils/misc.py",
     "utils/training.py",
     "utils/models.py",
-    "conf",
+    "conf/conf.py",
+    "conf/hydra",
+    "conf/dataset",
 ]  # path must be relative to the script parent folder
 
 FILES_OR_FOLDERS_TO_GIT_DIFF = CODE_TO_COPY + ["my_conf"]
