@@ -111,14 +111,10 @@ def main(cfg: Config) -> None:
                 logger.warning(
                     "Found a 'run_id.txt' file but 'resume_from_checkpoint' is False: ignoring this file and not resuming W&B run."
                 )
-            elif cfg.checkpointing.resume_from_checkpoint is True:
+            else:
                 with open(run_id_file, "r", encoding="utf-8") as f:
                     run_id = f.readline().strip()
                 logger.info(f"Found a 'run_id.txt' file; imposing wandb to resume the run with id {run_id}")
-            else:
-                raise ValueError(
-                    f"Invalid value for 'resume_from_checkpoint' argument: {cfg.checkpointing.resume_from_checkpoint}"
-                )
 
         # Init W&B
         init_kwargs: dict[str, dict[str, str | None]] = {

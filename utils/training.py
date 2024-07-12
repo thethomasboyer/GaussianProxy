@@ -525,6 +525,18 @@ class TimeDiffusion:
         # Compute loss
         loss = self._loss(pred, target)
 
+        # Wake me up at 3am if loss is NaN
+        if torch.isnan(loss) and self.accelerator.is_main_process:
+            msg = f"loss is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+            wandb.alert(
+                title="NaN loss",
+                text=msg,
+                level=wandb.AlertLevel.ERROR,
+                wait_duration=21600,  # 6 hours
+            )
+            self.logger.critical(msg)
+            # TODO: restart from previous checkpoint?
+
         # Backward pass
         self.accelerator.backward(loss)
 
@@ -545,7 +557,7 @@ class TimeDiffusion:
                     wait_duration=21600,  # 6 hours
                 )
                 self.logger.critical(msg)
-                # TODO: restart from previous checkpoint
+                # TODO: restart from previous checkpoint?
 
         # Optimization step
         self.optimizer.step()
