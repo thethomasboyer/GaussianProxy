@@ -926,7 +926,7 @@ class TimeDiffusion:
 
             # 2. Sample Gaussian noise and noise the images until some step
             noise = torch.randn(batch.shape, dtype=batch.dtype, device=batch.device, generator=self.eval_rng)  # type: ignore
-            noise_timestep_idx = int(eval_strat.forward_noising_frac * len(inference_scheduler.timesteps))
+            noise_timestep_idx = int((1 - eval_strat.forward_noising_frac) * len(inference_scheduler.timesteps))
             noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
             noise_timesteps: IntTensor = torch.full(  # type: ignore
                 (batch.shape[0],),
