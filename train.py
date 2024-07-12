@@ -124,7 +124,7 @@ def main(cfg: Config) -> None:
                 "entity": cfg.entity,
             }
         }
-        if cfg.checkpointing.resume_from_checkpoint is True and run_id is not None:
+        if cfg.checkpointing.resume_from_checkpoint is not False and run_id is not None:
             init_kwargs["wandb"]["id"] = run_id
             init_kwargs["wandb"]["resume"] = "must"
 
