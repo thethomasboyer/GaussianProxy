@@ -188,7 +188,7 @@ def save_eval_artifacts_log_to_wandb(
 
     Can be called by all processes.
     """
-    # checks
+    # 0. Checks
     assert (
         artifact_name in ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING
     ), f"Expected name in {ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING}, got {artifact_name}"
@@ -197,15 +197,21 @@ def save_eval_artifacts_log_to_wandb(
         5,
     ), f"Expected 4D or 5D tensor, got {tensors_to_save.ndim}D with shape {tensors_to_save.shape}"
 
-    # Save some raw images / trajectories to disk (all processes)
-    sel_idxes = torch.randint(0, len(tensors_to_save), (max_nb_to_save_and_log,), generator=rng, device=rng.device)
-    sel_to_save = torch.index_select(tensors_to_save, 0, sel_idxes)
+    # 1. Select elements to be saved & logged (at random, but keeping the original order)
+    actual_nb_elems_to_save = min(max_nb_to_save_and_log, len(tensors_to_save))
+    # choose actual_nb_elems_to_save at random & in order
+    shuffled_idxes = torch.randperm(len(tensors_to_save))
+    sel_idxes = shuffled_idxes[:actual_nb_elems_to_save].sort().values
+    sel_to_save = tensors_to_save[sel_idxes]
     if captions is None:
         captions = [None] * len(sel_to_save)
+    sel_captions = [captions[i] for i in sel_idxes]
+
+    # 2. Save some raw images / trajectories to disk (all processes)
     file_path = save_folder / artifact_name / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
     file_path.parent.mkdir(exist_ok=True, parents=True)
-    if file_path.exists():  # must manually remove it as it's most probably read-only
-        file_path.unlink()
+    if file_path.exists():  # might exist if resuming
+        file_path.unlink()  # must manually remove it as it's most probably read-only
     torch.save(sel_to_save, file_path)
     logger.info(
         f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}", main_process_only=False
@@ -215,7 +221,7 @@ def save_eval_artifacts_log_to_wandb(
         main_process_only=False,
     )
 
-    # Log to W&B (main process only)
+    # 3. Log to W&B (main process only)
     assert (
         sel_to_save.shape[tensors_to_save.ndim - 3] == 3
     ), f"Expected trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3} for RGB images, got shape {sel_to_save.shape}"
@@ -264,7 +270,7 @@ def save_eval_artifacts_log_to_wandb(
             accelerator.log(
                 {
                     f"{eval_strat}/{wandb_title}/{norm_method} normalized": [
-                        wandb.Image(image, caption=captions[img_idx]) for img_idx, image in enumerate(images)
+                        wandb.Image(image, caption=sel_captions[img_idx]) for img_idx, image in enumerate(images)
                     ]
                 },
                 step=global_optimization_step,
