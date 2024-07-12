@@ -33,8 +33,8 @@ from hydra.core.hydra_config import HydraConfig
 from rich.traceback import install
 from termcolor import colored
 
-from conf.conf import Config
-from my_conf.experiment_conf import config
+from conf.training_conf import Config
+from my_conf.my_training_conf import config
 
 # nice tracebacks
 install()
@@ -348,7 +348,7 @@ CODE_TO_COPY = [
     "utils/misc.py",
     "utils/training.py",
     "utils/models.py",
-    "conf/conf.py",
+    "conf/training_conf.py",
     "conf/hydra",
     "conf/dataset",
 ]  # path must be relative to the script parent folder

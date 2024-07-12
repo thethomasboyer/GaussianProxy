@@ -23,8 +23,8 @@ from torch.optim import AdamW, Optimizer
 from torch.optim.lr_scheduler import LinearLR, LRScheduler
 from wandb.sdk.wandb_run import Run as WandBRun
 
-from conf.conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
-from my_conf.experiment_conf import config
+from conf.training_conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
+from my_conf.my_training_conf import config
 from utils.data import setup_dataloaders
 from utils.misc import args_checker, create_repo_structure, modify_args_for_debug
 from utils.models import VideoTimeEncoding

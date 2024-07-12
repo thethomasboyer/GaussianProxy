@@ -12,7 +12,7 @@ from termcolor import colored
 from torch import Generator, Tensor
 from wandb.sdk.wandb_run import Run as WandBRun
 
-from conf.conf import Config
+from conf.training_conf import Config
 
 
 def create_repo_structure(

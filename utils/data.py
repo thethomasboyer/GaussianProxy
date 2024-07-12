@@ -8,7 +8,7 @@ from hydra.utils import instantiate
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from conf.conf import Config
+from conf.training_conf import Config
 
 
 def _biotine_2D_image_builder(
@@ -149,14 +149,18 @@ class NumpyDataset(Dataset):
 
     def __getitems__(self, indexes: list[int]) -> list[Tensor]:
         paths = [self.samples[idx] for idx in indexes]
-        samples = [self._loader(p) for p in paths]
+        samples = self.get_items_by_name(paths)
+        return samples
+
+    def get_items_by_name(self, names: list[str | Path]) -> list[Tensor]:
+        samples = [self._loader(p) for p in names]
         return samples
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __repr__(self) -> str:
-        head = "Dataset " + self.__class__.__name__
+        head = self.__class__.__name__
         body = f"Number of datapoints: {self.__len__()}"
         lines = [head] + [" " * 4 + body]
         return "\n".join(lines)

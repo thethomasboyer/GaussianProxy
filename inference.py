@@ -14,8 +14,8 @@ from PIL import Image
 from rich.traceback import install
 from torch import IntTensor, Tensor
 
-from conf.conf import ForwardNoising, InvertedRegeneration, SimpleGeneration
 from conf.inference_conf import InferenceConfig
+from conf.training_conf import ForwardNoising, InvertedRegeneration, SimpleGeneration
 from my_conf.my_inference_conf import inference_conf
 from utils.data import NumpyDataset
 from utils.misc import _normalize_elements_for_logging

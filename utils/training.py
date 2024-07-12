@@ -25,7 +25,7 @@ from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
-from conf.conf import (
+from conf.training_conf import (
     Checkpointing,
     Config,
     Evaluation,
@@ -617,19 +617,23 @@ class TimeDiffusion:
 
         Should be called by all processes.
         """
-        # unwrap the net and prepare it for inference
+        # unwrap the modules and prepare them for inference
         inference_net = self.accelerator.unwrap_model(self.net)
         inference_net.eval()
-        # TODO: compile if training net is
+        inference_video_time_encoding = self.accelerator.unwrap_model(self.video_time_encoding)
+        inference_video_time_encoding.eval()
+        # TODO: compile if args
         # inference_net = torch.compile(inference_net)
 
         for eval_strat in self.eval_cfg.strategies:
             if eval_strat.name == "SimpleGeneration":
-                self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net)  # type: ignore
+                self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)
             elif eval_strat.name == "ForwardNoising":
-                self._forward_noising(dataloaders, pbar_manager, eval_strat, inference_net)  # type: ignore
+                self._forward_noising(
+                    dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding
+                )
             elif eval_strat.name == "InvertedRegeneration":
-                self._inv_regen(dataloaders, pbar_manager, eval_strat, inference_net)  # type: ignore
+                self._inv_regen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -644,6 +648,7 @@ class TimeDiffusion:
         pbar_manager: Manager,
         eval_strat: SimpleGeneration,
         eval_net: UNet2DModel | UNet2DConditionModel,
+        inference_video_time_encoding: VideoTimeEncoding,
     ):
         """
         Just simple generations.
@@ -659,10 +664,9 @@ class TimeDiffusion:
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
         )
 
-        # sample Gaussian noise (always the same one throughout training)
-        # TODO: save it once
+        # generate time encodings
         random_video_time = self.get_eval_video_times()
-        random_video_time_enc = self.video_time_encoding.forward(random_video_time)
+        random_video_time_enc = inference_video_time_encoding.forward(random_video_time)
 
         # generate a sample
         gen_pbar = pbar_manager.counter(
@@ -703,6 +707,7 @@ class TimeDiffusion:
         pbar_manager: Manager,
         eval_strat: InvertedRegeneration,
         eval_net: UNet2DModel | UNet2DConditionModel,
+        inference_video_time_encoding: VideoTimeEncoding,
     ):
         """
         Two steps are performed on each batch of the first dataloader:
@@ -760,7 +765,7 @@ class TimeDiffusion:
 
             # 2. Generate the inverted Gaussians
             inverted_gauss = batch
-            inversion_video_time = self.video_time_encoding.forward(0, batch.shape[0])
+            inversion_video_time = inference_video_time_encoding.forward(0, batch.shape[0])
 
             for t in inverted_scheduler.timesteps:
                 model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # type: ignore
@@ -813,7 +818,7 @@ class TimeDiffusion:
             for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)):
                 image = inverted_gauss.clone()
                 self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps}")
-                video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
+                video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
                     model_output = self._net_pred(image, t, video_time_enc, eval_net)  # type: ignore
@@ -872,6 +877,7 @@ class TimeDiffusion:
         pbar_manager: Manager,
         eval_strat: ForwardNoising,
         eval_net: UNet2DModel | UNet2DConditionModel,
+        inference_video_time_encoding: VideoTimeEncoding,
     ):
         """
         Two steps are performed on each batch of the first dataloader:
@@ -965,7 +971,7 @@ class TimeDiffusion:
             for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)):
                 image = slightly_noised_sample.clone()
                 self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps}")
-                video_time_enc = self.video_time_encoding.forward(video_time.item(), batch.shape[0])
+                video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps[noise_timestep_idx:]:
                     model_output = self._net_pred(image, t, video_time_enc, eval_net)  # type: ignore
