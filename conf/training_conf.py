@@ -63,6 +63,7 @@ class DataSet:
     path: str | Path
     transforms: Any
     name: str
+    expected_initial_data_range: tuple[float, float] | None
 
 
 @dataclass

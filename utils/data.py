@@ -7,6 +7,7 @@ from accelerate.logging import MultiProcessAdapter
 from hydra.utils import instantiate
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+from torchvision.transforms.transforms import Compose, RandomHorizontalFlip, RandomVerticalFlip
 
 from conf.training_conf import Config
 
@@ -17,7 +18,6 @@ def _biotine_2D_image_builder(
     logger: MultiProcessAdapter,
     debug: bool = False,
     train_split_frac: float = 0.9,
-    expected_initial_data_range: tuple[float, float] = (0, 1),
 ) -> tuple[dict[int, DataLoader], dict[int, DataLoader]]:
     """Returns a list of dataloaders for the biotine data (images directly): one dataloader per timestamp.
 
@@ -63,7 +63,9 @@ def _biotine_2D_image_builder(
     train_dataloaders_dict = {}
     test_dataloaders_dict = {}
     transforms = instantiate(cfg.dataset.transforms)
-    logger.warning(f"Using transforms: {transforms} over expected initial data range={expected_initial_data_range}")
+    logger.warning(
+        f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
+    )
     if debug:
         logger.warning(">>> DEBUG MODE: LIMITING TEST DATALOADER TO 1 BATCH <<<")
     # Time per time
@@ -84,7 +86,7 @@ def _biotine_2D_image_builder(
             set(train_files) | (set(test_files)) == set(files)
         ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
         # Create train dataloader
-        train_ds = NumpyDataset(train_files, transforms, expected_initial_data_range)
+        train_ds = NumpyDataset(train_files, transforms, cfg.dataset.expected_initial_data_range)
         assert (
             train_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
@@ -105,7 +107,8 @@ def _biotine_2D_image_builder(
             persistent_workers=cfg.dataloaders.persistent_workers,
         )
         # Create test dataloader
-        test_ds = NumpyDataset(test_files, transforms, expected_initial_data_range)
+        test_transforms = remove_flips_from_transforms(transforms)  # no flips for consistent evaluation
+        test_ds = NumpyDataset(test_files, test_transforms, cfg.dataset.expected_initial_data_range)
         assert (
             test_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
@@ -116,6 +119,14 @@ def _biotine_2D_image_builder(
             shuffle=False,  # keep the order for consistent logging
         )
     return train_dataloaders_dict, test_dataloaders_dict
+
+
+def remove_flips_from_transforms(transforms: Compose):
+    """Filter out the RandomHorizontalFlip and RandomVerticalFlip."""
+    filtered_transforms = [
+        t for t in transforms.transforms if not isinstance(t, (RandomHorizontalFlip, RandomVerticalFlip))
+    ]
+    return Compose(filtered_transforms)
 
 
 class NumpyDataset(Dataset):
@@ -152,7 +163,7 @@ class NumpyDataset(Dataset):
         samples = self.get_items_by_name(paths)
         return samples
 
-    def get_items_by_name(self, names: list[str | Path]) -> list[Tensor]:
+    def get_items_by_name(self, names: list[str | Path] | list[str] | list[Path]) -> list[Tensor]:
         samples = [self._loader(p) for p in names]
         return samples
 
@@ -161,9 +172,12 @@ class NumpyDataset(Dataset):
 
     def __repr__(self) -> str:
         head = self.__class__.__name__
-        body = f"Number of datapoints: {self.__len__()}"
-        lines = [head] + [" " * 4 + body]
-        return "\n".join(lines)
+        body_lines = [f"Number of datapoints: {self.__len__()}"]
+        if self.expected_initial_data_range is not None:
+            body_lines.append(f"Expected initial data range: {self.expected_initial_data_range}")
+        # Indent each line in the body
+        indented_body_lines = [" " * 4 + line for line in body_lines]
+        return "\n".join([head] + indented_body_lines)
 
 
 def setup_dataloaders(

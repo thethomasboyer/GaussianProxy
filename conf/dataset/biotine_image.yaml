@@ -12,3 +12,4 @@ transforms:
   - _target_: torchvision.transforms.RandomHorizontalFlip
   - _target_: torchvision.transforms.RandomVerticalFlip
 selected_dists: [1, 5, 10, 15, 19] # [1, 5, 10, 15, 19] OR list(range(1, 20))
+expected_initial_data_range: [0, 1]
