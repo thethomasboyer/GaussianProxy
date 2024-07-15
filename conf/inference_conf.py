@@ -17,12 +17,16 @@ class InferenceConfig:
     # Device
     device: str
 
+    # Compile
+    compile: bool
+
     # Data
     dataset: DataSet
-    expected_initial_data_range: tuple[float, float]
 
     # Evaluations
     nb_generated_samples: int
+    plate_name_to_simulate: str | None = None
     nb_video_times_in_parallel: int
     nb_video_timesteps: int
     evaluation_strategies: list[EvaluationStrategy]
+    n_rows_displayed: int

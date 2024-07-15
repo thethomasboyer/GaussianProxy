@@ -1,13 +1,17 @@
 # Imports
+import logging
+import sys
 from math import ceil
 from pathlib import Path
 
+import colorlog
 import imageio
 import numpy as np
 import torch
 import torchvision
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
 from numpy import ndarray
 from PIL import Image
@@ -15,7 +19,7 @@ from rich.traceback import install
 from torch import IntTensor, Tensor
 
 from conf.inference_conf import InferenceConfig
-from conf.training_conf import ForwardNoising, InvertedRegeneration, SimpleGeneration
+from conf.training_conf import ForwardNoising, ForwardNoisingLinearScaling, InvertedRegeneration, SimpleGeneration
 from my_conf.my_inference_conf import inference_conf
 from utils.data import NumpyDataset
 from utils.misc import _normalize_elements_for_logging
@@ -27,28 +31,62 @@ torch.set_grad_enabled(False)
 # Nice tracebacks
 install()
 
+# logging
+term_handler = logging.StreamHandler(sys.stdout)
+term_handler.setFormatter(
+    colorlog.ColoredFormatter(
+        "[%(cyan)s%(asctime)s%(reset)s][%(blue)s%(name)s%(reset)s][%(log_color)s%(levelname)s%(reset)s] - %(message)s",
+        datefmt=None,
+        reset=True,
+        log_colors={
+            "DEBUG": "cyan",
+            "INFO": "green",
+            "WARNING": "yellow",
+            "ERROR": "red",
+            "CRITICAL": "red,bg_white",
+        },
+        secondary_log_colors={},
+        style="%",
+    )
+)
+term_handler.setLevel(logging.INFO)
+
+log_file_path = inference_conf.output_dir / "logs.log"
+file_handler = logging.FileHandler(log_file_path, mode="a")
+file_handler.setFormatter(logging.Formatter("[%(asctime)s][%(name)s][%(levelname)s] - %(message)s"))
+file_handler.setLevel(logging.DEBUG)
+
+logger = logging.getLogger(Path(__file__).stem)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(term_handler)
+logger.addHandler(file_handler)
+
 
 def main(cfg: InferenceConfig) -> None:
+    logger.info("\n" + "#" * 120 + "\n#" + " " * 47 + "Starting inference script" + " " * 46 + "#\n" + "#" * 120)
+    logger.info(f"Using device {cfg.device}")
     ###############################################################################################
-    # Check paths
+    #                                          Check paths
     ###############################################################################################
     project_path = cfg.root_experiments_path / cfg.project_name
     assert project_path.exists(), f"Project path {project_path} does not exist."
 
     run_path = project_path / cfg.run_name
     assert run_path.exists(), f"Run path {run_path} does not exist."
-    print("run path:", run_path)
+    logger.info(f"run path: {run_path}")
 
     cfg.output_dir.mkdir(exist_ok=True, parents=True)
-    print("output dir:", cfg.output_dir)
+    logger.info(f"output dir: {cfg.output_dir}")
 
     ###############################################################################################
-    # Load Model
+    #                                          Load Model
     ###############################################################################################
     # denoiser
     net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(run_path / "saved_model" / "net")  # type: ignore
     net.to(cfg.device)
     net.eval()
+    if cfg.compile:
+        net = torch.compile(net)  # type: ignore
 
     # time encoder
     video_time_encoder: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # type: ignore
@@ -61,7 +99,7 @@ def main(cfg: InferenceConfig) -> None:
     dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(run_path / "saved_model" / "dynamic")
 
     ###############################################################################################
-    # Load Starting Images
+    #                                     Load Starting Images
     ###############################################################################################
     database_path = Path(cfg.dataset.path)
     subdirs = sorted([e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")])
@@ -71,31 +109,54 @@ def main(cfg: InferenceConfig) -> None:
 
     # I reuse the NumpyDataset class from the training script to load the images consistently
     starting_samples = list(subdirs[0].glob("*.npy"))
-    starting_ds = NumpyDataset(starting_samples, cfg.dataset.transforms, cfg.expected_initial_data_range)
-    print("Built dataset:")
-    print(starting_ds)
+    starting_ds = NumpyDataset(starting_samples, cfg.dataset.transforms)
+    logger.info(f"Built dataset from {database_path}/1:\n{starting_ds}")
+    logger.info(f"Using transforms:\n{cfg.dataset.transforms}")
 
-    # now select batch_size samples
-    sample_idxes: list[int] = (
-        np.random.default_rng().choice(len(starting_ds), cfg.nb_generated_samples, replace=False).tolist()
-    )
-    tensors = starting_ds.__getitems__(sample_idxes)
+    # select starting samples to generate from
+    if cfg.plate_name_to_simulate is not None:
+        # if a plate was given, select nb_generated_samples from it, in order
+        glob_pattern = f"{cfg.plate_name_to_simulate}_time_1_patch_*_*.npy"
+        # assuming they are sorted in (x,y) dictionary order
+        all_matching_sample_names = list(Path(cfg.dataset.path, "1").glob(glob_pattern))
+        assert len(all_matching_sample_names) > 0, f"No samples found with glob pattern {glob_pattern}"
+        logger.info(f"Found {len(all_matching_sample_names)} patches from plate {cfg.plate_name_to_simulate}")
+
+        sample_names = all_matching_sample_names[: cfg.nb_generated_samples]
+        assert (
+            len(sample_names) == cfg.nb_generated_samples
+        ), f"Expected to get at least {cfg.nb_generated_samples} samples, got {len(sample_names)}"
+        logger.info(f"Selected {len(sample_names)} samples to run inference from.")
+        tensors: list[Tensor] = starting_ds.get_items_by_name(sample_names)
+    else:
+        # if not, select nb_generated_samples samples randomly
+        sample_idxes: list[int] = (
+            np.random.default_rng().choice(len(starting_ds), cfg.nb_generated_samples, replace=False).tolist()
+        )
+        tensors = starting_ds.__getitems__(sample_idxes)
+        logger.info(f"Selected {len(sample_idxes)} samples to run inference from at random.")
+
     starting_batch = torch.stack(tensors).to(cfg.device)
-    print(f"Selected {len(sample_idxes)} samples to run inference from.")
+    logger.debug(f"Using starting data of shape {starting_batch.shape}")
 
     ###############################################################################################
-    # Inference passes
+    #                                       Inference passes
     ###############################################################################################
     pbar_manager: Manager = get_manager()  # type: ignore
 
     for eval_strat_idx, eval_strat in enumerate(cfg.evaluation_strategies):
-        print(f"Running evaluation strategy {eval_strat_idx+1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
+        logger.info(f"Running evaluation strategy {eval_strat_idx+1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
+        logger.name = eval_strat.name
         if type(eval_strat) is SimpleGeneration:
             raise NotImplementedError
         elif type(eval_strat) is ForwardNoising:
             forward_noising(cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager)
+        elif type(eval_strat) is ForwardNoisingLinearScaling:
+            forward_noising_linear_scaling(
+                cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager
+            )
         elif type(eval_strat) is InvertedRegeneration:
-            raise NotImplementedError
+            inverted_regeneration(cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager)
         else:
             raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -109,6 +170,13 @@ def forward_noising(
     batch: Tensor,
     pbar_manager: Manager,
 ):
+    # -1. Prepare output directory
+    base_save_path = cfg.output_dir / eval_strat.name
+    if base_save_path.exists():
+        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+    base_save_path.mkdir(parents=True)
+    logger.debug(f"Saving outputs to {base_save_path}")
+
     # 0. Setup scheduler
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
@@ -116,16 +184,22 @@ def forward_noising(
     # 1. Save the to-be noised images
     save_images_or_videos(
         batch,
-        cfg.output_dir,
-        eval_strat.name,
+        base_save_path,
         "starting_samples",
         ["[-1;1] raw", "image min-max"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
 
     # 2. Sample Gaussian noise and noise the images until some step
     noise = torch.randn(batch.shape, dtype=batch.dtype, device=batch.device)
     noise_timestep_idx = int((1 - eval_strat.forward_noising_frac) * len(inference_scheduler.timesteps))
     noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
+    msg = (
+        f"Adding noise until timestep {noise_timestep} (index {noise_timestep_idx}/{len(inference_scheduler.timesteps)}"
+    )
+    msg += f", timesteps range: ({inference_scheduler.timesteps.min().item()}, {inference_scheduler.timesteps.max().item()}))"
+    logger.debug(msg)
     noise_timesteps: IntTensor = torch.full(  # type: ignore
         (batch.shape[0],),
         noise_timestep,
@@ -135,10 +209,11 @@ def forward_noising(
     slightly_noised_sample = inference_scheduler.add_noise(batch, noise, noise_timesteps)
     save_images_or_videos(
         slightly_noised_sample,
-        cfg.output_dir,
-        eval_strat.name,
+        base_save_path,
         "noised_samples",
         ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
 
     # 3. Generate the trajectory from it
@@ -170,11 +245,10 @@ def forward_noising(
         start = vid_batch_idx * cfg.nb_video_times_in_parallel
         end = (vid_batch_idx + 1) * cfg.nb_video_times_in_parallel
         video_time_batch = video_times[start:end]
+        logger.debug(f"Processing video times from {start} to {start + len(video_time_batch)}")
         # at this point video_time_batch is at most cfg.nb_video_times_in_parallel long;
-        # we need to duplicate the video_time_encoding to match the batch size!
+        # we need to duplicate the video_time_encoding to match the actual batch size!
         video_time_enc = video_time_encoder.forward(video_time_batch)
-        # of course it's better to do it now than before the video_time_encoder.forward :)
-        # (although perf win is probably negligible)
         video_time_enc = video_time_enc.repeat_interleave(cfg.nb_generated_samples, dim=0)
 
         image = torch.cat([slightly_noised_sample.clone() for _ in range(len(video_time_batch))])
@@ -208,25 +282,297 @@ def forward_noising(
         net.config["sample_size"],
     )
     assert video.shape == expected_video_shape, f"Expected video shape {expected_video_shape}, got {video.shape}"
+    logger.debug(f"Saving video tensor of shape {video.shape}")
     save_images_or_videos(
         video,
-        cfg.output_dir,
-        eval_strat.name,
+        base_save_path,
         "trajectories",
         ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+
+def forward_noising_linear_scaling(
+    cfg: InferenceConfig,
+    eval_strat: ForwardNoisingLinearScaling,
+    net: UNet2DConditionModel,
+    video_time_encoder: VideoTimeEncoding,
+    dynamic: DDIMScheduler,
+    batch: Tensor,
+    pbar_manager: Manager,
+):
+    # -2. Checks
+    if cfg.nb_video_times_in_parallel != 1:
+        logger.warning(
+            f"nb_video_times_in_parallel was set to {cfg.nb_video_times_in_parallel}, but is ignored in this evaluation strategy"
+        )
+
+    # -1. Prepare output directory
+    base_save_path = cfg.output_dir / eval_strat.name
+    if base_save_path.exists():
+        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+    base_save_path.mkdir(parents=True)
+    logger.debug(f"Saving outputs to {base_save_path}")
+
+    # 0. Setup scheduler
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+    # 1. Save the to-be noised images
+    save_images_or_videos(
+        batch,
+        base_save_path,
+        "starting_samples",
+        ["[-1;1] raw", "image min-max"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+    # 2. Sample Gaussian noise
+    noise = torch.randn(batch.shape, dtype=batch.dtype, device=batch.device)
+
+    # 2.5 Misc preparations
+    video = []
+    video_time_pbar = pbar_manager.counter(
+        total=cfg.nb_video_timesteps,
+        position=1,
+        desc="Video timesteps batches",
+        leave=False,
+    )
+    video_time_pbar.refresh()
+
+    # video times between 0 and 1
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+    # linearly interpolate between the start and end forward_noising_fracs
+    forward_noising_fracs = torch.linspace(
+        eval_strat.forward_noising_frac_start,
+        eval_strat.forward_noising_frac_end,
+        cfg.nb_video_timesteps,
+        device=cfg.device,
+    )
+    logger.debug(f"Forward noising fracs: {list(forward_noising_fracs)}")
+
+    # 3. Generate the trajectory time-per-time
+    for vid_batch_idx in range(cfg.nb_video_timesteps):
+        # noise until this timestep's index
+        noise_timestep_idx = min(  # prevent potential OOB if forward_noising_frac_start is zero
+            int((1 - forward_noising_fracs[vid_batch_idx]) * len(inference_scheduler.timesteps)),
+            len(inference_scheduler.timesteps) - 1,
+        )
+
+        diff_time_pbar = pbar_manager.counter(
+            total=len(inference_scheduler.timesteps),
+            position=2,
+            desc="Diffusion timesteps" + " " * 4,
+            leave=False,
+            count=noise_timestep_idx,
+        )
+        diff_time_pbar.refresh()
+
+        video_time = video_times[vid_batch_idx]
+        video_time_enc = video_time_encoder.forward(video_time.item(), batch.shape[0])
+
+        # noise image with forward SDE
+        noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
+        msg = f"Adding noise until timestep {noise_timestep} (index {noise_timestep_idx}/{len(inference_scheduler.timesteps)}"
+        msg += f", timesteps range: ({inference_scheduler.timesteps.min().item()}, {inference_scheduler.timesteps.max().item()}))"
+        logger.debug(msg)
+        noise_timesteps: IntTensor = torch.full(  # type: ignore
+            (batch.shape[0],),
+            noise_timestep,
+            device=batch.device,
+            dtype=torch.int64,
+        )
+        image = inference_scheduler.add_noise(batch, noise, noise_timesteps)  # clone happens here
+        # shape: (batch_size, channels, height, width)
+
+        # denoise with backward SDE
+        for t in inference_scheduler.timesteps[noise_timestep_idx:]:
+            model_output: Tensor = net.forward(
+                image, t, encoder_hidden_states=video_time_enc.unsqueeze(1), return_dict=False
+            )[0]
+            image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+            diff_time_pbar.update()
+
+        diff_time_pbar.close()
+        video.append(image)
+        video_time_pbar.update()
+
+    video_time_pbar.close()
+
+    # video is a list of nb_video_timesteps elements, each of shape (batch_size, channels, hight, width)
+    video = torch.stack(video)  # (nb_video_timesteps, batch_size, channels, height, width)
+    # save_images_or_videos expects (video_time, batch_size, channels, height, width)
+    expected_video_shape = (
+        cfg.nb_video_timesteps,
+        cfg.nb_generated_samples,
+        net.config["out_channels"],
+        net.config["sample_size"],
+        net.config["sample_size"],
+    )
+    assert video.shape == expected_video_shape, f"Expected video shape {expected_video_shape}, got {video.shape}"
+    logger.debug(f"Saving video tensor of shape {video.shape}")
+    save_images_or_videos(
+        video,
+        base_save_path,
+        "trajectories",
+        ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+
+def inverted_regeneration(
+    cfg: InferenceConfig,
+    eval_strat: InvertedRegeneration,
+    net: UNet2DConditionModel,
+    video_time_encoder: VideoTimeEncoding,
+    dynamic: DDIMScheduler,
+    batch: Tensor,
+    pbar_manager: Manager,
+):
+    # -1. Prepare output directory
+    base_save_path = cfg.output_dir / eval_strat.name
+    if base_save_path.exists():
+        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+    base_save_path.mkdir(parents=True)
+    logger.debug(f"Saving outputs to {base_save_path}")
+
+    # 0. Setup schedulers
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # type: ignore
+    inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+    # 1. Save the to-be noised images
+    save_images_or_videos(
+        batch,
+        base_save_path,
+        "starting_samples",
+        ["[-1;1] raw", "image min-max"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+    # 2. Generate the inverted Gaussians
+    inverted_gauss = batch.clone()
+    inversion_video_time_enc = video_time_encoder.forward(0, batch.shape[0])
+
+    diff_time_pbar = pbar_manager.counter(
+        total=len(inverted_scheduler.timesteps),
+        position=1,
+        desc="Diffusion timesteps" + " " * 4,
+        leave=False,
+    )
+    diff_time_pbar.refresh()
+
+    for t in inverted_scheduler.timesteps:
+        model_output = net.forward(
+            inverted_gauss, t, encoder_hidden_states=inversion_video_time_enc.unsqueeze(1), return_dict=False
+        )[0]
+        inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
+        diff_time_pbar.update()
+
+    diff_time_pbar.close()
+
+    save_images_or_videos(
+        inverted_gauss,
+        base_save_path,
+        "inverted_gaussians",
+        ["image min-max"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+    # 3. Generate the trajectory from it
+    # the generation is parallelized along video time, but this
+    # usefull if small inference batch size only
+    video = []
+    nb_vid_batches = ceil(cfg.nb_video_timesteps / cfg.nb_video_times_in_parallel)
+
+    video_time_pbar = pbar_manager.counter(
+        total=nb_vid_batches,
+        position=1,
+        desc="Video timesteps batches",
+        leave=False,
+    )
+    video_time_pbar.refresh()
+
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+
+    for vid_batch_idx in range(nb_vid_batches):
+        diff_time_pbar = pbar_manager.counter(
+            total=len(inference_scheduler.timesteps),
+            position=2,
+            desc="Diffusion timesteps" + " " * 4,
+            leave=False,
+        )
+        diff_time_pbar.refresh()
+
+        start = vid_batch_idx * cfg.nb_video_times_in_parallel
+        end = (vid_batch_idx + 1) * cfg.nb_video_times_in_parallel
+        video_time_batch = video_times[start:end]
+        logger.debug(f"Processing video times from {start} to {start + len(video_time_batch)}")
+        # at this point video_time_batch is at most cfg.nb_video_times_in_parallel long;
+        # we need to duplicate the video_time_encoding to match the actual batch size!
+        video_time_enc = video_time_encoder.forward(video_time_batch)
+        video_time_enc = video_time_enc.repeat_interleave(cfg.nb_generated_samples, dim=0)
+
+        image = torch.cat([inverted_gauss.clone() for _ in range(len(video_time_batch))])
+        # shape: (len(video_time_batch)*batch_size, channels, height, width),
+        # where len(video_time_batch) = cfg.nb_video_times_in_parallel for at least all but the last batch
+
+        for t in inference_scheduler.timesteps:
+            model_output: Tensor = net.forward(
+                image, t, encoder_hidden_states=video_time_enc.unsqueeze(1), return_dict=False
+            )[0]
+            image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+            diff_time_pbar.update()
+
+        diff_time_pbar.close()
+        video.append(image)
+        video_time_pbar.update()
+
+    video_time_pbar.close()
+
+    # video is a list of ceil(nb_video_timesteps / nb_video_times_in_parallel) elements, each of shape
+    # (len(video_time_batch) * batch_size, channels, hight, width)
+    video = torch.cat(video)  # (nb_video_timesteps * nb_generated_samples, channels, height, width)
+    video = video.split(cfg.nb_generated_samples)
+    video = torch.stack(video)
+    # save_images_or_videos expects (video_time, batch_size, channels, height, width)
+    expected_video_shape = (
+        cfg.nb_video_timesteps,
+        cfg.nb_generated_samples,
+        net.config["out_channels"],
+        net.config["sample_size"],
+        net.config["sample_size"],
+    )
+    assert video.shape == expected_video_shape, f"Expected video shape {expected_video_shape}, got {video.shape}"
+    logger.debug(f"Saving video tensor of shape {video.shape}")
+    save_images_or_videos(
+        video,
+        base_save_path,
+        "trajectories",
+        ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
 
 
 def save_images_or_videos(
-    tensor: Tensor, output_dir: Path, eval_strat_name: str, artifact_name: str, norm_methods: list[str]
+    tensor: Tensor,
+    base_save_path: Path,
+    artifact_name: str,
+    norm_methods: list[str],
+    nrows: int,
+    padding: int,
 ):
-    base_save_path = output_dir / eval_strat_name
-    base_save_path.mkdir(exist_ok=True, parents=True)
-
     # Save some raw images / trajectories to disk
     file_path = base_save_path / f"{artifact_name}.pt"
     torch.save(tensor, file_path)
-    print(f"    Saved raw {artifact_name} of shape {tensor.shape} to {file_path.name}")
+    logger.debug(f"Saved raw {artifact_name} of shape {tensor.shape} to {file_path.name}")
 
     normalized_elements = _normalize_elements_for_logging(tensor, norm_methods)
 
@@ -235,17 +581,17 @@ def save_images_or_videos(
             for norm_method, normed_vids in normalized_elements.items():
                 # save the videos in a grid
                 save_path = base_save_path / f"{artifact_name}_{norm_method}.mp4"
-                save_grid_of_videos(normed_vids, save_path)
-                print(f"    Saved {norm_method} normalized {artifact_name} to {save_path}")
+                save_grid_of_videos(normed_vids, save_path, nrows, padding)
+                logger.debug(f"Saved {norm_method} normalized {artifact_name} to {save_path.name}")
         case 4:  # images
             for norm_method, normed_imgs in normalized_elements.items():
                 # save the images in a grid
                 save_path = base_save_path / f"{artifact_name}_{norm_method}.png"
-                save_grid_of_images(normed_imgs, save_path)
-                print(f"    Saved {norm_method} normalized {artifact_name} to {save_path}")
+                save_grid_of_images(normed_imgs, save_path, nrows, padding)
+                logger.debug(f"Saved {norm_method} normalized {artifact_name} to {save_path.name}")
 
 
-def save_grid_of_videos(videos_tensor: ndarray, save_path: Path, grid_rows: int = 4, grid_cols: int = 4):
+def save_grid_of_videos(videos_tensor: ndarray, save_path: Path, nrows: int, padding: int):
     # Checks
     assert videos_tensor.ndim == 5, f"Expected 5D tensor, got {videos_tensor.shape}"
     assert videos_tensor.dtype == np.uint8, f"Expected dtype uint8, got {videos_tensor.dtype}"
@@ -255,17 +601,19 @@ def save_grid_of_videos(videos_tensor: ndarray, save_path: Path, grid_rows: int 
 
     # Convert tensor to a grid of videos
     fps = max(1, int(len(videos_tensor) / 10))
+    logger.debug(f"Using fps {fps}")
     writer = imageio.get_writer(save_path, mode="I", fps=fps)
 
-    for frame in videos_tensor:
-        grid_img = torchvision.utils.make_grid(torch.from_numpy(frame), nrow=4)
+    for frame_idx, frame in enumerate(videos_tensor):
+        grid_img = torchvision.utils.make_grid(torch.from_numpy(frame), nrow=nrows, padding=padding)
         pil_img = grid_img.numpy().transpose(1, 2, 0)
+        logger.debug(f"Adding frame {frame_idx+1}/{len(videos_tensor)} | shape: {pil_img.shape}")
         writer.append_data(pil_img)
 
     writer.close()
 
 
-def save_grid_of_images(images_tensor: ndarray, save_path: Path):
+def save_grid_of_images(images_tensor: ndarray, save_path: Path, nrows: int, padding: int):
     # Checks
     assert images_tensor.ndim == 4, f"Expected 4D tensor, got {images_tensor.shape}"
     assert images_tensor.dtype == np.uint8, f"Expected dtype uint8, got {images_tensor.dtype}"
@@ -274,7 +622,7 @@ def save_grid_of_images(images_tensor: ndarray, save_path: Path):
     ), f"Expected [0;255] range, got [{images_tensor.min()}, {images_tensor.max()}]"
 
     # Convert tensor to a grid of images
-    grid_img = torchvision.utils.make_grid(torch.from_numpy(images_tensor), nrow=4)
+    grid_img = torchvision.utils.make_grid(torch.from_numpy(images_tensor), nrow=nrows, padding=padding)
 
     # Convert to PIL Image
     pil_img = Image.fromarray(grid_img.numpy().transpose(1, 2, 0))

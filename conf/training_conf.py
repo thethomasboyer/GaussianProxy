@@ -106,6 +106,13 @@ class ForwardNoising(EvaluationStrategy):
     name: str = field(default="ForwardNoising")
 
 
+@dataclass(kw_only=True)
+class ForwardNoisingLinearScaling(EvaluationStrategy):
+    forward_noising_frac_start: float
+    forward_noising_frac_end: float
+    name: str = field(default="ForwardNoisingLinearScaling")
+
+
 @dataclass
 class Evaluation:
     every_n_epochs: int | None
