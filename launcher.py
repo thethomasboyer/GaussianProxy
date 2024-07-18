@@ -48,6 +48,9 @@ DEFAULT_CONFIG_NAME = "experiment_conf"
 cs = ConfigStore.instance()
 cs.store(name=DEFAULT_CONFIG_NAME, node=config)
 
+# wait for this amount of seconds before automatically launching the job when debug flag is set
+CONFIRMATION_TIME_LAUNCH_DEBUG_SEC = 5
+
 
 @hydra.main(
     version_base=None,
@@ -456,17 +459,22 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     # first get confirmation
     if cfg.debug:
         try:
-            logger.info(f"Proceeding with launch for debug run {bold(this_experiment_folder.name)} in 3 seconds")
-            time.sleep(3)
+            logger.info(
+                f"Proceeding with launch for debug run {bold(this_experiment_folder.name)} in {CONFIRMATION_TIME_LAUNCH_DEBUG_SEC} seconds"
+            )
+            time.sleep(CONFIRMATION_TIME_LAUNCH_DEBUG_SEC)
             do_launch = True
         except KeyboardInterrupt:
             do_launch = False
     else:
-        confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/): ")
-        if confirmation != "y":
+        try:
+            confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/[n]): ")
+            if confirmation != "y":
+                do_launch = False
+            else:
+                do_launch = True
+        except KeyboardInterrupt:
             do_launch = False
-        else:
-            do_launch = True
     # if not, revert changes
     if not do_launch:
         logger.info("Launch aborted")
