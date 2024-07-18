@@ -184,7 +184,7 @@ def setup_dataloaders(
     cfg: Config, num_workers: int, logger: MultiProcessAdapter, debug: bool = False
 ) -> tuple[dict[int, DataLoader], dict[int, DataLoader]]:
     match cfg.dataset.name:
-        case "biotine_image":
+        case "biotine_image" | "biotine_image_red_channel":
             return _biotine_2D_image_builder(cfg, num_workers, logger, debug)
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")

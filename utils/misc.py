@@ -222,9 +222,13 @@ def save_eval_artifacts_log_to_wandb(
     )
 
     # 3. Log to W&B (main process only)
-    assert (
-        sel_to_save.shape[tensors_to_save.ndim - 3] == 3
-    ), f"Expected trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3} for RGB images, got shape {sel_to_save.shape}"
+    # transform 1-channel images into fake 3-channel RGB images for compatibility
+    if sel_to_save.shape[tensors_to_save.ndim - 3] != 3:
+        assert (
+            sel_to_save.shape[tensors_to_save.ndim - 3] == 1
+        ), f"Expected 1 or 3 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
+        logger.debug(f"Adding fake channels trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3}")
+        sel_to_save = torch.cat([sel_to_save, torch.zeros_like(sel_to_save), torch.zeros_like(sel_to_save)], dim=-3)
     normalized_elements_for_logging = _normalize_elements_for_logging(sel_to_save, logging_normalization)
     # videos case
     if tensors_to_save.ndim == 5:
