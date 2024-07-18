@@ -54,13 +54,13 @@ class Accelerate:
     offline: bool
 
 
-@dataclass
+@dataclass(kw_only=True)
 class DataSet:
     selected_dists: list[int]
     # data_shape should be tuple[int, int, int] | tuple[int, int], but unions of containers
     # are not yet supported by OmegaConf: https://github.com/omry/omegaconf/issues/144
     data_shape: tuple[int, ...]
-    path: str | Path
+    path: str | Path = field(default=MISSING)
     transforms: Any
     name: str
     expected_initial_data_range: tuple[float, float] | None
