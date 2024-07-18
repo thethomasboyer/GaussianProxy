@@ -52,6 +52,7 @@ term_handler.setFormatter(
 term_handler.setLevel(logging.INFO)
 
 log_file_path = inference_conf.output_dir / "logs.log"
+log_file_path.parent.mkdir(parents=True, exist_ok=True)
 file_handler = logging.FileHandler(log_file_path, mode="a")
 file_handler.setFormatter(logging.Formatter("[%(asctime)s][%(name)s][%(levelname)s] - %(message)s"))
 file_handler.setLevel(logging.DEBUG)
