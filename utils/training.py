@@ -638,14 +638,44 @@ class TimeDiffusion:
 
         Should be called by all processes.
         """
-        # unwrap the modules and prepare them for inference
-        inference_net = self.accelerator.unwrap_model(self.net)
-        inference_net.eval()
-        inference_video_time_encoding = self.accelerator.unwrap_model(self.video_time_encoding)
-        inference_video_time_encoding.eval()
-        # TODO: compile if args
-        # inference_net = torch.compile(inference_net)
+        # 1. Save instantenous states of models
+        # tmp save folder in the checkpoints folder
+        tmp_save_folder = Path(self.checkpointing_cfg.chckpt_save_path, ".tmp_inference_save")
+        if self.accelerator.is_main_process:
+            if tmp_save_folder.exists():
+                shutil.rmtree(tmp_save_folder)
+            else:
+                tmp_save_folder.mkdir()
+        self.accelerator.wait_for_everyone()
+        # save net & video time encoder
+        self.accelerator.unwrap_model(self.net).save_pretrained(
+            tmp_save_folder / "net", is_main_process=self.accelerator.is_main_process
+        )
+        self.accelerator.unwrap_model(self.video_time_encoding).save_pretrained(
+            tmp_save_folder / "video_time_encoder",
+            is_main_process=self.accelerator.is_main_process,
+        )
+        self.accelerator.wait_for_everyone()
 
+        # 2. Instantiate inference models
+        if self.net_type == UNet2DModel:
+            inference_net: UNet2DModel = UNet2DModel.from_pretrained(  # type: ignore
+                tmp_save_folder / "net", local_files_only=True, device_map=self.accelerator.process_index
+            )
+        elif self.net_type == UNet2DConditionModel:
+            inference_net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # type: ignore
+                tmp_save_folder / "net", local_files_only=True, device_map=self.accelerator.process_index
+            )
+        else:
+            raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {self.net_type}")
+        inference_video_time_encoding: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # type: ignore
+            tmp_save_folder / "video_time_encoder",
+            local_files_only=True,
+            device_map=self.accelerator.process_index,
+        )
+        # TODO: save & load a compiled artifact (with torch.export?)
+
+        # 3. Run through evaluation strategies
         for eval_strat in self.eval_cfg.strategies:
             if eval_strat.name == "SimpleGeneration":
                 self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)  # type: ignore
@@ -852,7 +882,7 @@ class TimeDiffusion:
 
             for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)):
                 image = inverted_gauss.clone()
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps}")
+                self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps - 1}")
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
