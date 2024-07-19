@@ -31,11 +31,15 @@ from conf.training_conf import (
     Evaluation,
     ForwardNoising,
     InvertedRegeneration,
+    IterativeInvertedRegeneration,
     SimpleGeneration,
     Training,
 )
-from utils.misc import get_evenly_spaced_timesteps, save_eval_artifacts_log_to_wandb
+from utils.misc import StateLogger, get_evenly_spaced_timesteps, log_state, save_eval_artifacts_log_to_wandb
 from utils.models import VideoTimeEncoding
+
+# State logger to track time spent in some functions
+state_logger = StateLogger()
 
 
 @dataclass
@@ -379,8 +383,12 @@ class TimeDiffusion:
         batches_pbar.close()
         # update epoch
         self.global_epoch += 1
+        # update timeline
+        gantt_chart = state_logger.create_gantt_chart()
+        self.accelerator.log({"state_timeline": wandb.Plotly(gantt_chart)})
 
     @torch.no_grad()
+    @log_state(state_logger)
     def _yield_data_batches(
         self, dataloaders: dict[float, DataLoader], logger: MultiProcessAdapter, nb_time_samplings: int
     ) -> Generator[tuple[float, Tensor], None, None]:
@@ -478,6 +486,7 @@ class TimeDiffusion:
 
             yield t, batch
 
+    @log_state(state_logger)
     def _fit_one_batch(
         self,
         batch: Tensor,
@@ -639,13 +648,25 @@ class TimeDiffusion:
 
         for eval_strat in self.eval_cfg.strategies:
             if eval_strat.name == "SimpleGeneration":
-                self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)
+                self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)  # type: ignore
             elif eval_strat.name == "ForwardNoising":
                 self._forward_noising(
-                    dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding
+                    dataloaders,
+                    pbar_manager,
+                    eval_strat,  # type: ignore
+                    inference_net,
+                    inference_video_time_encoding,
                 )
             elif eval_strat.name == "InvertedRegeneration":
-                self._inv_regen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)
+                self._inv_regen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)  # type: ignore
+            elif eval_strat.name == "IterativeInvertedRegeneration":
+                self._iter_inv_regen(
+                    dataloaders,
+                    pbar_manager,
+                    eval_strat,  # type: ignore
+                    inference_net,
+                    inference_video_time_encoding,
+                )
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -653,6 +674,7 @@ class TimeDiffusion:
         if self.best_model_to_date:
             self._save_pipeline()
 
+    @log_state(state_logger)
     @torch.inference_mode()
     def _simple_gen(
         self,
@@ -712,6 +734,7 @@ class TimeDiffusion:
 
         gen_pbar.close()
 
+    @log_state(state_logger)
     @torch.inference_mode()
     def _inv_regen(
         self,
@@ -880,8 +903,172 @@ class TimeDiffusion:
         # TODO: compute metric on full test data & set self.best_model_to_date accordingly
 
         eval_batches_pbar.close()
-        self.logger.info(f"Finished evaluation on process ({self.accelerator.process_index})", main_process_only=False)
+        self.logger.info(
+            f"Finished InvertedRegeneration on process ({self.accelerator.process_index})", main_process_only=False
+        )
 
+    @log_state(state_logger)
+    @torch.inference_mode()
+    def _iter_inv_regen(
+        self,
+        dataloaders: dict[float, DataLoader],
+        pbar_manager: Manager,
+        eval_strat: IterativeInvertedRegeneration,
+        eval_net: UNet2DModel | UNet2DConditionModel,
+        inference_video_time_encoding: VideoTimeEncoding,
+    ):
+        """
+        This strategy performs iteratively:
+            1. an inversion to obtain the starting Gaussian
+            2. a generation from that inverted Gaussian sample to obtain the next image of the video
+        over all video timesteps.
+
+        It is thus quite costly to run...
+
+        Note that any other dataloader than the first one is actually not used for evaluation.
+        """
+        # Checks
+        assert (
+            list(dataloaders.keys())[0] == 0
+        ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
+
+        # Setup schedulers
+        inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # type: ignore
+        inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+        # duplicate the scheduler to not mess with the training one
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
+        inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+        # Misc.
+        torch.cuda.empty_cache()
+        gc.collect()
+        self.logger.info(
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
+        )
+
+        # Use only 1st dataloader for now TODO
+        first_dl = list(dataloaders.values())[0]
+        eval_batches_pbar = pbar_manager.counter(
+            total=len(first_dl),
+            position=2,
+            desc="Iterating over evaluation data batches",
+            enable=self.accelerator.is_main_process,
+            leave=False,
+            min_delta=1,
+        )
+        eval_batches_pbar.refresh()
+
+        video_times = torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)
+
+        # Now generate & evaluate the trajectories
+        for batch_idx, batch in enumerate(iter(first_dl)):
+            # 1. Save the to-be inverted images
+            if batch_idx == 0:
+                save_eval_artifacts_log_to_wandb(
+                    batch,
+                    self.saved_artifacts_folder,
+                    self.global_optimization_step,
+                    self.accelerator,
+                    self.logger,
+                    eval_strat.name,
+                    "starting_samples",
+                    ["[-1;1] raw", "image min-max"],
+                    self.eval_rng,  # type: ignore
+                )
+
+            # Generate the trajectory
+            # TODO: parallelize the generation along video time?
+            # usefull if small inference batch size, otherwise useless
+            video = []
+            video_time_pbar = pbar_manager.counter(
+                total=self.eval_cfg.nb_video_timesteps,
+                position=3,
+                desc="Iterating over video timesteps" + " " * 8,
+                enable=self.accelerator.is_main_process,
+                leave=False,
+                min_delta=1,
+            )
+
+            prev_video_time = 0
+            image = batch
+            for video_t_idx, video_time in enumerate(video_times):
+                self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps}")
+
+                # 2. Generate the inverted Gaussians
+                inverted_gauss = image
+                inversion_video_time = inference_video_time_encoding.forward(prev_video_time, batch.shape[0])
+
+                for t in inverted_scheduler.timesteps:
+                    model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # type: ignore
+                    inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
+
+                if batch_idx == 0:
+                    save_eval_artifacts_log_to_wandb(
+                        inverted_gauss,
+                        self.saved_artifacts_folder,
+                        self.global_optimization_step,
+                        self.accelerator,
+                        self.logger,
+                        eval_strat.name,
+                        "inversions",
+                        ["image min-max", "image 5perc-95perc"],
+                        self.eval_rng,  # type: ignore
+                    )
+
+                # 3. Generate the next image from it
+                image = inverted_gauss
+                video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
+
+                for t in inference_scheduler.timesteps:
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # type: ignore
+                    image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+
+                video.append(image.clone())
+                prev_video_time = video_time.item()
+                video_time_pbar.update()
+
+            video_time_pbar.close(clear=True)
+
+            video = torch.stack(video)
+            # wandb expects (batch_size, video_time, channels, height, width)
+            video = video.permute(1, 0, 2, 3, 4)
+            expected_video_shape = (
+                self.eval_cfg.batch_size,
+                self.eval_cfg.nb_video_timesteps,
+                self.accelerator.unwrap_model(self.net).config["out_channels"],
+                self.accelerator.unwrap_model(self.net).config["sample_size"],
+                self.accelerator.unwrap_model(self.net).config["sample_size"],
+            )
+            assert (
+                video.shape == expected_video_shape
+            ), f"Expected video shape {expected_video_shape}, got {video.shape}"
+            if batch_idx == 0:
+                save_eval_artifacts_log_to_wandb(
+                    video,
+                    self.saved_artifacts_folder,
+                    self.global_optimization_step,
+                    self.accelerator,
+                    self.logger,
+                    eval_strat.name,
+                    "trajectories",
+                    ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    self.eval_rng,  # type: ignore
+                )
+
+            eval_batches_pbar.update()
+            break  # TODO: keep generating on the entire test set and evaluate the trajectories
+
+        # 3. Evaluate the trajectories
+        self.logger.warning_once("Should implement evaluation metrics here.")
+        # TODO: compute metric on full test data & set self.best_model_to_date accordingly
+
+        eval_batches_pbar.close()
+        self.logger.info(
+            f"Finished IterativeInvertedRegeneration on process ({self.accelerator.process_index})",
+            main_process_only=False,
+        )
+
+    @log_state(state_logger)
     @torch.inference_mode()
     def _forward_noising(
         self,
@@ -1033,8 +1220,11 @@ class TimeDiffusion:
         # TODO: compute metric on full test data & set self.best_model_to_date accordingly
 
         eval_batches_pbar.close()
-        self.logger.info(f"Finished evaluation on process ({self.accelerator.process_index})", main_process_only=False)
+        self.logger.info(
+            f"Finished ForwardNoising on process ({self.accelerator.process_index})", main_process_only=False
+        )
 
+    @log_state(state_logger)
     def _save_pipeline(self):
         """
         Save the net to disk as an independent pretrained pipeline.
@@ -1051,6 +1241,7 @@ class TimeDiffusion:
             self.dynamic.save_pretrained(self.model_save_folder / "dynamic")
         self.logger.info(f"Saved net, video time encoder and dynamic config to {self.model_save_folder}")
 
+    @log_state(state_logger)
     def _checkpoint(self):
         """
         Save the current state of the models, optimizers, schedulers, and dataloaders.

@@ -1,6 +1,10 @@
+import time
+from functools import wraps
 from pathlib import Path
 
 import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
 import torch
 import wandb
 from accelerate import Accelerator
@@ -112,6 +116,7 @@ def modify_args_for_debug(
             "evaluation",
             "every_n_opt_steps",
         ): 300,
+        ("evaluation", "nb_video_timesteps"): 5,
     }
     # now actually change the configuration,
     # updating the registered wandb config accordingly
@@ -213,7 +218,7 @@ def save_eval_artifacts_log_to_wandb(
     if file_path.exists():  # might exist if resuming
         file_path.unlink()  # must manually remove it as it's most probably read-only
     torch.save(sel_to_save, file_path)
-    logger.info(
+    logger.debug(
         f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}", main_process_only=False
     )
     logger.debug(
@@ -245,7 +250,7 @@ def save_eval_artifacts_log_to_wandb(
                 {f"{eval_strat}/Generated videos/{norm_method} normalized": videos},
                 step=global_optimization_step,
             )
-        logger.info(
+        logger.debug(
             f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B on main process"
         )
     # images case (inverted Gaussians)
@@ -333,3 +338,99 @@ def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[s
 
 def bold(s: str | int) -> str:
     return colored(s, None, None, ["bold"])
+
+
+def log_state(state_logger):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time() - state_logger.start_time
+            result = func(*args, **kwargs)
+            end_time = time.time() - state_logger.start_time
+            state_logger.log_state(func.__name__, start_time, end_time)
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+class StateLogger:
+    def __init__(self):
+        self.states: list[tuple[str, float, float]] = []
+        self.start_time = time.time()
+        self.color_mapping: dict[str, str] = {}
+        self.last_color_index: int = -1
+        self._cmap = px.colors.sequential.Viridis
+
+    def log_state(self, state: str, start: float, end: float):
+        self.states.append((state, start, end))
+
+    def create_gantt_chart(self):
+        fig = go.Figure()
+
+        unique_states = list(set(state for state, _, _ in self.states))
+        for state in unique_states:
+            if state not in self.color_mapping:
+                self.color_mapping[state] = self._generate_new_color()
+
+        func_names_in_legend = set()
+
+        prev_state = self.states[0][0]
+        current_bar_start = self.states[0][1]
+        current_bar_end = self.states[0][2]
+        for state, start, end in self.states:
+            if state == prev_state:
+                current_bar_end = end  # accumulate identical states into one single bar
+            else:
+                fig.add_trace(
+                    go.Bar(
+                        x=[current_bar_end - current_bar_start],
+                        y=["state_timeline"],
+                        orientation="h",
+                        name=prev_state,
+                        hoverinfo="text",
+                        hovertext=f"{prev_state}: {current_bar_end - current_bar_start:.2f}s",
+                        marker_color=self.color_mapping[prev_state],
+                        showlegend=prev_state not in func_names_in_legend,
+                    )
+                )
+                prev_state = state
+                current_bar_start = start
+                current_bar_end = end
+                func_names_in_legend.add(prev_state)
+
+        # add the last bar
+        fig.add_trace(
+            go.Bar(
+                x=[current_bar_end - current_bar_start],
+                y=["state_timeline"],
+                orientation="h",
+                name=prev_state,
+                hoverinfo="text",
+                hovertext=f"{prev_state}: {current_bar_end - current_bar_start:.2f}s",
+                marker_color=self.color_mapping[prev_state],
+                showlegend=prev_state not in func_names_in_legend,
+            )
+        )
+
+        fig.update_layout(
+            title="ML Training State Timeline",
+            xaxis_title="Time (s)",
+            yaxis_title="",
+            barmode="stack",
+            height=100,
+            showlegend=True,
+            legend_traceorder="reversed",
+        )
+
+        # Remove y-axis ticks and labels
+        fig.update_yaxes(showticklabels=False, showgrid=False)
+
+        return fig
+
+    def _generate_new_color(self):
+        self.last_color_index = (self.last_color_index + 1) % len(self._cmap)
+        selected_color = self._cmap[self.last_color_index]
+        r, g, b = int(selected_color[1:3], 16), int(selected_color[3:5], 16), int(selected_color[5:], 16)
+        return f"rgb({r},{g},{b})"

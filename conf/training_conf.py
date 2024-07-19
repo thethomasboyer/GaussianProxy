@@ -96,6 +96,11 @@ class InvertedRegeneration(EvaluationStrategy):
 
 
 @dataclass
+class IterativeInvertedRegeneration(EvaluationStrategy):
+    name: str = field(default="IterativeInvertedRegeneration")
+
+
+@dataclass
 class SimpleGeneration(EvaluationStrategy):
     name: str = field(default="SimpleGeneration")
 
