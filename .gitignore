@@ -15,4 +15,5 @@ conf/encoding_conf
 notebooks/**/*.mp4
 notebooks/**/*.png
 notebooks/**/*.pt
+notebooks/playground.ipynb
 *_outputs/
