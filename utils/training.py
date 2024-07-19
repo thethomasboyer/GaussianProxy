@@ -258,7 +258,6 @@ class TimeDiffusion:
                     test_timestep_dataloaders,
                     pbar_manager,
                 )
-            self.accelerator.wait_for_everyone()
         if profiler is not None:
             profiler.stop()
 
@@ -379,7 +378,6 @@ class TimeDiffusion:
                     count=self.instant_batch_idx,
                     min_delta=1,
                 )
-            self.accelerator.wait_for_everyone()
         batches_pbar.close()
         # update epoch
         self.global_epoch += 1
@@ -636,8 +634,11 @@ class TimeDiffusion:
         """
         Generate inference trajectories, compute metrics and save the model if best to date.
 
-        Should be called by all processes.
+        Should be called by all processes as distributed barriers are used here.
         """
+        # 0. Wait for all processes to reach this point
+        self.accelerator.wait_for_everyone()
+
         # 1. Save instantenous states of models
         # tmp save folder in the checkpoints folder
         tmp_save_folder = Path(self.checkpointing_cfg.chckpt_save_path, ".tmp_inference_save")
@@ -724,7 +725,8 @@ class TimeDiffusion:
         # Misc.
         torch.cuda.empty_cache()
         gc.collect()
-        self.logger.info(
+        self.logger.info(f"Starting {eval_strat.name}")
+        self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
         )
 
@@ -796,7 +798,8 @@ class TimeDiffusion:
         # Misc.
         torch.cuda.empty_cache()
         gc.collect()
-        self.logger.info(
+        self.logger.info(f"Starting {eval_strat.name}")
+        self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
         )
 
@@ -972,7 +975,8 @@ class TimeDiffusion:
         # Misc.
         torch.cuda.empty_cache()
         gc.collect()
-        self.logger.info(
+        self.logger.info(f"Starting {eval_strat.name}")
+        self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
         )
 
@@ -1127,7 +1131,8 @@ class TimeDiffusion:
         # Misc.
         torch.cuda.empty_cache()
         gc.collect()
-        self.logger.info(
+        self.logger.info(f"Starting {eval_strat.name}")
+        self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
         )
 
@@ -1277,10 +1282,13 @@ class TimeDiffusion:
         Save the current state of the models, optimizers, schedulers, and dataloaders.
 
         Should be called by all processes as `accelerator.save_state` handles checkpointing
-        in DDP setting internally.
+        in DDP setting internally, and distributed barriers are used here.
 
         Used to resume training.
         """
+        # First, wait for all processes to reach this point
+        self.accelerator.wait_for_everyone()
+
         this_chkpt_subfolder = Path(self.checkpointing_cfg.chckpt_save_path) / f"step_{self.global_optimization_step}"
         self.accelerator.save_state(this_chkpt_subfolder.as_posix())
 
@@ -1325,7 +1333,10 @@ def resume_from_checkpoint(
     logger: MultiProcessAdapter,
     accelerator: Accelerator,
 ) -> ResumingArgs | None:
-    """Should be called by all processes"""
+    """
+    Should be called by all processes as `accelerator.load_state` handles checkpointing
+    and distributed barriers are used here.
+    """
     resume_arg = cfg.checkpointing.resume_from_checkpoint
     # 1. first find the correct subfolder to resume from
     chckpt_save_path = Path(cfg.checkpointing.chckpt_save_path)
