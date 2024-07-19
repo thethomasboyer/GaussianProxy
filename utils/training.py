@@ -1,6 +1,5 @@
 import gc
 import json
-import os
 import shutil
 from dataclasses import dataclass, field, fields
 
@@ -1349,8 +1348,8 @@ def resume_from_checkpoint(
             logger.warning("No 'checkpoints' directory found in run folder; creating one.")
             chckpt_save_path.mkdir()
         accelerator.wait_for_everyone()
-        dirs = os.listdir(chckpt_save_path)
-        dirs = sorted(dirs, key=lambda x: int(x.split("_")[1]))
+        dirs = [d for d in chckpt_save_path.iterdir() if not d.name.startswith(".")]
+        dirs = sorted(dirs, key=lambda d: int(d.name.split("_")[1]))
         path = Path(chckpt_save_path, dirs[-1]) if len(dirs) > 0 else None
     # 2. load state and other resuming args if applicable
     if path is None:
@@ -1369,28 +1368,3 @@ def resume_from_checkpoint(
         ), f"Expected matching field names between ResumingArgs and the loaded JSON file , but got {field_names} and {data.keys()}"
 
     return resuming_args
-
-
-# def _log_to_file_only(logger: MultiProcessAdapter, msg: str, level: int) -> None:
-#     """
-#     Logs a message to file handlers only.
-
-#     This function iterates over all handlers attached to the logger,
-#     and if the handler is a FileHandler, it directly calls its emit
-#     method to log the message. This way, only the file handlers will
-#     log the message.
-
-#     Args:
-#         logger (MultiProcessAdapter): The logger instance with attached handlers.
-#         msg (str): The message to log.
-#         level (int): The logging level.
-
-#     Returns:
-#         None
-#     """
-#     logger.debug(f"DEBUG: logger.handlers={logger.handlers}")
-#     for handler in logger.logger.handlers:
-#         if isinstance(handler, FileHandler):  # TODO: doesn't work
-#             handler.emit(makeLogRecord({"msg": msg, "level": level}))
-#         else:
-#             logger.debug(f"Skipping handler of type {type(handler)}")

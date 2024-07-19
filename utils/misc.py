@@ -132,10 +132,6 @@ def modify_args_for_debug(
                 wandb_tracker.config.update({"/".join(param_name_tuple): new_param_value}, allow_val_change=True)
 
 
-def camel_to_snake(name: str) -> str:
-    return "".join(["_" + i.lower() if i.isupper() else i for i in name]).lstrip("_")
-
-
 def get_evenly_spaced_timesteps(nb_empirical_dists: int) -> list[float]:
     """
     Give evenly spaced timesteps between 0 and 1 to empirical distributions.
