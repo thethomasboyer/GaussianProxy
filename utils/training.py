@@ -1313,7 +1313,9 @@ class TimeDiffusion:
 
         # Delete old checkpoints if needed
         if self.accelerator.is_main_process:
-            checkpoints_list = list(Path(self.checkpointing_cfg.chckpt_save_path).iterdir())
+            checkpoints_list = [
+                d for d in self.checkpointing_cfg.chckpt_save_path.iterdir() if not d.name.startswith(".")
+            ]
             nb_checkpoints = len(checkpoints_list)
             if nb_checkpoints > self.checkpointing_cfg.checkpoints_total_limit:
                 sorted_chkpt_subfolders = sorted(checkpoints_list, key=lambda x: int(x.name.split("_")[1]))

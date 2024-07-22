@@ -134,7 +134,11 @@ class Checkpointing:
     checkpoints_total_limit: int
     resume_from_checkpoint: bool | int
     checkpoint_every_n_steps: int
-    chckpt_save_path: Path | str
+    chckpt_save_path: Path
+
+    def __post_init__(self):
+        if not isinstance(self.chckpt_save_path, Path):
+            self.chckpt_save_path = Path(self.chckpt_save_path)
 
 
 @dataclass
