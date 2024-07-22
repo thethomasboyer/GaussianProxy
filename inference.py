@@ -187,7 +187,7 @@ def forward_noising(
         batch,
         base_save_path,
         "starting_samples",
-        ["[-1;1] raw", "image min-max"],
+        ["-1_1 raw", "image min-max"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
@@ -212,7 +212,7 @@ def forward_noising(
         slightly_noised_sample,
         base_save_path,
         "noised_samples",
-        ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+        ["image min-max", "-1_1 raw", "-1_1 clipped"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
@@ -288,7 +288,7 @@ def forward_noising(
         video,
         base_save_path,
         "trajectories",
-        ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+        ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
@@ -325,7 +325,7 @@ def forward_noising_linear_scaling(
         batch,
         base_save_path,
         "starting_samples",
-        ["[-1;1] raw", "image min-max"],
+        ["-1_1 raw", "image min-max"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
@@ -418,7 +418,7 @@ def forward_noising_linear_scaling(
         video,
         base_save_path,
         "trajectories",
-        ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+        ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
@@ -451,7 +451,7 @@ def inverted_regeneration(
         batch,
         base_save_path,
         "starting_samples",
-        ["[-1;1] raw", "image min-max"],
+        ["-1_1 raw", "image min-max"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
@@ -556,7 +556,7 @@ def inverted_regeneration(
         video,
         base_save_path,
         "trajectories",
-        ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+        ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )

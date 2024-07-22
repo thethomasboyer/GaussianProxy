@@ -758,7 +758,7 @@ class TimeDiffusion:
             self.logger,
             eval_strat.name,
             "simple_generations",
-            ["[-1;1] raw", "image min-max", "[-1;1] clipped"],
+            ["-1_1 raw", "image min-max", "-1_1 clipped"],
             self.eval_rng,  # type: ignore
             captions=[f"time: {round(t.item(), 3)}" for t in random_video_time],
         )
@@ -826,7 +826,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "starting_samples",
-                    ["[-1;1] raw", "image min-max"],
+                    ["-1_1 raw", "image min-max"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -865,7 +865,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "regenerations",
-                    ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    ["image min-max", "-1_1 raw", "-1_1 clipped"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -923,7 +923,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "trajectories",
-                    ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -1005,7 +1005,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "starting_samples",
-                    ["[-1;1] raw", "image min-max"],
+                    ["-1_1 raw", "image min-max"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -1084,7 +1084,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "trajectories",
-                    ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -1159,7 +1159,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "starting_samples",
-                    ["[-1;1] raw", "image min-max"],
+                    ["-1_1 raw", "image min-max"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -1184,7 +1184,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "noised_samples",
-                    ["image min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    ["image min-max", "-1_1 raw", "-1_1 clipped"],
                     self.eval_rng,  # type: ignore
                 )
 
@@ -1242,7 +1242,7 @@ class TimeDiffusion:
                     self.logger,
                     eval_strat.name,
                     "trajectories",
-                    ["image min-max", "video min-max", "[-1;1] raw", "[-1;1] clipped"],
+                    ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
                     self.eval_rng,  # type: ignore
                 )
 

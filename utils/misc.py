@@ -246,9 +246,9 @@ def save_eval_artifacts_log_to_wandb(
                 {f"{eval_strat}/Generated videos/{norm_method} normalized": videos},
                 step=global_optimization_step,
             )
-        logger.debug(
-            f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B on main process"
-        )
+            logger.debug(
+                f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B on main process"
+            )
     # images case (inverted Gaussians)
     else:
         match artifact_name:
@@ -314,10 +314,10 @@ def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[s
                 assert elems.ndim == 5, f"Expected 5D tensor for video normalization, got shape {elems.shape}"
                 norm_elems = elems.clone() - elems.amin(dim=(1, 2, 3, 4), keepdim=True)
                 norm_elems /= norm_elems.amax(dim=(1, 2, 3, 4), keepdim=True)
-            case "[-1;1] raw":
+            case "-1_1 raw":
                 norm_elems = elems.clone() / 2
                 norm_elems += 0.5
-            case "[-1;1] clipped":
+            case "-1_1 clipped":
                 norm_elems = elems.clone() / 2
                 norm_elems += 0.5
                 norm_elems = norm_elems.clamp(0, 1)
