@@ -19,7 +19,13 @@ from rich.traceback import install
 from torch import IntTensor, Tensor
 
 from conf.inference_conf import InferenceConfig
-from conf.training_conf import ForwardNoising, ForwardNoisingLinearScaling, InvertedRegeneration, SimpleGeneration
+from conf.training_conf import (
+    ForwardNoising,
+    ForwardNoisingLinearScaling,
+    InvertedRegeneration,
+    IterativeInvertedRegeneration,
+    SimpleGeneration,
+)
 from my_conf.my_inference_conf import inference_conf
 from utils.data import NumpyDataset
 from utils.misc import _normalize_elements_for_logging
@@ -149,7 +155,7 @@ def main(cfg: InferenceConfig) -> None:
         logger.info(f"Running evaluation strategy {eval_strat_idx+1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
         logger.name = eval_strat.name
         if type(eval_strat) is SimpleGeneration:
-            raise NotImplementedError
+            simple_gen(cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager)
         elif type(eval_strat) is ForwardNoising:
             forward_noising(cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager)
         elif type(eval_strat) is ForwardNoisingLinearScaling:
@@ -158,8 +164,75 @@ def main(cfg: InferenceConfig) -> None:
             )
         elif type(eval_strat) is InvertedRegeneration:
             inverted_regeneration(cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager)
+        elif type(eval_strat) is IterativeInvertedRegeneration:
+            iterative_inverted_regeneration(
+                cfg, eval_strat, net, video_time_encoder, dynamic, starting_batch, pbar_manager
+            )
         else:
             raise ValueError(f"Unknown evaluation strategy {eval_strat}")
+
+
+def simple_gen(
+    cfg: InferenceConfig,
+    eval_strat: SimpleGeneration,
+    net: UNet2DConditionModel,
+    video_time_encoder: VideoTimeEncoding,
+    dynamic: DDIMScheduler,
+    batch: Tensor,
+    pbar_manager: Manager,
+):
+    """
+    Just simple generations.
+
+    `batch` is ignored!
+    """
+    # -1. Prepare output directory
+    base_save_path = cfg.output_dir / eval_strat.name
+    if base_save_path.exists():
+        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+    base_save_path.mkdir(parents=True)
+    logger.debug(f"Saving outputs to {base_save_path}")
+
+    # 0. Setup schedulers
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+    # 2. Generate the time encodings
+    eval_video_times = torch.rand(
+        len(batch),
+        device=cfg.device,
+    )
+    eval_video_times = torch.sort(eval_video_times).values  # sort it for better viz
+    random_video_time_enc = video_time_encoder.forward(eval_video_times)
+
+    # 3. Generate a sample
+    gen_pbar = pbar_manager.counter(
+        total=len(inference_scheduler.timesteps),
+        position=2,
+        desc="Generating samples",
+        leave=False,
+    )
+    gen_pbar.refresh()
+
+    image = torch.randn_like(batch)
+
+    for t in inference_scheduler.timesteps:
+        model_output: Tensor = net.forward(
+            image, t, encoder_hidden_states=random_video_time_enc.unsqueeze(1), return_dict=False
+        )[0]
+        image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+        gen_pbar.update()
+
+    gen_pbar.close()
+
+    save_images_or_videos(
+        image,
+        base_save_path,
+        "simple_generations",
+        ["image min-max", "-1_1 raw", "-1_1 clipped"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
 
 
 def forward_noising(
@@ -562,6 +635,143 @@ def inverted_regeneration(
     )
 
 
+def iterative_inverted_regeneration(
+    cfg: InferenceConfig,
+    eval_strat: IterativeInvertedRegeneration,
+    net: UNet2DConditionModel,
+    video_time_encoder: VideoTimeEncoding,
+    dynamic: DDIMScheduler,
+    batch: Tensor,
+    pbar_manager: Manager,
+):
+    """
+    This strategy performs iteratively:
+        1. an inversion to obtain the starting Gaussian
+        2. a generation from that inverted Gaussian sample to obtain the next image of the video
+    over all video timesteps.
+
+    It is thus quite costly to run...
+    """
+    # -1. Prepare output directory
+    base_save_path = cfg.output_dir / eval_strat.name
+    if base_save_path.exists():
+        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+    base_save_path.mkdir(parents=True)
+    logger.debug(f"Saving outputs to {base_save_path}")
+
+    # 0. Setup schedulers
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # type: ignore
+    inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+    # 1. Save the to-be noised images
+    save_images_or_videos(
+        batch,
+        base_save_path,
+        "starting_samples",
+        ["-1_1 raw", "image min-max"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+    # 2. Generate the trajectory
+    video = []
+
+    video_time_pbar = pbar_manager.counter(
+        total=cfg.nb_video_timesteps,
+        position=1,
+        desc="Video timesteps",
+        leave=False,
+    )
+    video_time_pbar.refresh()
+
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+
+    prev_video_time = 0
+    image = batch
+    for video_t_idx, video_time in enumerate(video_times):
+        logger.debug(f"Video timestep index {video_t_idx + 1} / {cfg.nb_video_timesteps}")
+
+        # 2.A Generate the inverted Gaussians
+        inverted_gauss = image
+        inversion_video_time = video_time_encoder.forward(prev_video_time, batch.shape[0])
+
+        diff_time_pbar = pbar_manager.counter(
+            total=len(inverted_scheduler.timesteps),
+            position=2,
+            desc="Diffusion timesteps (inversion)",
+            leave=False,
+        )
+        diff_time_pbar.refresh()
+
+        for t in inverted_scheduler.timesteps:
+            model_output = net.forward(
+                inverted_gauss, t, encoder_hidden_states=inversion_video_time.unsqueeze(1), return_dict=False
+            )[0]
+            inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
+            diff_time_pbar.update()
+
+        diff_time_pbar.close()
+
+        save_images_or_videos(
+            inverted_gauss,
+            base_save_path,
+            f"inverted_gaussians_time{video_t_idx}",
+            ["image min-max"],
+            cfg.n_rows_displayed,
+            padding=0 if cfg.plate_name_to_simulate is not None else 2,
+        )
+
+        # 2.B Generate the next image from it
+        image = inverted_gauss
+        video_time_enc = video_time_encoder.forward(video_time.item(), batch.shape[0])
+
+        diff_time_pbar = pbar_manager.counter(
+            total=len(inference_scheduler.timesteps),
+            position=2,
+            desc="Diffusion timesteps (generation)",
+            leave=False,
+        )
+        diff_time_pbar.refresh()
+
+        for t in inference_scheduler.timesteps:
+            model_output: Tensor = net.forward(
+                image, t, encoder_hidden_states=video_time_enc.unsqueeze(1), return_dict=False
+            )[0]
+            image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+            diff_time_pbar.update()
+
+        diff_time_pbar.close()
+
+        video.append(image.clone())
+        prev_video_time = video_time.item()
+        video_time_pbar.update()
+
+    video_time_pbar.close(clear=True)
+
+    # video is a list of nb_video_timesteps elements, each of shape (batch_size, channels, hight, width)
+    video = torch.stack(video)  # (nb_video_timesteps, batch_size, channels, height, width)
+    # save_images_or_videos expects (video_time, batch_size, channels, height, width)
+    expected_video_shape = (
+        cfg.nb_video_timesteps,
+        cfg.nb_generated_samples,
+        net.config["out_channels"],
+        net.config["sample_size"],
+        net.config["sample_size"],
+    )
+    assert video.shape == expected_video_shape, f"Expected video shape {expected_video_shape}, got {video.shape}"
+    logger.debug(f"Saving video tensor of shape {video.shape}")
+    save_images_or_videos(
+        video,
+        base_save_path,
+        "trajectories",
+        ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
+        cfg.n_rows_displayed,
+        padding=0 if cfg.plate_name_to_simulate is not None else 2,
+    )
+
+
 def save_images_or_videos(
     tensor: Tensor,
     base_save_path: Path,
@@ -582,17 +792,17 @@ def save_images_or_videos(
             for norm_method, normed_vids in normalized_elements.items():
                 # save the videos in a grid
                 save_path = base_save_path / f"{artifact_name}_{norm_method}.mp4"
-                save_grid_of_videos(normed_vids, save_path, nrows, padding)
+                _save_grid_of_videos(normed_vids, save_path, nrows, padding)
                 logger.debug(f"Saved {norm_method} normalized {artifact_name} to {save_path.name}")
         case 4:  # images
             for norm_method, normed_imgs in normalized_elements.items():
                 # save the images in a grid
                 save_path = base_save_path / f"{artifact_name}_{norm_method}.png"
-                save_grid_of_images(normed_imgs, save_path, nrows, padding)
+                _save_grid_of_images(normed_imgs, save_path, nrows, padding)
                 logger.debug(f"Saved {norm_method} normalized {artifact_name} to {save_path.name}")
 
 
-def save_grid_of_videos(videos_tensor: ndarray, save_path: Path, nrows: int, padding: int):
+def _save_grid_of_videos(videos_tensor: ndarray, save_path: Path, nrows: int, padding: int):
     # Checks
     assert videos_tensor.ndim == 5, f"Expected 5D tensor, got {videos_tensor.shape}"
     assert videos_tensor.dtype == np.uint8, f"Expected dtype uint8, got {videos_tensor.dtype}"
@@ -614,7 +824,7 @@ def save_grid_of_videos(videos_tensor: ndarray, save_path: Path, nrows: int, pad
     writer.close()
 
 
-def save_grid_of_images(images_tensor: ndarray, save_path: Path, nrows: int, padding: int):
+def _save_grid_of_images(images_tensor: ndarray, save_path: Path, nrows: int, padding: int):
     # Checks
     assert images_tensor.ndim == 4, f"Expected 4D tensor, got {images_tensor.shape}"
     assert images_tensor.dtype == np.uint8, f"Expected dtype uint8, got {images_tensor.dtype}"
