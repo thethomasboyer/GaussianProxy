@@ -209,11 +209,16 @@ def save_eval_artifacts_log_to_wandb(
     sel_captions = [captions[i] for i in sel_idxes]
 
     # 2. Save some raw images / trajectories to disk (all processes)
-    file_path = save_folder / artifact_name / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
+    file_path = (
+        save_folder
+        / eval_strat
+        / artifact_name
+        / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
+    )
     file_path.parent.mkdir(exist_ok=True, parents=True)
     if file_path.exists():  # might exist if resuming
         file_path.unlink()  # must manually remove it as it's most probably read-only
-    torch.save(sel_to_save, file_path)
+    torch.save(sel_to_save.to("cpu", torch.float16), file_path)
     logger.debug(
         f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}", main_process_only=False
     )

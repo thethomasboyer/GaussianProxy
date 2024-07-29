@@ -581,7 +581,6 @@ class TimeDiffusion:
                 "time": time,
                 "L2 gradient norm": grad_norm,
             },
-            step=self.global_optimization_step,
         )
         # Wake me up at 3am if loss is NaN
         if torch.isnan(loss) and self.accelerator.is_main_process:
