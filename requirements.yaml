@@ -3,9 +3,8 @@ channels:
 - pytorch
 - nvidia
 - conda-forge
-- fastai
 dependencies:
-- conda-forge::python=3.11
+- conda-forge::python=3.12
 - conda-forge::accelerate
 - conda-forge::diffusers
 - conda-forge::dataclasses
@@ -17,13 +16,11 @@ dependencies:
 - conda-forge::rich
 - conda-forge::submitit
 - conda-forge::termcolor
-- pytorch::pytorch
+- pytorch::pytorch>=2
 - conda-forge::torchinfo
 - pytorch::torchvision
-- pytorch::pytorch-cuda=12.1
+- pytorch::pytorch-cuda=12.4
 - conda-forge::enlighten
-- conda-forge::wandb>=0.17.1
-- fastai::opencv-python-headless
 - conda-forge::plotly
 - conda-forge::pandas
 - conda-forge::pillow
@@ -37,3 +34,9 @@ dependencies:
 - conda-forge::pylint
 - conda-forge::tensorboard
 - conda-forge::ffmpeg=6
+- conda-forge::gitpython
+- conda-forge::imageio
+- pip
+- pip:
+    - wandb>=0.17.1
+    - opencv-python-headless
