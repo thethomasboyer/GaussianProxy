@@ -23,12 +23,20 @@ class VideoTimeEncoding(ModelMixin, ConfigMixin):
     """
 
     @register_to_config
-    def __init__(self, encoding_dim: int, time_embed_dim: int, flip_sin_to_cos: bool, downscale_freq_shift: float):
+    def __init__(
+        self,
+        encoding_dim: int,
+        time_embed_dim: int,
+        flip_sin_to_cos: bool,
+        downscale_freq_shift: float,
+    ):
         super().__init__()
 
         # returns a tensor or shape (batch_size, encoding_dim)
         self.sinusoidal_encoding = Timesteps(
-            num_channels=encoding_dim, flip_sin_to_cos=flip_sin_to_cos, downscale_freq_shift=downscale_freq_shift
+            num_channels=encoding_dim,
+            flip_sin_to_cos=flip_sin_to_cos,
+            downscale_freq_shift=downscale_freq_shift,
         )
 
         self.learnable_time_embedding = TimestepEmbedding(in_channels=encoding_dim, time_embed_dim=time_embed_dim)
@@ -39,9 +47,9 @@ class VideoTimeEncoding(ModelMixin, ConfigMixin):
             assert batch_size is None, f"`batch_size` must be `None` if `time` is a `Tensor`, got {batch_size}"
             assert time.ndim == 1, f"Expected `time` to be 1D, got {time.shape}"
             return time
-        elif isinstance(time, float) or isinstance(time, int):
+        elif isinstance(time, (int, float)):
             assert batch_size is not None, "Must provide `batch_size` if `time` is a `float` or `int`"
-            return torch.tensor([time] * batch_size, device=self.device)
+            return torch.tensor([time] * batch_size, device=self.device, dtype=self.dtype)
         else:
             raise ValueError(f"`time` must be a `float` or a `Tensor`, got {type(time)}")
 
@@ -68,6 +76,6 @@ class VideoTimeEncoding(ModelMixin, ConfigMixin):
         `batch_size` is either the passed `batch_size` or `time.shape[0]`
         """
         time_tensor = self._time_to_tensor(time, batch_size)
-        sinusoidal_code = self.sinusoidal_encoding(time_tensor)
+        sinusoidal_code = self.sinusoidal_encoding(time_tensor).to(time_tensor.dtype)
         video_time_embedding = self.learnable_time_embedding(sinusoidal_code)
         return video_time_embedding

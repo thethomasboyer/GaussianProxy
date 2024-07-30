@@ -3,10 +3,13 @@ import logging
 import sys
 from math import ceil
 from pathlib import Path
+from typing import Optional
 
 import colorlog
 import imageio
+import matplotlib.pyplot as plt
 import numpy as np
+import scipy.stats as stats
 import torch
 import torchvision
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
@@ -68,6 +71,9 @@ logger.setLevel(logging.DEBUG)
 logger.addHandler(term_handler)
 logger.addHandler(file_handler)
 
+# Convert str dtype to torch symbol here to avoid loading torch at configuration time
+torch_dtype = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[inference_conf.dtype]
+
 
 def main(cfg: InferenceConfig) -> None:
     logger.info("\n" + "#" * 120 + "\n#" + " " * 47 + "Starting inference script" + " " * 46 + "#\n" + "#" * 120)
@@ -89,18 +95,18 @@ def main(cfg: InferenceConfig) -> None:
     #                                          Load Model
     ###############################################################################################
     # denoiser
-    net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(run_path / "saved_model" / "net")  # type: ignore
+    net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # type: ignore
+        run_path / "saved_model" / "net", torch_dtype=torch_dtype
+    )
     net.to(cfg.device)
-    net.eval()
     if cfg.compile:
         net = torch.compile(net)  # type: ignore
 
     # time encoder
     video_time_encoder: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # type: ignore
-        run_path / "saved_model" / "video_time_encoder"
+        run_path / "saved_model" / "video_time_encoder", torch_dtype=torch_dtype
     )
     video_time_encoder.to(cfg.device)
-    video_time_encoder.eval()
 
     # dynamic
     dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(run_path / "saved_model" / "dynamic")
@@ -143,8 +149,8 @@ def main(cfg: InferenceConfig) -> None:
         tensors = starting_ds.__getitems__(sample_idxes)
         logger.info(f"Selected {len(sample_idxes)} samples to run inference from at random.")
 
-    starting_batch = torch.stack(tensors).to(cfg.device)
-    logger.debug(f"Using starting data of shape {starting_batch.shape}")
+    starting_batch = torch.stack(tensors).to(cfg.device, torch_dtype)
+    logger.debug(f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype}")
 
     ###############################################################################################
     #                                       Inference passes
@@ -198,10 +204,7 @@ def simple_gen(
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 2. Generate the time encodings
-    eval_video_times = torch.rand(
-        len(batch),
-        device=cfg.device,
-    )
+    eval_video_times = torch.rand(len(batch), device=cfg.device, dtype=torch_dtype)
     eval_video_times = torch.sort(eval_video_times).values  # sort it for better viz
     random_video_time_enc = video_time_encoder.forward(eval_video_times)
 
@@ -266,7 +269,7 @@ def forward_noising(
     )
 
     # 2. Sample Gaussian noise and noise the images until some step
-    noise = torch.randn(batch.shape, dtype=batch.dtype, device=batch.device)
+    noise = torch.randn_like(batch)
     noise_timestep_idx = int((1 - eval_strat.forward_noising_frac) * len(inference_scheduler.timesteps))
     noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
     msg = (
@@ -304,7 +307,7 @@ def forward_noising(
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=torch_dtype)
 
     for vid_batch_idx in range(nb_vid_batches):
         diff_time_pbar = pbar_manager.counter(
@@ -404,7 +407,7 @@ def forward_noising_linear_scaling(
     )
 
     # 2. Sample Gaussian noise
-    noise = torch.randn(batch.shape, dtype=batch.dtype, device=batch.device)
+    noise = torch.randn_like(batch)
 
     # 2.5 Misc preparations
     video = []
@@ -417,13 +420,14 @@ def forward_noising_linear_scaling(
     video_time_pbar.refresh()
 
     # video times between 0 and 1
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=torch_dtype)
     # linearly interpolate between the start and end forward_noising_fracs
     forward_noising_fracs = torch.linspace(
         eval_strat.forward_noising_frac_start,
         eval_strat.forward_noising_frac_end,
         cfg.nb_video_timesteps,
         device=cfg.device,
+        dtype=torch_dtype,
     )
     logger.debug(f"Forward noising fracs: {list(forward_noising_fracs)}")
 
@@ -573,7 +577,7 @@ def inverted_regeneration(
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=torch_dtype)
 
     for vid_batch_idx in range(nb_vid_batches):
         diff_time_pbar = pbar_manager.counter(
@@ -662,8 +666,14 @@ def iterative_inverted_regeneration(
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
-    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # type: ignore
+    # thresholding is not supported by DDIMInverseScheduler; use "raw" clipping instead
+    if dynamic.config["thresholding"]:
+        kwargs = {"clip_sample": True, "clip_sample_range": 1}
+    else:
+        kwargs = {}
+    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config, **kwargs)  # pyright: ignore[ reportAssignmentType]
     inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+    logger.debug(f"Using inverted scheduler config: {inverted_scheduler.config}")
 
     # 1. Save the to-be noised images
     save_images_or_videos(
@@ -674,6 +684,7 @@ def iterative_inverted_regeneration(
         cfg.n_rows_displayed,
         padding=0 if cfg.plate_name_to_simulate is not None else 2,
     )
+    save_histogram(batch, base_save_path / "starting_samples_histogram.png", (-1, 1), 50)
 
     # 2. Generate the trajectory
     video = []
@@ -686,7 +697,7 @@ def iterative_inverted_regeneration(
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device)
+    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=torch_dtype)
 
     prev_video_time = 0
     image = batch
@@ -722,6 +733,7 @@ def iterative_inverted_regeneration(
             cfg.n_rows_displayed,
             padding=0 if cfg.plate_name_to_simulate is not None else 2,
         )
+        save_histogram(inverted_gauss, base_save_path / f"inverted_gaussians_histogram_time{video_t_idx}.png", (-5, 5))
 
         # 2.B Generate the next image from it
         image = inverted_gauss
@@ -745,6 +757,8 @@ def iterative_inverted_regeneration(
         diff_time_pbar.close()
 
         video.append(image.clone())
+        save_histogram(image, base_save_path / f"image_histogram_time{video_t_idx}.png", (-1, 1), 50)
+
         prev_video_time = video_time.item()
         video_time_pbar.update()
 
@@ -782,7 +796,7 @@ def save_images_or_videos(
 ):
     # Save some raw images / trajectories to disk
     file_path = base_save_path / f"{artifact_name}.pt"
-    torch.save(tensor, file_path)
+    torch.save(tensor.half().cpu(), file_path)
     logger.debug(f"Saved raw {artifact_name} of shape {tensor.shape} to {file_path.name}")
 
     normalized_elements = _normalize_elements_for_logging(tensor, norm_methods)
@@ -838,6 +852,51 @@ def _save_grid_of_images(images_tensor: ndarray, save_path: Path, nrows: int, pa
     # Convert to PIL Image
     pil_img = Image.fromarray(grid_img.numpy().transpose(1, 2, 0))
     pil_img.save(save_path)
+
+
+def save_histogram(
+    images_tensor: Tensor,
+    save_path: Path,
+    xlims: Optional[tuple[float, float]] = None,
+    ymax: Optional[float] = None,
+):
+    # Checks
+    assert images_tensor.ndim == 4, f"Expected 4D tensor, got {images_tensor.shape}"
+    assert images_tensor.shape[1] == 3, f"Expected 3 channels, got {images_tensor.shape[1]}"
+
+    # Compute histograms per channel
+    histograms = []
+    for channel in range(3):
+        counts, bins = np.histogram(images_tensor[:, channel].cpu().numpy().flatten(), bins=256, density=True)
+        histograms.append((counts, bins))
+
+    # Plot histograms
+    plt.figure(figsize=(10, 6))
+    colors = ("red", "green", "blue")
+    for i, color in enumerate(colors):
+        plt.stairs(histograms[i][0], histograms[i][1], color=color, label=f"{color} channel")
+    plt.legend()
+    plt.title("Histogram of Image Channels")
+    suptitle = " ".join(word.capitalize() for word in save_path.stem.split("_"))
+    plt.suptitle(suptitle)
+    plt.xlabel("Pixel Value")
+    plt.ylabel("Density")
+    plt.grid()
+    if xlims is not None:
+        plt.xlim(xlims)
+    if ymax is not None:
+        plt.ylim((0, ymax))
+
+    # Plot Gaussian distribution if "gaussian" in save_path
+    xlims = plt.xlim()
+    if "gaussian" in save_path.stem.lower():
+        x = np.linspace(xlims[0], xlims[1], 256)
+        plt.plot(x, stats.norm.pdf(x), color="grey", linestyle="dashed", label="Gaussian", alpha=0.6)
+
+    # Save plot
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Saved histogram to {save_path}")
 
 
 if __name__ == "__main__":

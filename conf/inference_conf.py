@@ -17,8 +17,9 @@ class InferenceConfig:
     # Device
     device: str
 
-    # Compile
+    # Optimizations
     compile: bool
+    dtype: str
 
     # Data
     dataset: DataSet
