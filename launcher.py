@@ -33,7 +33,7 @@ from hydra.core.hydra_config import HydraConfig
 from rich.traceback import install
 from termcolor import colored
 
-from conf.training_conf import Config
+from GaussianProxy.conf.training_conf import Config
 from my_conf.my_training_conf import config
 
 # nice tracebacks
@@ -151,13 +151,13 @@ def main(cfg: Config) -> None:
 
     # Submit
     if cfg.slurm.enabled:
-        job = executor.submit(task)  # type: ignore
+        job = executor.submit(task)  # pyright: ignore[reportArgumentType]
         logger.info("Task submitted:")
         logger.info(pformat(executor.parameters))
         logger.info("-" * max(0, terminal_width - 44))
         # Monitor
         if cfg.slurm.monitor:
-            submitit.helpers.monitor_jobs([job])  # type: ignore
+            submitit.helpers.monitor_jobs([job])  # pyright: ignore[reportArgumentType]
     else:
         task()
 
@@ -239,7 +239,7 @@ class Task:
             prefixed_vars += f"TMPDIR={self.cfg.tmpdir_location} "
 
         # Launched command
-        final_cmd = f"{prefixed_vars}WANDB_SILENT=true accelerate launch {accelerate_cfg} {self.code_parent_folder.as_posix()}/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
+        final_cmd = f"{prefixed_vars}WANDB_SILENT=true accelerate launch {accelerate_cfg} {self.code_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
 
         for override in self.overrides:
             final_cmd += f" {override}"
@@ -259,7 +259,7 @@ class Task:
         """Method called by submitit when the Task times out."""
         # If the run was not set to resume from the latest checkpoint,
         # (ie resume_from_checkpoint=True), then change that argument
-        cfg_copy = self.cfg.copy()  # type: ignore[reportAttributeAccessIssue]
+        cfg_copy = self.cfg.copy()  # pyright: ignore[reportAttributeAccessIssue]
         if (
             type(cfg_copy.checkpointing.resume_from_checkpoint) is int
             or cfg_copy.checkpointing.resume_from_checkpoint is False
@@ -346,15 +346,15 @@ def _get_config_path_and_name(hydra_cfg: HydraConf) -> tuple[Path, Path]:
 
 
 CODE_TO_COPY = [
-    "train.py",
-    "utils/data.py",
-    "utils/misc.py",
-    "utils/training.py",
-    "utils/models.py",
-    "conf/training_conf.py",
-    "conf/hydra",
-    "conf/dataset",
-]  # path must be relative to the script parent folder
+    "GaussianProxy/train.py",
+    "GaussianProxy/utils/data.py",
+    "GaussianProxy/utils/misc.py",
+    "GaussianProxy/utils/training.py",
+    "GaussianProxy/utils/models.py",
+    "GaussianProxy/conf/training_conf.py",
+    "GaussianProxy/conf/hydra",
+    "GaussianProxy/conf/dataset",
+]  # path must be relative to the *launcher* script (this script) parent folder
 
 FILES_OR_FOLDERS_TO_GIT_DIFF = CODE_TO_COPY + ["my_conf"]
 # my_conf is also copied but as part of the config
@@ -419,7 +419,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
 
     # 5. Copy the code to the experiment folder
     for file_or_folder_name in CODE_TO_COPY:
-        source_path = Path(cfg.path_to_script_parent_folder, file_or_folder_name)
+        source_path = Path(cfg.launcher_script_parent_folder, file_or_folder_name)
         destination_path = Path(this_experiment_folder, file_or_folder_name)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         p = Path(file_or_folder_name)

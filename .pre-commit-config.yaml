@@ -33,7 +33,7 @@ repos:
     entry: pylint
     language: system
     types: [python]
-    args: ["-E", "--generated-members", "'cv2.*'"]
+    args: ["-E", "--generated-members", "'cv2.*'", "--rcfile=.pylintrc"]
 
 - repo: local
   hooks:

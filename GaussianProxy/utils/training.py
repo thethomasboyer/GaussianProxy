@@ -18,13 +18,13 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
 from torch import IntTensor, Tensor
-from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+from torch.optim.optimizer import Optimizer
 from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
-from conf.training_conf import (
+from GaussianProxy.conf.training_conf import (
     Checkpointing,
     Config,
     Evaluation,
@@ -34,8 +34,13 @@ from conf.training_conf import (
     SimpleGeneration,
     Training,
 )
-from utils.misc import StateLogger, get_evenly_spaced_timesteps, log_state, save_eval_artifacts_log_to_wandb
-from utils.models import VideoTimeEncoding
+from GaussianProxy.utils.misc import (
+    StateLogger,
+    get_evenly_spaced_timesteps,
+    log_state,
+    save_eval_artifacts_log_to_wandb,
+)
+from GaussianProxy.utils.models import VideoTimeEncoding
 
 # State logger to track time spent in some functions
 state_logger = StateLogger()
@@ -77,6 +82,7 @@ class TimeDiffusion:
     # populated arguments when calling .fit
     _training_cfg: Training = field(init=False)
     _checkpointing_cfg: Checkpointing = field(init=False)
+    chckpt_save_path: Path = field(init=False)
     _eval_cfg: Evaluation = field(init=False)
     eval_rng: Generator = field(init=False)
     optimizer: Optimizer = field(init=False)
@@ -164,8 +170,8 @@ class TimeDiffusion:
 
     def fit(
         self,
-        train_dataloaders: dict[int, DataLoader],
-        test_dataloaders: dict[int, DataLoader],
+        train_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
+        test_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
         logger: MultiProcessAdapter,
@@ -174,6 +180,7 @@ class TimeDiffusion:
         saved_artifacts_folder: Path,
         training_cfg: Training,
         checkpointing_cfg: Checkpointing,
+        chckpt_save_path: Path,
         eval_cfg: Evaluation,
         resuming_args: Optional[ResumingArgs] = None,
         profile: bool = False,
@@ -190,6 +197,7 @@ class TimeDiffusion:
             train_dataloaders,
             training_cfg,
             checkpointing_cfg,
+            chckpt_save_path,
             eval_cfg,
             optimizer,
             lr_scheduler,
@@ -203,9 +211,7 @@ class TimeDiffusion:
         train_timestep_dataloaders: dict[float, DataLoader] = {}
         test_timestep_dataloaders: dict[float, DataLoader] = {}
         for split, dls in [("train", train_dataloaders), ("test", test_dataloaders)]:
-            assert np.all(
-                np.diff(list(dls.keys())) > 0
-            ), "Expecting original dataloaders to be numbered in increasing order."
+            self.logger.info(f"Using {split} dataloaders ordering: {list(dls.keys())}")
             timestep_dataloaders = train_timestep_dataloaders if split == "train" else test_timestep_dataloaders
             for dataloader_idx, dl in enumerate(dls.values()):
                 timestep_dataloaders[self.empirical_dists_timesteps[dataloader_idx]] = dl
@@ -213,7 +219,7 @@ class TimeDiffusion:
                 len(timestep_dataloaders) == self.nb_empirical_dists == len(dls)
             ), f"Got {len(timestep_dataloaders)} dataloaders, nb_empirical_dists={self.nb_empirical_dists} and len(dls)={len(dls)}; they should be equal"
             assert np.all(
-                np.diff(list(dls.keys())) > 0
+                np.diff(list(timestep_dataloaders.keys())) > 0
             ), "Expecting newly key-ed dataloaders to be numbered in increasing order."
 
         pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
@@ -262,9 +268,10 @@ class TimeDiffusion:
 
     def _fit_init(
         self,
-        train_dataloaders: dict[int, DataLoader],
+        train_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
         training_cfg: Training,
         checkpointing_cfg: Checkpointing,
+        chckpt_save_path: Path,
         eval_cfg: Evaluation,
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
@@ -280,6 +287,7 @@ class TimeDiffusion:
         self._empirical_dists_timesteps = get_evenly_spaced_timesteps(self.nb_empirical_dists)
         self._training_cfg = training_cfg
         self._checkpointing_cfg = checkpointing_cfg
+        self.chckpt_save_path = chckpt_save_path
         self._eval_cfg = eval_cfg
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -303,7 +311,7 @@ class TimeDiffusion:
         )
         # Generator for consistent evaluation
         seed = int(torch.randn(1).item())  # think I'm crazy? think again...
-        self.eval_rng: Generator = torch.Generator(self.accelerator.device).manual_seed(seed)  # type: ignore
+        self.eval_rng: Generator = torch.Generator(self.accelerator.device).manual_seed(seed)  # pyright: ignore[reportAttributeAccessIssue]
         # Sample Gaussian noise and video timesteps once for all subsequent evaluations
         self._eval_noise = torch.randn(
             self.eval_cfg.batch_size,
@@ -343,7 +351,11 @@ class TimeDiffusion:
         batches_pbar.refresh()
         # loop through training batches
         for batch_idx, (time, batch) in enumerate(
-            self._yield_data_batches(train_dataloaders, self.logger, self.training_cfg.nb_time_samplings - init_count)
+            self._yield_data_batches(
+                train_dataloaders,
+                self.logger,
+                self.training_cfg.nb_time_samplings - init_count,
+            )
         ):
             self.instant_batch_idx = batch_idx
             # set network to the right mode
@@ -380,14 +392,17 @@ class TimeDiffusion:
         batches_pbar.close()
         # update epoch
         self.global_epoch += 1
-        # update timeline
+        # update timeline & save it
         gantt_chart = state_logger.create_gantt_chart()
-        self.accelerator.log({"state_timeline": wandb.Plotly(gantt_chart)})
+        self.accelerator.log({"state_timeline": wandb.Plotly(gantt_chart)}, step=self.global_optimization_step)
 
     @torch.no_grad()
     @log_state(state_logger)
     def _yield_data_batches(
-        self, dataloaders: dict[float, DataLoader], logger: MultiProcessAdapter, nb_time_samplings: int
+        self,
+        dataloaders: dict[float, DataLoader],
+        logger: MultiProcessAdapter,
+        nb_time_samplings: int,
     ) -> Generator[tuple[float, Tensor], None, None]:
         """
         Yield `nb_time_samplings` data batches from the given dataloaders.
@@ -406,11 +421,6 @@ class TimeDiffusion:
         then each batch will always have samples from one empirical distribution only: quite bad for training along
         continuous time... Along many epochs the theoretical end result will of course be the same.
         """
-        # TODO: not actually needed! Just here for sanity check but actually this assert is wrong
-        first_dl = list(dataloaders.values())[0]
-        assert all(
-            len(first_dl) == len(dl) for dl in dataloaders.values()
-        ), "All dataloaders should have the same length"
         assert (
             list(dataloaders.keys()) == self.empirical_dists_timesteps
             and list(dataloaders.keys()) == sorted(dataloaders.keys())
@@ -504,12 +514,15 @@ class TimeDiffusion:
         noise = torch.randn_like(batch)
 
         # Sample a random diffusion timestep
-        diff_timesteps: IntTensor = torch.randint(
-            0, self.dynamic.config["num_train_timesteps"], (batch.shape[0],), device=self.accelerator.device
-        )  # type: ignore
+        diff_timesteps: IntTensor = torch.randint(  # pyright: ignore[reportAssignmentType]
+            0,
+            self.dynamic.config["num_train_timesteps"],
+            (batch.shape[0],),
+            device=self.accelerator.device,
+        )
 
         # Forward diffusion process
-        noisy_batch = self.dynamic.add_noise(batch, noise, diff_timesteps)  # type: ignore
+        noisy_batch = self.dynamic.add_noise(batch, noise, diff_timesteps)  # pyright: ignore[reportArgumentType]
 
         # Encode time
         video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
@@ -547,9 +560,9 @@ class TimeDiffusion:
         self.accelerator.backward(loss)
 
         # Gradient clipping
-        grad_norm = None  # type: ignore
+        grad_norm = None  # pyright: ignore[reportAssignmentType]
         if self.accelerator.sync_gradients:
-            grad_norm: Tensor = self.accelerator.clip_grad_norm_(  # type: ignore
+            grad_norm: Tensor = self.accelerator.clip_grad_norm_(  # pyright: ignore[reportAssignmentType]
                 self.net.parameters(),
                 self.training_cfg.max_grad_norm,
             )
@@ -581,6 +594,7 @@ class TimeDiffusion:
                 "time": time,
                 "L2 gradient norm": grad_norm,
             },
+            step=self.global_optimization_step,
         )
         # Wake me up at 3am if loss is NaN
         if torch.isnan(loss) and self.accelerator.is_main_process:
@@ -595,11 +609,20 @@ class TimeDiffusion:
             # TODO: restart from previous checkpoint
 
     def _unet2d_pred(
-        self, noisy_batch: Tensor, diff_timesteps: Tensor, video_time_codes: Tensor, net: Optional[UNet2DModel] = None
+        self,
+        noisy_batch: Tensor,
+        diff_timesteps: Tensor,
+        video_time_codes: Tensor,
+        net: Optional[UNet2DModel] = None,
     ):
         # allow providing evaluation net
-        net = self.net if net is None else net  # type: ignore
-        return net.forward(noisy_batch, diff_timesteps, class_labels=video_time_codes, return_dict=False)[0]
+        _net: UNet2DModel = self.net if net is None else net  # pyright: ignore[reportAssignmentType]
+        return _net.forward(
+            noisy_batch,
+            diff_timesteps,
+            class_labels=video_time_codes,
+            return_dict=False,
+        )[0]
 
     def _unet2d_condition_pred(
         self,
@@ -609,8 +632,8 @@ class TimeDiffusion:
         net: Optional[UNet2DConditionModel] = None,
     ):
         # allow providing evaluation net
-        net = self.net if net is None else net  # type: ignore
-        return net.forward(
+        _net: UNet2DConditionModel = self.net if net is None else net  # pyright: ignore[reportAssignmentType]
+        return _net.forward(
             noisy_batch,
             diff_timesteps,
             encoder_hidden_states=video_time_codes.unsqueeze(1),
@@ -639,7 +662,7 @@ class TimeDiffusion:
 
         # 1. Save instantenous states of models
         # tmp save folder in the checkpoints folder
-        tmp_save_folder = Path(self.checkpointing_cfg.chckpt_save_path, ".tmp_inference_save")
+        tmp_save_folder = self.chckpt_save_path / ".tmp_inference_save"
         if self.accelerator.is_main_process:
             if tmp_save_folder.exists():
                 shutil.rmtree(tmp_save_folder)
@@ -658,16 +681,20 @@ class TimeDiffusion:
 
         # 2. Instantiate inference models
         if self.net_type == UNet2DModel:
-            inference_net: UNet2DModel = UNet2DModel.from_pretrained(  # type: ignore
-                tmp_save_folder / "net", local_files_only=True, device_map=self.accelerator.process_index
+            inference_net: UNet2DModel = UNet2DModel.from_pretrained(  # pyright: ignore[reportAssignmentType, reportRedeclaration]
+                tmp_save_folder / "net",
+                local_files_only=True,
+                device_map=self.accelerator.process_index,
             )
         elif self.net_type == UNet2DConditionModel:
-            inference_net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # type: ignore
-                tmp_save_folder / "net", local_files_only=True, device_map=self.accelerator.process_index
+            inference_net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # pyright: ignore[reportAssignmentType]
+                tmp_save_folder / "net",
+                local_files_only=True,
+                device_map=self.accelerator.process_index,
             )
         else:
             raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {self.net_type}")
-        inference_video_time_encoding: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # type: ignore
+        inference_video_time_encoding: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # pyright: ignore[reportAssignmentType]
             tmp_save_folder / "video_time_encoder",
             local_files_only=True,
             device_map=self.accelerator.process_index,
@@ -677,22 +704,34 @@ class TimeDiffusion:
         # 3. Run through evaluation strategies
         for eval_strat in self.eval_cfg.strategies:
             if eval_strat.name == "SimpleGeneration":
-                self._simple_gen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)  # type: ignore
+                self._simple_gen(
+                    dataloaders,
+                    pbar_manager,
+                    eval_strat,
+                    inference_net,
+                    inference_video_time_encoding,
+                )  # pyright: ignore[reportArgumentType]
             elif eval_strat.name == "ForwardNoising":
                 self._forward_noising(
                     dataloaders,
                     pbar_manager,
-                    eval_strat,  # type: ignore
+                    eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
                 )
             elif eval_strat.name == "InvertedRegeneration":
-                self._inv_regen(dataloaders, pbar_manager, eval_strat, inference_net, inference_video_time_encoding)  # type: ignore
+                self._inv_regen(
+                    dataloaders,
+                    pbar_manager,
+                    eval_strat,
+                    inference_net,
+                    inference_video_time_encoding,
+                )  # pyright: ignore[reportArgumentType]
             elif eval_strat.name == "IterativeInvertedRegeneration":
                 self._iter_inv_regen(
                     dataloaders,
                     pbar_manager,
-                    eval_strat,  # type: ignore
+                    eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
                 )
@@ -717,7 +756,7 @@ class TimeDiffusion:
         Just simple generations.
         """
         # duplicate the scheduler to not mess with the training one
-        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
@@ -725,7 +764,8 @@ class TimeDiffusion:
         gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
-            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
+            main_process_only=False,
         )
 
         # generate time encodings
@@ -745,7 +785,7 @@ class TimeDiffusion:
 
         image = self.get_eval_noise()
         for t in inference_scheduler.timesteps:
-            model_output = self._net_pred(image, t, random_video_time_enc, eval_net)  # type: ignore
+            model_output = self._net_pred(image, t, random_video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
             image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
             gen_pbar.update()
 
@@ -758,7 +798,7 @@ class TimeDiffusion:
             eval_strat.name,
             "simple_generations",
             ["-1_1 raw", "image min-max", "-1_1 clipped"],
-            self.eval_rng,  # type: ignore
+            self.eval_rng,  # pyright: ignore[reportArgumentType]
             captions=[f"time: {round(t.item(), 3)}" for t in random_video_time],
         )
 
@@ -787,10 +827,10 @@ class TimeDiffusion:
         ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
 
         # Setup schedulers
-        inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # type: ignore
+        inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
         # duplicate the scheduler to not mess with the training one
-        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
@@ -798,7 +838,8 @@ class TimeDiffusion:
         gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
-            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
+            main_process_only=False,
         )
 
         # Use only 1st dataloader for now TODO
@@ -826,7 +867,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "starting_samples",
                     ["-1_1 raw", "image min-max"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 2. Generate the inverted Gaussians
@@ -834,7 +875,7 @@ class TimeDiffusion:
             inversion_video_time = inference_video_time_encoding.forward(0, batch.shape[0])
 
             for t in inverted_scheduler.timesteps:
-                model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # type: ignore
+                model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
 
             if batch_idx == 0:
@@ -847,13 +888,13 @@ class TimeDiffusion:
                     eval_strat.name,
                     "inversions",
                     ["image min-max", "image 5perc-95perc"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 3. Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
             for t in inference_scheduler.timesteps:
-                model_output = self._net_pred(regen, t, inversion_video_time, eval_net)  # type: ignore
+                model_output = self._net_pred(regen, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                 regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
@@ -865,7 +906,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "regenerations",
                     ["image min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 4. Generate the trajectory from it
@@ -887,7 +928,7 @@ class TimeDiffusion:
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
-                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # type: ignore
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
@@ -923,7 +964,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "trajectories",
                     ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             eval_batches_pbar.update()
@@ -935,7 +976,8 @@ class TimeDiffusion:
 
         eval_batches_pbar.close()
         self.logger.info(
-            f"Finished InvertedRegeneration on process ({self.accelerator.process_index})", main_process_only=False
+            f"Finished InvertedRegeneration on process ({self.accelerator.process_index})",
+            main_process_only=False,
         )
 
     @log_state(state_logger)
@@ -964,10 +1006,10 @@ class TimeDiffusion:
         ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
 
         # Setup schedulers
-        inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # type: ignore
+        inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
         # duplicate the scheduler to not mess with the training one
-        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
@@ -975,7 +1017,8 @@ class TimeDiffusion:
         gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
-            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
+            main_process_only=False,
         )
 
         # Use only 1st dataloader for now TODO
@@ -1005,7 +1048,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "starting_samples",
                     ["-1_1 raw", "image min-max"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # Generate the trajectory
@@ -1031,7 +1074,7 @@ class TimeDiffusion:
                 inversion_video_time = inference_video_time_encoding.forward(prev_video_time, batch.shape[0])
 
                 for t in inverted_scheduler.timesteps:
-                    model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # type: ignore
+                    model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                     inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
 
                 if batch_idx == 0:
@@ -1044,7 +1087,7 @@ class TimeDiffusion:
                         eval_strat.name,
                         "inversions",
                         ["image min-max", "image 5perc-95perc"],
-                        self.eval_rng,  # type: ignore
+                        self.eval_rng,  # pyright: ignore[reportArgumentType]
                     )
 
                 # 3. Generate the next image from it
@@ -1052,7 +1095,7 @@ class TimeDiffusion:
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
-                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # type: ignore
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image.clone())
@@ -1084,7 +1127,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "trajectories",
                     ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             eval_batches_pbar.update()
@@ -1123,7 +1166,7 @@ class TimeDiffusion:
         ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
 
         # Setup schedulers: duplicate the scheduler to not mess with the training one
-        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # type: ignore
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
@@ -1131,7 +1174,8 @@ class TimeDiffusion:
         gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
-            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})", main_process_only=False
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
+            main_process_only=False,
         )
 
         # Use only 1st dataloader for now TODO
@@ -1159,14 +1203,19 @@ class TimeDiffusion:
                     eval_strat.name,
                     "starting_samples",
                     ["-1_1 raw", "image min-max"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 2. Sample Gaussian noise and noise the images until some step
-            noise = torch.randn(batch.shape, dtype=batch.dtype, device=batch.device, generator=self.eval_rng)  # type: ignore
+            noise = torch.randn(
+                batch.shape,
+                dtype=batch.dtype,
+                device=batch.device,
+                generator=self.eval_rng,
+            )  # pyright: ignore[reportCallIssue, reportArgumentType]
             noise_timestep_idx = int((1 - eval_strat.forward_noising_frac) * len(inference_scheduler.timesteps))
             noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
-            noise_timesteps: IntTensor = torch.full(  # type: ignore
+            noise_timesteps: IntTensor = torch.full(  # pyright: ignore[reportAssignmentType]
                 (batch.shape[0],),
                 noise_timestep,
                 device=batch.device,
@@ -1184,7 +1233,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "noised_samples",
                     ["image min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 3. Generate the trajectory from it
@@ -1206,7 +1255,7 @@ class TimeDiffusion:
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps[noise_timestep_idx:]:
-                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # type: ignore
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 video.append(image)
@@ -1242,7 +1291,7 @@ class TimeDiffusion:
                     eval_strat.name,
                     "trajectories",
                     ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # type: ignore
+                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             eval_batches_pbar.update()
@@ -1254,7 +1303,8 @@ class TimeDiffusion:
 
         eval_batches_pbar.close()
         self.logger.info(
-            f"Finished ForwardNoising on process ({self.accelerator.process_index})", main_process_only=False
+            f"Finished ForwardNoising on process ({self.accelerator.process_index})",
+            main_process_only=False,
         )
 
     @log_state(state_logger)
@@ -1265,10 +1315,12 @@ class TimeDiffusion:
         Can be called by all processes (only main will actually save).
         """
         self.accelerator.unwrap_model(self.net).save_pretrained(
-            self.model_save_folder / "net", is_main_process=self.accelerator.is_main_process
+            self.model_save_folder / "net",
+            is_main_process=self.accelerator.is_main_process,
         )
         self.accelerator.unwrap_model(self.video_time_encoding).save_pretrained(
-            self.model_save_folder / "video_time_encoder", is_main_process=self.accelerator.is_main_process
+            self.model_save_folder / "video_time_encoder",
+            is_main_process=self.accelerator.is_main_process,
         )
         if self.accelerator.is_main_process:
             self.dynamic.save_pretrained(self.model_save_folder / "dynamic")
@@ -1287,7 +1339,7 @@ class TimeDiffusion:
         # First, wait for all processes to reach this point
         self.accelerator.wait_for_everyone()
 
-        this_chkpt_subfolder = Path(self.checkpointing_cfg.chckpt_save_path) / f"step_{self.global_optimization_step}"
+        this_chkpt_subfolder = self.chckpt_save_path / f"step_{self.global_optimization_step}"
         self.accelerator.save_state(this_chkpt_subfolder.as_posix())
 
         # Resuming args saved in json file
@@ -1312,9 +1364,7 @@ class TimeDiffusion:
 
         # Delete old checkpoints if needed
         if self.accelerator.is_main_process:
-            checkpoints_list = [
-                d for d in self.checkpointing_cfg.chckpt_save_path.iterdir() if not d.name.startswith(".")
-            ]
+            checkpoints_list = [d for d in self.chckpt_save_path.iterdir() if not d.name.startswith(".")]
             nb_checkpoints = len(checkpoints_list)
             if nb_checkpoints > self.checkpointing_cfg.checkpoints_total_limit:
                 sorted_chkpt_subfolders = sorted(checkpoints_list, key=lambda x: int(x.name.split("_")[1]))
@@ -1332,6 +1382,7 @@ def resume_from_checkpoint(
     cfg: Config,
     logger: MultiProcessAdapter,
     accelerator: Accelerator,
+    chckpt_save_path: Path,
 ) -> ResumingArgs | None:
     """
     Should be called by all processes as `accelerator.load_state` handles checkpointing
@@ -1339,7 +1390,6 @@ def resume_from_checkpoint(
     """
     resume_arg = cfg.checkpointing.resume_from_checkpoint
     # 1. first find the correct subfolder to resume from
-    chckpt_save_path = Path(cfg.checkpointing.chckpt_save_path)
     if type(resume_arg) == int:
         path = chckpt_save_path / f"step_{resume_arg}"
     else:

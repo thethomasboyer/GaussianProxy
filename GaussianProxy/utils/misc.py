@@ -16,7 +16,7 @@ from termcolor import colored
 from torch import Generator, Tensor
 from wandb.sdk.wandb_run import Run as WandBRun
 
-from conf.training_conf import Config
+from GaussianProxy.conf.training_conf import Config
 
 
 def create_repo_structure(
@@ -24,7 +24,7 @@ def create_repo_structure(
     accelerator: Accelerator,
     logger: MultiProcessAdapter,
     this_run_folder: Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     """
     The repo structure is as follows:
     ```
@@ -64,14 +64,18 @@ def create_repo_structure(
     if accelerator.is_main_process:
         saved_artifacts_folder.mkdir(exist_ok=True)
 
+    # Decide where to save checkpoints
+    if OmegaConf.is_missing(cfg.checkpointing, "chckpt_save_path"):
+        logger.info(
+            f"No checkpointing *base* folder specified, using {this_run_folder}/checkpoints as checkpointing folder"
+        )
+        chckpt_save_path = Path(this_run_folder, "checkpoints")
+    else:
+        chckpt_save_path = cfg.checkpointing.chckpt_base_path / cfg.project / cfg.run_name / "checkpoints"
+
     # verify that the checkpointing folder is empty if not resuming run from a checkpoint
     # this is specific to this *run*
-    if OmegaConf.is_missing(cfg.checkpointing, "chckpt_save_path"):
-        logger.info(f"No checkpointing folder specified, using {this_run_folder}/checkpoints")
-        cfg.checkpointing.chckpt_save_path = Path(this_run_folder, "checkpoints")
-
     if accelerator.is_main_process:
-        chckpt_save_path = Path(cfg.checkpointing.chckpt_save_path)
         chckpt_save_path.mkdir(exist_ok=True, parents=True)
         chckpts = list(chckpt_save_path.iterdir())
         if not cfg.checkpointing.resume_from_checkpoint and len(chckpts) > 0:
@@ -82,7 +86,7 @@ def create_repo_structure(
             )
             logger.warning(msg)
 
-    return models_save_folder, saved_artifacts_folder
+    return models_save_folder, saved_artifacts_folder, chckpt_save_path
 
 
 def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: bool = True) -> None:
@@ -246,7 +250,7 @@ def save_eval_artifacts_log_to_wandb(
             "format": "mp4",
         }
         for norm_method, normed_vids in normalized_elements_for_logging.items():
-            videos = wandb.Video(normed_vids, **kwargs)  # type: ignore
+            videos = wandb.Video(normed_vids, **kwargs)  # pyright: ignore[reportArgumentType]
             accelerator.log(
                 {f"{eval_strat}/Generated videos/{norm_method} normalized": videos},
                 step=global_optimization_step,
@@ -341,21 +345,6 @@ def bold(s: str | int) -> str:
     return colored(s, None, None, ["bold"])
 
 
-def log_state(state_logger):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time() - state_logger.start_time
-            result = func(*args, **kwargs)
-            end_time = time.time() - state_logger.start_time
-            state_logger.log_state(func.__name__, start_time, end_time)
-            return result
-
-        return wrapper
-
-    return decorator
-
-
 class StateLogger:
     def __init__(self):
         self.states: list[tuple[str, float, float]] = []
@@ -435,3 +424,18 @@ class StateLogger:
         selected_color = self._cmap[self.last_color_index]
         r, g, b = int(selected_color[1:3], 16), int(selected_color[3:5], 16), int(selected_color[5:], 16)
         return f"rgb({r},{g},{b})"
+
+
+def log_state(state_logger: StateLogger):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time() - state_logger.start_time
+            result = func(*args, **kwargs)
+            end_time = time.time() - state_logger.start_time
+            state_logger.log_state(func.__name__, start_time, end_time)
+            return result
+
+        return wrapper
+
+    return decorator

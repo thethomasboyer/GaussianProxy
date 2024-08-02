@@ -19,16 +19,17 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 from rich.traceback import install
 from termcolor import colored
-from torch.optim import AdamW, Optimizer
+from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import LinearLR, LRScheduler
+from torch.optim.optimizer import Optimizer
 from wandb.sdk.wandb_run import Run as WandBRun
 
-from conf.training_conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
+from GaussianProxy.conf.training_conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
+from GaussianProxy.utils.data import setup_dataloaders
+from GaussianProxy.utils.misc import args_checker, create_repo_structure, modify_args_for_debug
+from GaussianProxy.utils.models import VideoTimeEncoding
+from GaussianProxy.utils.training import TimeDiffusion, resume_from_checkpoint
 from my_conf.my_training_conf import config
-from utils.data import setup_dataloaders
-from utils.misc import args_checker, create_repo_structure, modify_args_for_debug
-from utils.models import VideoTimeEncoding
-from utils.training import TimeDiffusion, resume_from_checkpoint
 
 # nice tracebacks
 install()
@@ -41,8 +42,11 @@ logging.getLogger("matplotlib").setLevel(logging.INFO)
 logging.getLogger("PIL").setLevel(logging.INFO)
 
 # hardcoded config paths
-DEFAULT_CONFIG_PATH = "my_conf"
+DEFAULT_CONFIG_PATH = "../my_conf"
 DEFAULT_CONFIG_NAME = "experiment_conf"
+
+# Register a new resolver for torch dtype in yaml files
+OmegaConf.register_new_resolver("torch_dtype", lambda x: getattr(torch, x))
 
 # Register the config
 cs = ConfigStore.instance()
@@ -84,10 +88,9 @@ def main(cfg: Config) -> None:
     logger.info(accelerator.state)
 
     # ----------------------------- Repository Structure -----------------------------
-    (
-        models_save_folder,
-        saved_artifacts_folder,
-    ) = create_repo_structure(cfg, accelerator, logger, this_run_folder)
+    (models_save_folder, saved_artifacts_folder, chckpt_save_path) = create_repo_structure(
+        cfg, accelerator, logger, this_run_folder
+    )
     accelerator.wait_for_everyone()
 
     # ---------------------------- Resume from Checkpoint ----------------------------
@@ -96,6 +99,7 @@ def main(cfg: Config) -> None:
             cfg,
             logger,
             accelerator,
+            chckpt_save_path,
         )
         logger.info(f"Loaded resuming arguments: {resuming_args}")
     else:
@@ -130,7 +134,7 @@ def main(cfg: Config) -> None:
 
         accelerator.init_trackers(
             project_name=cfg.project,
-            config=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
+            config=OmegaConf.to_container(cfg, resolve=True),  # pyright: ignore[reportArgumentType]
             # , resolve=True, throw_on_missing=True),
             # save metadata to the "wandb" directory
             # inside the *parent* folder common to all *experiments*
@@ -138,7 +142,7 @@ def main(cfg: Config) -> None:
         )
 
     # Access underlying run object on all processes
-    wandb_tracker: WandBRun = accelerator.get_tracker("wandb", unwrap=True)  # type: ignore
+    wandb_tracker: WandBRun = accelerator.get_tracker("wandb", unwrap=True)  # pyright: ignore[reportAssignmentType]
 
     # Save the run id to a file on main process
     if accelerator.is_main_process:
@@ -173,16 +177,16 @@ def main(cfg: Config) -> None:
     # it's ugly but Hydra's instantiate produces weird errors (even with _convert="all"!?) TODO
     # also need saving model here type because that info is apparently lost when compiling?!
     if type(OmegaConf.to_object(cfg.net)) == UNet2DModelConfig:
-        net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+        net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # pyright: ignore[reportCallIssue]
         net_type = UNet2DModel
     elif type(OmegaConf.to_object(cfg.net)) == UNet2DConditionModelConfig:
-        net = UNet2DConditionModel(**OmegaConf.to_container(cfg.net))  # type: ignore
+        net = UNet2DConditionModel(**OmegaConf.to_container(cfg.net))  # pyright: ignore[reportCallIssue]
         net_type = UNet2DConditionModel
     else:
         raise ValueError(f"Invalid type for 'cfg.net': {type(cfg.net)}")
 
     # video time encoding
-    video_time_encoding = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder))  # type: ignore
+    video_time_encoding = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder))  # pyright: ignore[reportCallIssue]
 
     # --------------------------------- Miscellaneous --------------------------------
     # # Create EMA for the models
@@ -236,7 +240,7 @@ def main(cfg: Config) -> None:
 
     # test dataloaders:
     for key, dl in test_dataloaders.items():
-        test_dataloaders[key] = accelerator.prepare(dl)
+        test_dataloaders[key] = accelerator.prepare(dl)  # pyright: ignore[reportArgumentType]
 
     # net (includes torch.compile):
     net = accelerator.prepare(net)
@@ -255,7 +259,7 @@ def main(cfg: Config) -> None:
     #     best_metric = get_initial_best_metric()
 
     # ------------------------------------ Dynamic -----------------------------------
-    dyn = DDIMScheduler(**OmegaConf.to_container(cfg.dynamic))  # type: ignore
+    dyn = DDIMScheduler(**OmegaConf.to_container(cfg.dynamic))  # pyright: ignore[reportCallIssue]
 
     # --------------------------------- Training loop --------------------------------
     trainer: TimeDiffusion = TimeDiffusion(
@@ -277,6 +281,7 @@ def main(cfg: Config) -> None:
         saved_artifacts_folder,
         cfg.training,
         cfg.checkpointing,
+        chckpt_save_path,
         cfg.evaluation,
         resuming_args,
         cfg.profile,

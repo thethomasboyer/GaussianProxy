@@ -17,3 +17,5 @@ notebooks/**/*.png
 notebooks/**/*.pt
 notebooks/playground.ipynb
 *_outputs/
+*.egg-info
+*.egg

@@ -1,2 +1,5 @@
 [MASTER]
-init-hook='import sys; sys.path.append(".")'
+init-hook='import sys; sys.path.append(".")' # does not work...
+
+[MESSAGES CONTROL]
+disable=E0401,E0611

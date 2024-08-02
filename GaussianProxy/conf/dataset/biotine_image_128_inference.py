@@ -1,5 +1,4 @@
 import torchvision
-
 from conf.training_conf import DataSet
 
 DEFINITION = 128

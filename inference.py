@@ -21,18 +21,18 @@ from PIL import Image
 from rich.traceback import install
 from torch import IntTensor, Tensor
 
-from conf.inference_conf import InferenceConfig
-from conf.training_conf import (
+from GaussianProxy.conf.inference_conf import InferenceConfig
+from GaussianProxy.conf.training_conf import (
     ForwardNoising,
     ForwardNoisingLinearScaling,
     InvertedRegeneration,
     IterativeInvertedRegeneration,
     SimpleGeneration,
 )
+from GaussianProxy.utils.data import NumpyDataset
+from GaussianProxy.utils.misc import _normalize_elements_for_logging
+from GaussianProxy.utils.models import VideoTimeEncoding
 from my_conf.my_inference_conf import inference_conf
-from utils.data import NumpyDataset
-from utils.misc import _normalize_elements_for_logging
-from utils.models import VideoTimeEncoding
 
 # No grads
 torch.set_grad_enabled(False)
@@ -95,15 +95,15 @@ def main(cfg: InferenceConfig) -> None:
     #                                          Load Model
     ###############################################################################################
     # denoiser
-    net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # type: ignore
+    net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # pyright: ignore[reportAssignmentType]
         run_path / "saved_model" / "net", torch_dtype=torch_dtype
     )
     net.to(cfg.device)
     if cfg.compile:
-        net = torch.compile(net)  # type: ignore
+        net = torch.compile(net)  # pyright: ignore[reportAssignmentType]
 
     # time encoder
-    video_time_encoder: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # type: ignore
+    video_time_encoder: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # pyright: ignore[reportAssignmentType]
         run_path / "saved_model" / "video_time_encoder", torch_dtype=torch_dtype
     )
     video_time_encoder.to(cfg.device)
@@ -155,7 +155,7 @@ def main(cfg: InferenceConfig) -> None:
     ###############################################################################################
     #                                       Inference passes
     ###############################################################################################
-    pbar_manager: Manager = get_manager()  # type: ignore
+    pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
 
     for eval_strat_idx, eval_strat in enumerate(cfg.evaluation_strategies):
         logger.info(f"Running evaluation strategy {eval_strat_idx+1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
@@ -200,7 +200,7 @@ def simple_gen(
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
-    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 2. Generate the time encodings
@@ -255,7 +255,7 @@ def forward_noising(
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup scheduler
-    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 1. Save the to-be noised images
@@ -277,7 +277,7 @@ def forward_noising(
     )
     msg += f", timesteps range: ({inference_scheduler.timesteps.min().item()}, {inference_scheduler.timesteps.max().item()}))"
     logger.debug(msg)
-    noise_timesteps: IntTensor = torch.full(  # type: ignore
+    noise_timesteps: IntTensor = torch.full(  # pyright: ignore[reportAssignmentType]
         (batch.shape[0],),
         noise_timestep,
         device=batch.device,
@@ -393,7 +393,7 @@ def forward_noising_linear_scaling(
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup scheduler
-    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 1. Save the to-be noised images
@@ -456,7 +456,7 @@ def forward_noising_linear_scaling(
         msg = f"Adding noise until timestep {noise_timestep} (index {noise_timestep_idx}/{len(inference_scheduler.timesteps)}"
         msg += f", timesteps range: ({inference_scheduler.timesteps.min().item()}, {inference_scheduler.timesteps.max().item()}))"
         logger.debug(msg)
-        noise_timesteps: IntTensor = torch.full(  # type: ignore
+        noise_timesteps: IntTensor = torch.full(  # pyright: ignore[reportAssignmentType]
             (batch.shape[0],),
             noise_timestep,
             device=batch.device,
@@ -518,9 +518,9 @@ def inverted_regeneration(
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
-    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
-    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # type: ignore
+    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 1. Save the to-be noised images
@@ -664,14 +664,14 @@ def iterative_inverted_regeneration(
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
-    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # type: ignore
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
     # thresholding is not supported by DDIMInverseScheduler; use "raw" clipping instead
     if dynamic.config["thresholding"]:
         kwargs = {"clip_sample": True, "clip_sample_range": 1}
     else:
         kwargs = {}
-    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config, **kwargs)  # pyright: ignore[ reportAssignmentType]
+    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config, **kwargs)  # pyright: ignore[reportAssignmentType]
     inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
     logger.debug(f"Using inverted scheduler config: {inverted_scheduler.config}")
 

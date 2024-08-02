@@ -56,7 +56,6 @@ class Accelerate:
 
 @dataclass(kw_only=True)
 class DataSet:
-    selected_dists: list[int]
     # data_shape should be tuple[int, int, int] | tuple[int, int], but unions of containers
     # are not yet supported by OmegaConf: https://github.com/omry/omegaconf/issues/144
     data_shape: tuple[int, ...]
@@ -64,6 +63,8 @@ class DataSet:
     transforms: Any
     name: str
     expected_initial_data_range: tuple[float, float] | None
+    # same goes for selected_dists: should be list[int] | list[str]...
+    selected_dists: Optional[list] = None
 
 
 @dataclass
@@ -134,11 +135,7 @@ class Checkpointing:
     checkpoints_total_limit: int
     resume_from_checkpoint: bool | int
     checkpoint_every_n_steps: int
-    chckpt_save_path: Path
-
-    def __post_init__(self):
-        if not isinstance(self.chckpt_save_path, Path):
-            self.chckpt_save_path = Path(self.chckpt_save_path)
+    chckpt_base_path: Path
 
 
 @dataclass
@@ -219,7 +216,7 @@ class Config:
     time_encoder: TimeEncoderConfig
 
     # Script
-    path_to_script_parent_folder: str
+    launcher_script_parent_folder: str
     script: str
 
     # ExperimentVariables
