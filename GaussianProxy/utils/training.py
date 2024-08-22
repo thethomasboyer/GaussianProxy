@@ -509,6 +509,9 @@ class TimeDiffusion:
             self.training_cfg.train_batch_size,
             *self.data_shape,
         ), f"Expecting batch shape {(self.training_cfg.train_batch_size, *self.data_shape)}, got {batch.shape}"
+        assert (
+            batch.min() >= -1 and batch.max() <= 1
+        ), f"Expecting batch to be in [-1;1] range, got {batch.min()} and {batch.max()}"
 
         # Sample Gaussian noise
         noise = torch.randn_like(batch)

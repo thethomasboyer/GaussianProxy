@@ -90,7 +90,7 @@ class DatasetParams:
     file_extension: str
     key_transform: Callable[[str], int] | Callable[[str], str]
     sorting_func: Callable
-    DatasetClass: type[BaseDataset]
+    dataset_class: type[BaseDataset]
 
 
 def _dataset_builder(
@@ -157,7 +157,7 @@ def _dataset_builder(
             set(train_files) | (set(test_files)) == set(files)
         ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
         # Create train dataloader
-        train_ds = dataset_params.DatasetClass(train_files, transforms, cfg.dataset.expected_initial_data_range)
+        train_ds = dataset_params.dataset_class(train_files, transforms, cfg.dataset.expected_initial_data_range)
         assert (
             train_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
@@ -180,7 +180,7 @@ def _dataset_builder(
         # Create test dataloader
         # no flips nor rotations for consistent evaluation
         test_transforms = remove_flips_and_rotations_from_transforms(transforms)
-        test_ds = dataset_params.DatasetClass(test_files, test_transforms, cfg.dataset.expected_initial_data_range)
+        test_ds = dataset_params.dataset_class(test_files, test_transforms, cfg.dataset.expected_initial_data_range)
         assert (
             test_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
@@ -246,8 +246,8 @@ def setup_dataloaders(
             ds_params = DatasetParams(
                 file_extension="npy",
                 key_transform=int,
-                sorting_func=int,
-                DatasetClass=NumpyDataset,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=NumpyDataset,
             )
         case "Jurkat":
             phase_order = (
@@ -264,7 +264,14 @@ def setup_dataloaders(
                 file_extension="jpg",
                 key_transform=str,
                 sorting_func=lambda subdir: phase_order_dict[subdir.name],
-                DatasetClass=JPEGDataset,
+                dataset_class=JPEGDataset,
+            )
+        case "diabetic_retinopathy":
+            ds_params = DatasetParams(
+                file_extension="jpeg",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=JPEGDataset,
             )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")

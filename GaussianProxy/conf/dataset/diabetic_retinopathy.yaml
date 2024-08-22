@@ -1,0 +1,18 @@
+name: diabetic_retinopathy
+path:
+data_shape: [3, 256, 256]
+transforms:
+  _target_: torchvision.transforms.transforms.Compose
+  transforms:
+  - _target_: torchvision.transforms.transforms.Resize
+    size: 256 # single int => image resized to (size * aspect_ratio, size) or (size, size * aspect_ratio) with aspect_ratio >= 1 preserved
+  - _target_: torchvision.transforms.v2.CenterCrop
+    size: 256 # square centered crop
+  - _target_: torchvision.transforms.RandomHorizontalFlip
+  - _target_: torchvision.transforms.ConvertImageDtype # this also scales to [0; 1]
+    dtype: ${torch_dtype:float32} # passed dtype must be accessible as a "torch" attribute
+  - _target_: torchvision.transforms.Normalize
+    mean: [0.5, 0.5, 0.5]
+    std: [0.5, 0.5, 0.5]
+expected_initial_data_range: [0, 255]
+expected_dtype: torch.uint8
