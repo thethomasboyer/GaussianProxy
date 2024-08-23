@@ -239,7 +239,7 @@ class Task:
             prefixed_vars += f"TMPDIR={self.cfg.tmpdir_location} "
 
         # Launched command
-        final_cmd = f"{prefixed_vars}WANDB_SILENT=true accelerate launch {accelerate_cfg} {self.code_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
+        final_cmd = f"{prefixed_vars} accelerate launch {accelerate_cfg} {self.code_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
 
         for override in self.overrides:
             final_cmd += f" {override}"
