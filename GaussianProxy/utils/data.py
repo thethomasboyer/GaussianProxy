@@ -132,7 +132,7 @@ def _dataset_builder(
         f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
     )
     if debug:
-        logger.warning(">>> DEBUG MODE: LIMITING TEST DATALOADER TO 1 BATCH <<<")
+        logger.warning("Debug mode: limiting test dataloader to 2 evaluation batch")
     # Time per time
     for timestamp, files in files_dict_per_time.items():
         if debug:
@@ -141,7 +141,7 @@ def _dataset_builder(
                 np.random.default_rng()
                 .choice(
                     len(files),
-                    min(cfg.training.train_batch_size, int(0.9 * len(files))),
+                    min(2 * cfg.evaluation.batch_size, int(0.9 * len(files))),
                     replace=False,
                 )
                 .tolist()

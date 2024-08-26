@@ -105,7 +105,7 @@ def modify_args_for_debug(
     Modify the configuration for quick debugging purposes.
     """
     assert cfg.debug is True, "Expected debug mode to be enabled"
-    logger.warning(">>> DEBUG MODE: CHANGING CONFIGURATION <<<")
+    logger.warning("Debug mode: changing configuration")
     # this dict hosts the changes to be made to the configuration
     changes: dict[tuple[str, ...], int] = {
         ("dynamic", "num_train_timesteps"): 100,

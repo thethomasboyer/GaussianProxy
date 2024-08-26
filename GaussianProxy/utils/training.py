@@ -710,10 +710,10 @@ class TimeDiffusion:
                 self._simple_gen(
                     dataloaders,
                     pbar_manager,
-                    eval_strat,
+                    eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
-                )  # pyright: ignore[reportArgumentType]
+                )
             elif eval_strat.name == "ForwardNoising":
                 self._forward_noising(
                     dataloaders,
@@ -726,10 +726,10 @@ class TimeDiffusion:
                 self._inv_regen(
                     dataloaders,
                     pbar_manager,
-                    eval_strat,
+                    eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
-                )  # pyright: ignore[reportArgumentType]
+                )
             elif eval_strat.name == "IterativeInvertedRegeneration":
                 self._iter_inv_regen(
                     dataloaders,
@@ -1214,8 +1214,8 @@ class TimeDiffusion:
                 batch.shape,
                 dtype=batch.dtype,
                 device=batch.device,
-                generator=self.eval_rng,
-            )  # pyright: ignore[reportCallIssue, reportArgumentType]
+                generator=self.eval_rng,  # pyright: ignore[reportCallIssue, reportArgumentType]
+            )
             noise_timestep_idx = int((1 - eval_strat.forward_noising_frac) * len(inference_scheduler.timesteps))
             noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
             noise_timesteps: IntTensor = torch.full(  # pyright: ignore[reportAssignmentType]
