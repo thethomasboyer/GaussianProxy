@@ -1,4 +1,3 @@
-import gc
 import json
 import shutil
 from dataclasses import dataclass, field, fields
@@ -763,8 +762,6 @@ class TimeDiffusion:
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
-        torch.cuda.empty_cache()
-        gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
@@ -837,8 +834,6 @@ class TimeDiffusion:
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
-        torch.cuda.empty_cache()
-        gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
@@ -1016,8 +1011,6 @@ class TimeDiffusion:
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
-        torch.cuda.empty_cache()
-        gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
@@ -1173,8 +1166,6 @@ class TimeDiffusion:
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
-        torch.cuda.empty_cache()
-        gc.collect()
         self.logger.info(f"Starting {eval_strat.name}")
         self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
