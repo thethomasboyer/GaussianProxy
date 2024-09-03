@@ -87,6 +87,13 @@ class BaseDataset(Dataset):
 
 @dataclass
 class DatasetParams:
+    """
+    - `file_extension`: the extension of the files to load, without the dot
+    - `key_transform`: a function to transform the subdir name into a timestep
+    - `sorting_func`: a function to sort the subdirs
+    - `dataset_class`: the class of the dataset to instantiate
+    """
+
     file_extension: str
     key_transform: Callable[[str], int] | Callable[[str], str]
     sorting_func: Callable
@@ -210,8 +217,8 @@ class NumpyDataset(BaseDataset):
         return torch.from_numpy(np.load(path))
 
 
-class JPEGDataset(BaseDataset):
-    """Just a dataset loading JPEG images, and moving the channel dim last."""
+class ImageDataset(BaseDataset):
+    """Just a dataset loading images, and moving the channel dim last."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
         return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
@@ -264,14 +271,21 @@ def setup_dataloaders(
                 file_extension="jpg",
                 key_transform=str,
                 sorting_func=lambda subdir: phase_order_dict[subdir.name],
-                dataset_class=JPEGDataset,
+                dataset_class=ImageDataset,
             )
         case "diabetic_retinopathy":
             ds_params = DatasetParams(
                 file_extension="jpeg",
                 key_transform=int,
                 sorting_func=lambda subdir: int(subdir.name),
-                dataset_class=JPEGDataset,
+                dataset_class=ImageDataset,
+            )
+        case "ependymal_context" | "ependymal_cutout":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ImageDataset,
             )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
@@ -285,6 +299,6 @@ class RandomRotationSquareSymmetry(Transform):
     def __init__(self):
         super().__init__()
 
-    def _transform(self, inputs: Tensor, _params) -> Tensor:
+    def _transform(self, inpt: Tensor, params) -> Tensor:
         rot = 90 * np.random.randint(4)
-        return tf.rotate(inputs, rot)
+        return tf.rotate(inpt, rot)
