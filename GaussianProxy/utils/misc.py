@@ -91,7 +91,7 @@ def create_repo_structure(
 
 def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: bool = True) -> None:
     # warn if no eval_every_... arg is passed is passed
-    if cfg.evaluation.every_n_epochs is None:
+    if cfg.evaluation.every_n_epochs is None and cfg.evaluation.every_n_opt_steps is None:
         logger.warning("No evaluation will be performed during training.")
 
 

@@ -571,6 +571,7 @@ class TimeDiffusion:
             # Wake me up at 3am if grad is NaN
             if torch.isnan(grad_norm) and self.accelerator.is_main_process:
                 msg = f"Grad is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+                msg += f", grad scaler scale {self.accelerator.scaler.get_scale()} from initial scale {self.accelerator.scaler._init_scale}"
                 wandb.alert(
                     title="NaN grad",
                     text=msg,
