@@ -191,8 +191,16 @@ def main(cfg: Config) -> None:
     else:
         raise ValueError(f"Invalid type for 'cfg.net': {type(cfg.net)}")
 
+    nb_params_M = round(net.num_parameters() / 1e6)
+    nb_params_M_trainable = round(net.num_parameters(True) / 1e6)
+    logger.info(f"Net has ~{nb_params_M}M parameters (~{nb_params_M_trainable}M trainable)")
+
     # video time encoding
     video_time_encoding = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder))  # pyright: ignore[reportCallIssue]
+
+    nb_params_M = round(video_time_encoding.num_parameters() / 1e3)
+    nb_params_M_trainable = round(video_time_encoding.num_parameters(True) / 1e3)
+    logger.info(f"VideoTimeEncoding has ~{nb_params_M}K parameters (~{nb_params_M_trainable}K trainable)")
 
     # --------------------------------- Miscellaneous --------------------------------
     # # Create EMA for the models
