@@ -334,7 +334,7 @@ def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[s
                 raise ValueError(f"Unknown normalization: {norm}")
         # convert to [0;255] np.uint8 arrays for wandb / PIL
         if isinstance(norm_elems, Tensor):
-            norm_elems = norm_elems.cpu().numpy()
+            norm_elems = norm_elems.to(torch.float32).cpu().numpy()
         norm_elems = (norm_elems * 255).astype(np.uint8)
         normalized_elems_for_logging[norm] = norm_elems
 
