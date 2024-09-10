@@ -29,7 +29,6 @@ from GaussianProxy.conf.training_conf import (
     IterativeInvertedRegeneration,
     SimpleGeneration,
 )
-from GaussianProxy.utils.data import NumpyDataset
 from GaussianProxy.utils.misc import _normalize_elements_for_logging
 from GaussianProxy.utils.models import VideoTimeEncoding
 from my_conf.my_inference_conf import inference_conf
@@ -98,6 +97,8 @@ def main(cfg: InferenceConfig) -> None:
     net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # pyright: ignore[reportAssignmentType]
         run_path / "saved_model" / "net", torch_dtype=torch_dtype
     )
+    nb_params_M = round(net.num_parameters() / 1e6)
+    logger.info(f"Loaded model from {run_path / 'saved_model' / 'net'} with ~{nb_params_M}M parameters")
     net.to(cfg.device)
     if cfg.compile:
         net = torch.compile(net)  # pyright: ignore[reportAssignmentType]
@@ -106,28 +107,45 @@ def main(cfg: InferenceConfig) -> None:
     video_time_encoder: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(  # pyright: ignore[reportAssignmentType]
         run_path / "saved_model" / "video_time_encoder", torch_dtype=torch_dtype
     )
+    nb_params_K = round(video_time_encoder.num_parameters() / 1e3)
+    logger.info(
+        f"Loaded video time encoder from {run_path / 'saved_model' / 'video_time_encoder'} with ~{nb_params_K}K parameters"
+    )
     video_time_encoder.to(cfg.device)
 
     # dynamic
     dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(run_path / "saved_model" / "dynamic")
+    logger.info(f"Loaded dynamic from {run_path / 'saved_model' / 'dynamic'}: {dynamic}")
 
     ###############################################################################################
     #                                     Load Starting Images
     ###############################################################################################
+    assert cfg.dataset.dataset_params is not None
+
     database_path = Path(cfg.dataset.path)
-    subdirs = sorted([e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")])
+    subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
+    subdirs.sort(key=cfg.dataset.dataset_params.sorting_func)
 
     # we are only interested in the first subdir: timestep 0
-    assert subdirs[0].name == "1", f"Expected '1' as first subdir, got {subdirs[0].name} in subdir list: {subdirs}"
+    logger.info(f"Will be using subdir '{subdirs[0].name}' as starting point")
 
-    # I reuse the NumpyDataset class from the training script to load the images consistently
-    starting_samples = list(subdirs[0].glob("*.npy"))
-    starting_ds = NumpyDataset(starting_samples, cfg.dataset.transforms)
-    logger.info(f"Built dataset from {database_path}/1:\n{starting_ds}")
+    # I reuse the Dataset class from the training script to load the images consistently
+    starting_samples = list(subdirs[0].glob(f"*.{cfg.dataset.dataset_params.file_extension}"))
+    starting_ds = cfg.dataset.dataset_params.dataset_class(
+        starting_samples,
+        cfg.dataset.transforms,
+        cfg.dataset.expected_initial_data_range,
+    )
+    logger.info(f"Built dataset from {subdirs[0]}:\n{starting_ds}")
     logger.info(f"Using transforms:\n{cfg.dataset.transforms}")
 
     # select starting samples to generate from
     if cfg.plate_name_to_simulate is not None:
+        assert cfg.dataset.name in (
+            "biotine_image",
+            "biotine_image_red_channel",
+        ), f"Only biotine datasets supports plate_name_to_simulate, got {cfg.dataset.name}"
+
         # if a plate was given, select nb_generated_samples from it, in order
         glob_pattern = f"{cfg.plate_name_to_simulate}_time_1_patch_*_*.npy"
         # assuming they are sorted in (x,y) dictionary order
