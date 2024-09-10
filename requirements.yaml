@@ -36,7 +36,8 @@ dependencies:
 - conda-forge::ffmpeg=6
 - conda-forge::gitpython
 - conda-forge::imageio
+- conda-forge::scipy
 - pip
 - pip:
-    - wandb>=0.17.1
-    - opencv-python-headless
+  - wandb>=0.17.1
+  - opencv-python-headless

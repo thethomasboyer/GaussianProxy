@@ -169,6 +169,9 @@ dependencies:
 - libgcc-ng=14.1.0=h69a702a_1
 - libgettextpo=0.22.5=he02047a_3
 - libgettextpo-devel=0.22.5=he02047a_3
+- libgfortran=14.1.0=h69a702a_1
+- libgfortran-ng=14.1.0=h69a702a_1
+- libgfortran5=14.1.0=hc5f4f2c_1
 - libgl=1.7.0=ha4b6fd6_0
 - libglib=2.80.3=h315aac3_2
 - libglvnd=1.7.0=ha4b6fd6_0
@@ -313,6 +316,7 @@ dependencies:
 - rpds-py=0.20.0=py312h12e396e_1
 - ruff=0.6.2=py312h78ba408_0
 - safetensors=0.4.4=py312h12e396e_1
+- scipy=1.14.1=py312h7d485d2_0
 - send2trash=1.8.3=pyh0d859eb_0
 - setuptools=73.0.1=pyhd8ed1ab_0
 - six=1.16.0=pyh6c4a22f_0
