@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from omegaconf import MISSING
 
@@ -54,6 +54,21 @@ class Accelerate:
     offline: bool
 
 
+@dataclass
+class DatasetParams:  # TODO: fusion with DataSet
+    """
+    - `file_extension`: the extension of the files to load, without the dot
+    - `key_transform`: a function to transform the subdir name into a timestep
+    - `sorting_func`: a function to sort the subdirs
+    - `dataset_class`: the class of the dataset to instantiate
+    """
+
+    file_extension: str
+    key_transform: Callable[[str], int] | Callable[[str], str]
+    sorting_func: Callable
+    dataset_class: type
+
+
 @dataclass(kw_only=True)
 class DataSet:
     # data_shape should be tuple[int, int, int] | tuple[int, int], but unions of containers
@@ -65,6 +80,7 @@ class DataSet:
     expected_initial_data_range: tuple[float, float] | None
     # same goes for selected_dists: should be list[int] | list[str]...
     selected_dists: Optional[list] = None
+    dataset_params: Optional[DatasetParams] = None
 
 
 @dataclass
@@ -181,7 +197,7 @@ class UNet2DModelConfig:
     resnet_time_scale_shift: str = "default"
 
 
-@dataclass
+@dataclass(kw_only=True)
 class UNet2DConditionModelConfig:
     sample_size: int
     in_channels: int
@@ -189,6 +205,7 @@ class UNet2DConditionModelConfig:
     down_block_types: tuple[str, ...]
     up_block_types: tuple[str, ...]
     block_out_channels: tuple[int, ...]
+    norm_num_groups: int = 32
     layers_per_block: int
     act_fn: str
     cross_attention_dim: int

@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -18,7 +17,7 @@ from torchvision.transforms.transforms import (
 )
 from torchvision.transforms.v2 import Transform
 
-from GaussianProxy.conf.training_conf import Config
+from GaussianProxy.conf.training_conf import Config, DatasetParams
 
 str_to_torch_dtype_mapping = {"fp32": torch.float32}
 
@@ -31,7 +30,7 @@ class BaseDataset(Dataset):
         samples: list[str] | list[Path],
         transforms: Callable,
         expected_initial_data_range: Optional[tuple[float, float]] = None,
-        expected_dtype: Optional[torch.dtype] = None,
+        expected_dtype: Optional[torch.dtype] = None,  # TODO: this is never set?!?
     ) -> None:
         super().__init__()
         self.samples = samples
@@ -83,21 +82,6 @@ class BaseDataset(Dataset):
         # Indent each line in the body
         indented_body_lines = [" " * 4 + line for line in body_lines]
         return "\n".join([head] + indented_body_lines)
-
-
-@dataclass
-class DatasetParams:
-    """
-    - `file_extension`: the extension of the files to load, without the dot
-    - `key_transform`: a function to transform the subdir name into a timestep
-    - `sorting_func`: a function to sort the subdirs
-    - `dataset_class`: the class of the dataset to instantiate
-    """
-
-    file_extension: str
-    key_transform: Callable[[str], int] | Callable[[str], str]
-    sorting_func: Callable
-    dataset_class: type[BaseDataset]
 
 
 def _dataset_builder(
@@ -246,7 +230,7 @@ def setup_dataloaders(
     |   |   - ...
     ```
 
-    TODO(maybe): move DatasetParams'params into the base DataSet class used in config?
+    TODO: move DatasetParams'params into the base DataSet class used in config?
     """
     match cfg.dataset.name:
         case "biotine_image" | "biotine_image_red_channel":
@@ -285,6 +269,13 @@ def setup_dataloaders(
                 file_extension="png",
                 key_transform=int,
                 sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ImageDataset,
+            )
+        case "BBBC021_196_docetaxel":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=str,
+                sorting_func=lambda subdir: float(subdir.name),
                 dataset_class=ImageDataset,
             )
         case _:
