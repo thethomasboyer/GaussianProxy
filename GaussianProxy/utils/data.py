@@ -2,13 +2,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
-import torch
 import torchvision.transforms.functional as tf
 from accelerate.logging import MultiProcessAdapter
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
-from torch import Tensor
+from torch import Tensor, dtype, float32, from_numpy
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.transforms import (
     Compose,
@@ -19,7 +18,7 @@ from torchvision.transforms.v2 import Transform
 
 from GaussianProxy.conf.training_conf import Config, DatasetParams
 
-str_to_torch_dtype_mapping = {"fp32": torch.float32}
+str_to_torch_dtype_mapping = {"fp32": float32}
 
 
 class BaseDataset(Dataset):
@@ -30,7 +29,7 @@ class BaseDataset(Dataset):
         samples: list[str] | list[Path],
         transforms: Callable,
         expected_initial_data_range: Optional[tuple[float, float]] = None,
-        expected_dtype: Optional[torch.dtype] = None,  # TODO: this is never set?!?
+        expected_dtype: Optional[dtype] = None,  # TODO: this is never set?!?
     ) -> None:
         super().__init__()
         self.samples = samples
@@ -170,7 +169,7 @@ def _dataset_builder(
         )
         # Create test dataloader
         # no flips nor rotations for consistent evaluation
-        test_transforms = remove_flips_and_rotations_from_transforms(transforms)
+        test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
         test_ds = dataset_params.dataset_class(test_files, test_transforms, cfg.dataset.expected_initial_data_range)
         assert (
             test_ds[0].shape == cfg.dataset.data_shape
@@ -185,27 +184,27 @@ def _dataset_builder(
 
 
 def remove_flips_and_rotations_from_transforms(transforms: Compose):
-    """Filter out the RandomHorizontalFlip and RandomVerticalFlip."""
-    filtered_transforms = [
-        t
-        for t in transforms.transforms
-        if not isinstance(t, (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry))
-    ]
-    return Compose(filtered_transforms)
+    """Filter out `RandomHorizontalFlip`, `RandomVerticalFlip` and `RandomRotationSquareSymmetry`."""
+    is_flip_or_rotation = lambda t: isinstance(
+        t, (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry)
+    )
+    kept_transforms = [t for t in transforms.transforms if not is_flip_or_rotation(t)]
+    removed_transforms = [type(t) for t in transforms.transforms if is_flip_or_rotation(t)]
+    return Compose(kept_transforms), removed_transforms
 
 
 class NumpyDataset(BaseDataset):
     """Just a dataset loading NumPy arrays."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
-        return torch.from_numpy(np.load(path))
+        return from_numpy(np.load(path))
 
 
 class ImageDataset(BaseDataset):
     """Just a dataset loading images, and moving the channel dim last."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
-        return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
+        return from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
 
 
 def setup_dataloaders(
@@ -271,7 +270,7 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
-        case "BBBC021_196_docetaxel":
+        case name if name.startswith("BBBC021_"):
             ds_params = DatasetParams(
                 file_extension="png",
                 key_transform=str,

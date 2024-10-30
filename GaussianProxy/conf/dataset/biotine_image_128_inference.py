@@ -1,4 +1,4 @@
-import torchvision
+from torchvision.transforms import Compose, Normalize, Resize
 
 from GaussianProxy.conf.training_conf import DataSet, DatasetParams
 from GaussianProxy.utils.data import NumpyDataset
@@ -6,10 +6,10 @@ from GaussianProxy.utils.data import NumpyDataset
 DEFINITION = 128
 NUMBER_OF_CHANNELS = 3
 
-transforms = torchvision.transforms.transforms.Compose(
+transforms = Compose(
     transforms=[
-        torchvision.transforms.Normalize(mean=[0.5] * NUMBER_OF_CHANNELS, std=[0.5] * NUMBER_OF_CHANNELS),
-        torchvision.transforms.transforms.Resize(size=DEFINITION),
+        Normalize(mean=[0.5] * NUMBER_OF_CHANNELS, std=[0.5] * NUMBER_OF_CHANNELS),
+        Resize(size=DEFINITION),
     ]
 )
 

@@ -11,4 +11,7 @@ dynamic = ["dependencies"]
 packages = ["GaussianProxy", "my_conf"]
 
 [tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+dependencies = { file = ["requirements.txt"] }
+
+[tool.pyright]
+exclude = ["**/__pycache__", "**/experiments", "**/site-packages"]

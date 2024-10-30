@@ -1,7 +1,19 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from torch import dtype
+
 from .training_conf import DataSet, EvaluationStrategy
+
+
+@dataclass(kw_only=True)
+class ProfileConfig:
+    enabled: bool
+    record_shapes: bool
+    profile_memory: bool
+    with_stack: bool
+    with_flops: bool
+    export_chrome_trace: bool
 
 
 @dataclass(kw_only=True)
@@ -19,7 +31,7 @@ class InferenceConfig:
 
     # Optimizations
     compile: bool
-    dtype: str
+    dtype: dtype
 
     # Data
     dataset: DataSet
@@ -31,3 +43,9 @@ class InferenceConfig:
     nb_video_timesteps: int
     evaluation_strategies: list[EvaluationStrategy]
     n_rows_displayed: int
+
+    # Profiling
+    profiling: ProfileConfig
+
+    # Temp Dir
+    tmpdir_location: str

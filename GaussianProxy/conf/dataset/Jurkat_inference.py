@@ -1,5 +1,5 @@
-import torch
-import torchvision
+from torch import float32
+from torchvision.transforms import Compose, ConvertImageDtype, Normalize
 
 from GaussianProxy.conf.training_conf import DataSet, DatasetParams
 from GaussianProxy.utils.data import ImageDataset
@@ -7,10 +7,10 @@ from GaussianProxy.utils.data import ImageDataset
 DEFINITION = 66
 NUMBER_OF_CHANNELS = 3
 
-transforms = torchvision.transforms.transforms.Compose(
+transforms = Compose(
     transforms=[
-        torchvision.transforms.ConvertImageDtype(torch.float32),
-        torchvision.transforms.Normalize(mean=[0.5] * NUMBER_OF_CHANNELS, std=[0.5] * NUMBER_OF_CHANNELS),
+        ConvertImageDtype(float32),
+        Normalize(mean=[0.5] * NUMBER_OF_CHANNELS, std=[0.5] * NUMBER_OF_CHANNELS),
     ]
 )
 

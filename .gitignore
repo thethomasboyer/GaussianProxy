@@ -19,3 +19,8 @@ notebooks/playground.ipynb
 *_outputs/
 *.egg-info
 *.egg
+pytorch_traces
+*.html
+*.png
+*.pt
+*.json

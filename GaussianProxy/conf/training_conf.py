@@ -100,7 +100,7 @@ class Training:
     nb_time_samplings: int
 
 
-@dataclass
+@dataclass(kw_only=True)
 class EvaluationStrategy:
     nb_diffusion_timesteps: int
     # we must repeat ourselves because hydra actually passes DictConfig objects instead of plain classes...
@@ -123,6 +123,15 @@ class SimpleGeneration(EvaluationStrategy):
 
 
 @dataclass(kw_only=True)
+class SimilarityWithTrainData(EvaluationStrategy):
+    nb_samples_generated: int
+    batch_size: int
+    nb_batches_shown: int
+    metrics: str | list[str] = "cosine"
+    name: str = field(default="CosineSimilarityWithTrainData")
+
+
+@dataclass(kw_only=True)
 class ForwardNoising(EvaluationStrategy):
     forward_noising_frac: float
     name: str = field(default="ForwardNoising")
@@ -133,6 +142,14 @@ class ForwardNoisingLinearScaling(EvaluationStrategy):
     forward_noising_frac_start: float
     forward_noising_frac_end: float
     name: str = field(default="ForwardNoisingLinearScaling")
+
+
+@dataclass(kw_only=True)
+class FIDComputation(EvaluationStrategy):
+    nb_samples_to_gen_per_time: int
+    batch_size: int
+    name: str = field(default="FIDComputation")
+    regen_images: bool = True
 
 
 @dataclass

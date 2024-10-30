@@ -1,5 +1,6 @@
 import time
 from functools import wraps
+from logging import Logger
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,7 @@ from numpy import ndarray
 from omegaconf import OmegaConf
 from PIL import Image
 from termcolor import colored
-from torch import Generator, Tensor
+from torch import Tensor
 from wandb.sdk.wandb_run import Run as WandBRun
 
 from GaussianProxy.conf.training_conf import Config
@@ -184,7 +185,6 @@ def save_eval_artifacts_log_to_wandb(
     eval_strat: str,
     artifact_name: str,
     logging_normalization: list[str],
-    rng: Generator,
     max_nb_to_save_and_log: int = 16,
     captions: None | list[None] | list[str] = None,
 ):
@@ -297,7 +297,7 @@ def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[s
     """
     Normalize images or videos for logging to W&B.
 
-    Output range and type is always `[0;255]` and `np.uint8`.
+    Output range and type is *always* `[0;255]` and `np.uint8`.
     """
     # 1. Determine the dimensions for normalization based on the number of dimensions in the tensor
     match elems.ndim:
@@ -439,3 +439,8 @@ def log_state(state_logger: StateLogger):
         return wrapper
 
     return decorator
+
+
+def warn_about_dtype_conv(model: torch.nn.Module, target_dtype: torch.dtype, logger: Logger | MultiProcessAdapter):
+    if model.dtype == torch.bfloat16 and target_dtype not in (torch.bfloat16, torch.float32):
+        logger.warning(f"model is bf16 but target_dtype is {target_dtype}: conversion might be weird/invalid")

@@ -34,8 +34,6 @@ from my_conf.my_training_conf import config
 # nice tracebacks
 install()
 
-# nice wandb
-wandb.require("core")
 
 # stop DEBUG log pollution
 logging.getLogger("matplotlib").setLevel(logging.INFO)
@@ -221,9 +219,9 @@ def main(cfg: Config) -> None:
 
     # PyTorch mixed precision
     torch.set_float32_matmul_precision("high")
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
-    # ----------------------------------- Optimizers ----------------------------------
+    # ----------------------------------- Optimizer -----------------------------------
     # scale the learning rate with the square root of the number of GPUs
     logger.info(
         f"Scaling learning rate with the (square root of the) number of GPUs (×{round(sqrt(accelerator.num_processes), 3)})"

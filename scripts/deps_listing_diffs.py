@@ -1,3 +1,17 @@
+"""
+deps_listing_diffs.py
+
+This script compares the package dependencies listed in `requirements.txt` and `environment.yaml`.
+
+It performs the following steps:
+1. Reads and normalizes package names from `requirements.txt`.
+2. Reads and normalizes package names from `environment.yaml`.
+3. Identifies and prints duplicate package names in each file.
+4. Finds and prints the differences between the two sets of packages, indicating which packages are unique to each file.
+
+Normalization involves converting package names to lowercase and replacing hyphens with underscores to ensure consistency.
+"""
+
 from collections import Counter
 
 import yaml

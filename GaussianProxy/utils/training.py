@@ -83,7 +83,6 @@ class TimeDiffusion:
     _checkpointing_cfg: Checkpointing = field(init=False)
     chckpt_save_path: Path = field(init=False)
     _eval_cfg: Evaluation = field(init=False)
-    eval_rng: Generator = field(init=False)
     optimizer: Optimizer = field(init=False)
     lr_scheduler: LRScheduler = field(init=False)
     logger: MultiProcessAdapter = field(init=False)
@@ -308,9 +307,6 @@ class TimeDiffusion:
             unwrapped_net_config["sample_size"],
             unwrapped_net_config["sample_size"],
         )
-        # Generator for consistent evaluation
-        seed = int(torch.randn(1).item())  # think I'm crazy? think again...
-        self.eval_rng: Generator = torch.Generator(self.accelerator.device).manual_seed(seed)  # pyright: ignore[reportAttributeAccessIssue]
         # Sample Gaussian noise and video timesteps once for all subsequent evaluations
         self._eval_noise = torch.randn(
             self.eval_cfg.batch_size,
@@ -549,10 +545,10 @@ class TimeDiffusion:
         # Wake me up at 3am if loss is NaN
         if torch.isnan(loss) and self.accelerator.is_main_process:
             msg = f"loss is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
-            wandb.alert(
+            wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
                 title="NaN loss",
                 text=msg,
-                level=wandb.AlertLevel.ERROR,
+                level=wandb.AlertLevel.ERROR,  # pyright: ignore[reportAttributeAccessIssue]
                 wait_duration=21600,  # 6 hours
             )
             self.logger.critical(msg)
@@ -571,11 +567,12 @@ class TimeDiffusion:
             # Wake me up at 3am if grad is NaN
             if torch.isnan(grad_norm) and self.accelerator.is_main_process:
                 msg = f"Grad is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
-                msg += f", grad scaler scale {self.accelerator.scaler.get_scale()} from initial scale {self.accelerator.scaler._init_scale}"
-                wandb.alert(
+                if self.accelerator.scaler is not None:
+                    msg += f", grad scaler scale {self.accelerator.scaler.get_scale()} from initial scale {self.accelerator.scaler._init_scale}"
+                wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
                     title="NaN grad",
                     text=msg,
-                    level=wandb.AlertLevel.ERROR,
+                    level=wandb.AlertLevel.ERROR,  # pyright: ignore[reportAttributeAccessIssue]
                     wait_duration=21600,  # 6 hours
                 )
                 self.logger.critical(msg)
@@ -586,8 +583,7 @@ class TimeDiffusion:
         self.lr_scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
 
-        # Update global opt step & log the loss
-        self.global_optimization_step += 1
+        # Log to wandb
         self.accelerator.log(
             {
                 "loss": loss.item(),
@@ -602,14 +598,17 @@ class TimeDiffusion:
         # Wake me up at 3am if loss is NaN
         if torch.isnan(loss) and self.accelerator.is_main_process:
             msg = f"Loss is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
-            wandb.alert(
+            wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
                 title="NaN loss",
                 text=msg,
-                level=wandb.AlertLevel.ERROR,
+                level=wandb.AlertLevel.ERROR,  # pyright: ignore[reportAttributeAccessIssue]
                 wait_duration=21600,  # 6 hours
             )
             self.logger.critical(msg)
             # TODO: restart from previous checkpoint
+
+        # Update global opt step
+        self.global_optimization_step += 1
 
     def _unet2d_pred(
         self,
@@ -799,11 +798,30 @@ class TimeDiffusion:
             eval_strat.name,
             "simple_generations",
             ["-1_1 raw", "image min-max", "-1_1 clipped"],
-            self.eval_rng,  # pyright: ignore[reportArgumentType]
             captions=[f"time: {round(t.item(), 3)}" for t in random_video_time],
         )
 
         gen_pbar.close()
+
+    @log_state(state_logger)
+    @torch.inference_mode()
+    def _cosine_sim_with_train(
+        self,
+        _: dict[float, DataLoader],
+        pbar_manager: Manager,
+        eval_strat: SimpleGeneration,
+        eval_net: UNet2DModel | UNet2DConditionModel,
+        inference_video_time_encoding: VideoTimeEncoding,
+    ):
+        """
+        Test model memorization by:
+
+        - generating n samples (from random noise)
+        - computing the closest (generated, true) pair by Euclidean cosine similarity, for each generated image
+        - plotting the distribution of these n closest cosine similarities
+        - showing the p < n closest pairs
+        """
+        raise NotImplementedError("TODO: Not implemented yet")
 
     @log_state(state_logger)
     @torch.inference_mode()
@@ -866,7 +884,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "starting_samples",
                     ["-1_1 raw", "image min-max"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 2. Generate the inverted Gaussians
@@ -887,7 +904,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "inversions",
                     ["image min-max", "image 5perc-95perc"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 3. Regenerate the starting samples from their inversion
@@ -905,7 +921,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "regenerations",
                     ["image min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 4. Generate the trajectory from it
@@ -963,7 +978,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "trajectories",
                     ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             eval_batches_pbar.update()
@@ -1045,7 +1059,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "starting_samples",
                     ["-1_1 raw", "image min-max"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # Generate the trajectory
@@ -1084,7 +1097,6 @@ class TimeDiffusion:
                         eval_strat.name,
                         "inversions",
                         ["image min-max", "image 5perc-95perc"],
-                        self.eval_rng,  # pyright: ignore[reportArgumentType]
                     )
 
                 # 3. Generate the next image from it
@@ -1124,7 +1136,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "trajectories",
                     ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             eval_batches_pbar.update()
@@ -1198,7 +1209,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "starting_samples",
                     ["-1_1 raw", "image min-max"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 2. Sample Gaussian noise and noise the images until some step
@@ -1206,7 +1216,6 @@ class TimeDiffusion:
                 batch.shape,
                 dtype=batch.dtype,
                 device=batch.device,
-                generator=self.eval_rng,  # pyright: ignore[reportCallIssue, reportArgumentType]
             )
             noise_timestep_idx = int((1 - eval_strat.forward_noising_frac) * len(inference_scheduler.timesteps))
             noise_timestep = inference_scheduler.timesteps[noise_timestep_idx].item()
@@ -1228,7 +1237,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "noised_samples",
                     ["image min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             # 3. Generate the trajectory from it
@@ -1286,7 +1294,6 @@ class TimeDiffusion:
                     eval_strat.name,
                     "trajectories",
                     ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                    self.eval_rng,  # pyright: ignore[reportArgumentType]
                 )
 
             eval_batches_pbar.update()

@@ -151,9 +151,9 @@ def main(cfg: Config) -> None:
 
     # Submit
     if cfg.slurm.enabled:
-        job = executor.submit(task)  # pyright: ignore[reportArgumentType]
+        job = executor.submit(task)  # pyright: ignore[ reportPossiblyUnboundVariable]
         logger.info("Task submitted:")
-        logger.info(pformat(executor.parameters))
+        logger.info(pformat(executor.parameters))  # pyright: ignore[reportPossiblyUnboundVariable]
         logger.info("-" * max(0, terminal_width - 44))
         # Monitor
         if cfg.slurm.monitor:
@@ -203,9 +203,9 @@ class Task:
             if self.cfg.slurm.enabled:
                 actual_nb_gpus = self.cfg.slurm.num_gpus
             elif launch_args.gpu_ids == "all":
-                import torch  # import here to avoid slow script starting
+                from torch.cuda import device_count  # import here to avoid slow script starting
 
-                actual_nb_gpus = torch.cuda.device_count()
+                actual_nb_gpus = device_count()
                 self.logger.debug(f"Found {actual_nb_gpus} GPU ids from torch.cuda.device_count()")
             else:
                 tmp_gpu_ids = launch_args.gpu_ids.split(",")
