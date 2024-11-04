@@ -277,6 +277,13 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: float(subdir.name),
                 dataset_class=ImageDataset,
             )
+        case "chromalive_tl_24h_380px":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=str,
+                sorting_func=lambda subdir: int(subdir.name.split("_")[1]),
+                dataset_class=ImageDataset,
+            )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
