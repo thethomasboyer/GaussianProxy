@@ -96,7 +96,7 @@ class Training:
     gradient_accumulation_steps: int
     train_batch_size: int
     max_grad_norm: int
-    nb_epochs: int
+    nb_epochs: int  # TODO: remove this
     nb_time_samplings: int
 
 

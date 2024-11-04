@@ -14,6 +14,7 @@
 # - submit the task (or run it directly)
 
 
+import os
 import shutil
 import subprocess
 import sys
@@ -181,7 +182,7 @@ class Task:
         overrides: list[str],
         task_config_path: Path,
         task_config_name: Path,
-        code_parent_folder: Path,
+        code_and_config_parent_folder: Path,
         script_name: str,
         logger: Logger,
     ):
@@ -189,7 +190,7 @@ class Task:
         self.overrides = overrides
         self.task_config_path = task_config_path
         self.task_config_name = task_config_name
-        self.code_parent_folder = code_parent_folder
+        self.code_and_config_parent_folder = code_and_config_parent_folder
         self.script_name = script_name
         self.logger = logger
 
@@ -225,21 +226,25 @@ class Task:
             else:
                 accelerate_cfg += f"--{cfg_item_name} {cfg_item_value} "
 
-        prefixed_vars = ""
+        # Environment variables
+        env_vars = os.environ.copy()
+
+        env_vars["PYTHONPATH"] = f"{self.code_and_config_parent_folder.as_posix()}:{os.environ.get('PYTHONPATH', '')}"
 
         if self.cfg.debug:
             accelerate_cfg += "--debug "
-            prefixed_vars += "HYDRA_FULL_ERROR=1 "
+            env_vars["HYDRA_FULL_ERROR"] = "1"
 
         if self.cfg.accelerate.offline:
-            prefixed_vars += "WANDB_MODE=offline HF_DATASETS_OFFLINE=1 "
+            env_vars["WANDB_MODE"] = "offline"
+            env_vars["HF_DATASETS_OFFLINE"] = "1"
 
         if self.cfg.tmpdir_location is not None:
             Path(self.cfg.tmpdir_location).mkdir(parents=True, exist_ok=True)
-            prefixed_vars += f"TMPDIR={self.cfg.tmpdir_location} "
+            env_vars["TMPDIR"] = self.cfg.tmpdir_location
 
         # Launched command
-        final_cmd = f"{prefixed_vars} accelerate launch {accelerate_cfg} {self.code_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
+        final_cmd = f"accelerate launch {accelerate_cfg} {self.code_and_config_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
 
         for override in self.overrides:
             final_cmd += f" {override}"
@@ -253,7 +258,7 @@ class Task:
         self.logger.info("=" * max(0, terminal_width - 44))
 
         # Execute command
-        subprocess.run(final_cmd, shell=True, check=True)
+        subprocess.run(final_cmd, shell=True, check=True, env=env_vars)
 
     def checkpoint(self):
         """Method called by submitit when the Task times out."""
@@ -271,7 +276,7 @@ class Task:
             self.overrides,
             self.task_config_path,
             self.task_config_name,
-            self.code_parent_folder,
+            self.code_and_config_parent_folder,
             self.script_name,
             getLogger(__name__),
         )
@@ -345,19 +350,8 @@ def _get_config_path_and_name(hydra_cfg: HydraConf) -> tuple[Path, Path]:
     return launcher_config_path, task_config_name
 
 
-CODE_TO_COPY = [
-    "GaussianProxy/train.py",
-    "GaussianProxy/utils/data.py",
-    "GaussianProxy/utils/misc.py",
-    "GaussianProxy/utils/training.py",
-    "GaussianProxy/utils/models.py",
-    "GaussianProxy/conf/training_conf.py",
-    "GaussianProxy/conf/hydra",
-    "GaussianProxy/conf/dataset",
-]  # path must be relative to the *launcher* script (this script) parent folder
-
-FILES_OR_FOLDERS_TO_GIT_DIFF = CODE_TO_COPY + ["my_conf"]
-# my_conf is also copied but as part of the config
+THINGS_TO_COPY = ["GaussianProxy", "my_conf"]
+# path must be relative to the *launcher* script (this script) parent folder
 
 THINGS_TO_GITIGNORE = [
     "__pycache__",
@@ -375,6 +369,7 @@ THINGS_TO_GITIGNORE = [
     "*.out",
     "*.sh",
     "*.pkl",
+    "my_conf/my_inference_conf.py",  # do not git diff the user inference config
 ]
 
 
@@ -418,7 +413,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     logger.debug(f"Copied config {launcher_config_name} to {this_experiment_folder}")
 
     # 5. Copy the code to the experiment folder
-    for file_or_folder_name in CODE_TO_COPY:
+    for file_or_folder_name in THINGS_TO_COPY:
         source_path = Path(cfg.launcher_script_parent_folder, file_or_folder_name)
         destination_path = Path(this_experiment_folder, file_or_folder_name)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -432,10 +427,10 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
                 shutil.rmtree(destination_path)
             shutil.copytree(source_path, destination_path, dirs_exist_ok=True)
     _set_files_read_only(this_experiment_folder)
-    logger.debug(f"Copied files or folders: {CODE_TO_COPY} to {this_experiment_folder}")
+    logger.debug(f"Copied files or folders: {THINGS_TO_COPY} to {this_experiment_folder}")
 
     # 6. Get git hash of new state of affairs
-    for f in FILES_OR_FOLDERS_TO_GIT_DIFF:
+    for f in THINGS_TO_COPY:
         # we need to add everything in case the repo was not initialized yet
         repo.git.add(f)
     if repo.is_dirty():
