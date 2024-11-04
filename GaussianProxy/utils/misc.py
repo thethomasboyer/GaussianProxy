@@ -110,7 +110,6 @@ def modify_args_for_debug(
     # this dict hosts the changes to be made to the configuration
     changes: dict[tuple[str, ...], int] = {
         ("dynamic", "num_train_timesteps"): 100,
-        ("training", "nb_epochs"): 5,
         ("training", "nb_time_samplings"): 30,
         ("checkpointing", "checkpoint_every_n_steps"): 100,
         (
