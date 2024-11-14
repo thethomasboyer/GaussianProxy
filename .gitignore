@@ -24,3 +24,4 @@ pytorch_traces
 *.png
 *.pt
 *.json
+src

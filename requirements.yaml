@@ -37,9 +37,9 @@ dependencies:
 - conda-forge::submitit
 - conda-forge::termcolor
 - conda-forge::torchinfo
-- conda-forge::torch-fidelity
 - pytorch::torchvision
 - conda-forge::tqdm
 - conda-forge::wandb
 - pip:
   - opencv-python-headless
+  - -e git+https://github.com/thethomasboyer/torch-fidelity-symlinks.git@master#egg=torch-fidelity --config-settings editable_mode=strict
