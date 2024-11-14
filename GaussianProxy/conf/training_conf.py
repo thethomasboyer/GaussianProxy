@@ -144,10 +144,10 @@ class ForwardNoisingLinearScaling(EvaluationStrategy):
 
 
 @dataclass(kw_only=True)
-class FIDComputation(EvaluationStrategy):
+class MetricsComputation(EvaluationStrategy):
     nb_samples_to_gen_per_time: int | str
     batch_size: int
-    name: str = field(default="FIDComputation")
+    name: str = field(default="MetricsComputation")
     regen_images: bool = True
 
 

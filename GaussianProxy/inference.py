@@ -75,11 +75,11 @@ from torchvision.utils import make_grid
 
 from GaussianProxy.conf.inference_conf import InferenceConfig
 from GaussianProxy.conf.training_conf import (
-    FIDComputation,
     ForwardNoising,
     ForwardNoisingLinearScaling,
     InvertedRegeneration,
     IterativeInvertedRegeneration,
+    MetricsComputation,
     SimilarityWithTrainData,
     SimpleGeneration,
 )
@@ -91,7 +91,7 @@ from GaussianProxy.utils.data import (
 from GaussianProxy.utils.misc import (
     _normalize_elements_for_logging,
     get_evenly_spaced_timesteps,
-    save_images_for_fid_compute,
+    save_images_for_metrics_compute,
     warn_about_dtype_conv,
 )
 from GaussianProxy.utils.models import VideoTimeEncoding
@@ -276,7 +276,7 @@ def main(cfg: InferenceConfig) -> None:
                 pbar_manager,
                 subdirs,
             )
-        elif type(eval_strat) is FIDComputation:
+        elif type(eval_strat) is MetricsComputation:
             # TODO: allow generating at non-empirical timesteps
             empirical_timesteps = get_evenly_spaced_timesteps(len(subdirs))
             logger.info(
@@ -1255,7 +1255,7 @@ def iterative_inverted_regeneration(
 
 def fid_computation(
     cfg: InferenceConfig,
-    eval_strat: FIDComputation,
+    eval_strat: MetricsComputation,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
@@ -1342,7 +1342,7 @@ def fid_computation(
 
                 diff_ts_pbar.close()
 
-                save_images_for_fid_compute(
+                save_images_for_metrics_compute(
                     image,
                     base_save_path / str(vid_t),
                     sum(actual_batches[:batch_idx]),

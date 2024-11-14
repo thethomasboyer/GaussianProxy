@@ -437,7 +437,7 @@ def warn_about_dtype_conv(model: torch.nn.Module, target_dtype: torch.dtype, log
         logger.warning(f"model is bf16 but target_dtype is {target_dtype}: conversion might be weird/invalid")
 
 
-def save_images_for_fid_compute(
+def save_images_for_metrics_compute(
     images: Tensor, save_folder: Path, first_file_idx: int, process_idx: Optional[int] = None
 ):
     # Checks

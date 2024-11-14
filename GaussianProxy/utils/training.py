@@ -27,10 +27,10 @@ from torch.utils.data import DataLoader
 
 from GaussianProxy.conf.training_conf import (
     Config,
-    FIDComputation,
     ForwardNoising,
     InvertedRegeneration,
     IterativeInvertedRegeneration,
+    MetricsComputation,
     SimpleGeneration,
 )
 from GaussianProxy.utils.data import BaseDataset
@@ -39,7 +39,7 @@ from GaussianProxy.utils.misc import (
     get_evenly_spaced_timesteps,
     log_state,
     save_eval_artifacts_log_to_wandb,
-    save_images_for_fid_compute,
+    save_images_for_metrics_compute,
 )
 from GaussianProxy.utils.models import VideoTimeEncoding
 
@@ -52,7 +52,7 @@ class ResumingArgs:
     """
     Arguments to resume training from a checkpoint.
 
-    Must default to "natural" starting values when training from scratch.
+    **Must default to "natural" starting values when training from scratch!**
     """
 
     start_instant_batch_idx: int = 0
@@ -98,7 +98,10 @@ class TimeDiffusion:
     instant_batch_idx: int = field(init=False)
     # global training state
     global_optimization_step: int = field(init=False)
-    best_model_to_date: bool = True  # TODO
+    # WARNING: only "smaller is better" metrics are supported!
+    # WARNING: best_metric_to_date will only be updated on the main process!
+    best_metric_to_date: float = np.inf
+    first_metrics_eval: bool = True  # always reset to True even if resuming from a checkpoint
     # constant evaluation starting states
     _eval_noise: Tensor = field(init=False)
     _eval_video_times: Tensor = field(init=False)
@@ -655,7 +658,7 @@ class TimeDiffusion:
                     inference_net,
                     inference_video_time_encoding,
                 )
-            elif eval_strat.name == "FIDComputation":
+            elif eval_strat.name == "MetricsComputation":
                 true_data_classes_paths = {idx: "" for idx in range(len(dataloaders.keys()))}
                 for cl_idx, dl in enumerate(dataloaders.values()):
                     inner_ds = dl.dataset
@@ -665,7 +668,7 @@ class TimeDiffusion:
                         )
                     # assuming they are share the same parent...
                     true_data_classes_paths[cl_idx] = Path(inner_ds.samples[0]).parent.as_posix()
-                self._fid_computation(
+                self._metrics_computation(
                     tmp_save_folder,
                     pbar_manager,
                     eval_strat,  # pyright: ignore[reportArgumentType]
@@ -678,10 +681,6 @@ class TimeDiffusion:
 
             # wait for everyone between each eval
             self.accelerator.wait_for_everyone()
-
-        # Save best model
-        if self.best_model_to_date:
-            self._save_pipeline()
 
     @log_state(state_logger)
     @torch.inference_mode()
@@ -924,11 +923,7 @@ class TimeDiffusion:
                 )
 
             eval_batches_pbar.update()
-            break  # TODO: keep generating on the entire test set and evaluate the trajectories
-
-        # 3. Evaluate the trajectories
-        self.logger.warning_once("Should implement evaluation metrics here.")
-        # TODO: compute metric on full test data & set self.best_model_to_date accordingly
+            break  # TODO: clean this up either by making this smol-batch-logging and duplicating it on train data
 
         eval_batches_pbar.close()
         self.logger.info(
@@ -1085,11 +1080,7 @@ class TimeDiffusion:
                 )
 
             eval_batches_pbar.update()
-            break  # TODO: keep generating on the entire test set and evaluate the trajectories
-
-        # 3. Evaluate the trajectories
-        self.logger.warning_once("Should implement evaluation metrics here.")
-        # TODO: compute metric on full test data & set self.best_model_to_date accordingly
+            break  # TODO: clean this up either by making this smol-batch-logging and duplicating it on train data
 
         eval_batches_pbar.close()
         self.logger.info(
@@ -1246,11 +1237,7 @@ class TimeDiffusion:
                 )
 
             eval_batches_pbar.update()
-            break  # TODO: keep generating on the entire test set and evaluate the trajectories
-
-        # 3. Evaluate the trajectories
-        self.logger.warning_once("Should implement evaluation metrics here.")
-        # TODO: compute metric on full test data & set self.best_model_to_date accordingly
+            break  # TODO: clean this up either by making this smol-batch-logging and duplicating it on train data
 
         eval_batches_pbar.close()
         self.logger.info(
@@ -1260,19 +1247,19 @@ class TimeDiffusion:
 
     @log_state(state_logger)
     @torch.inference_mode()
-    def _fid_computation(
+    def _metrics_computation(
         self,
         tmp_save_folder: Path,
         pbar_manager: Manager,
-        eval_strat: FIDComputation,
+        eval_strat: MetricsComputation,
         eval_net: UNet2DModel | UNet2DConditionModel,
         inference_video_time_encoding: VideoTimeEncoding,
         true_data_classes_paths: dict[int, str],
     ):
         """
-        Compute FID vs training data.
+        Compute metrics such as FID.
 
-        Metrics are computed on main process only.
+        Everything is distributed.
         """
         # 0. Preparations
         # duplicate the scheduler to not mess with the training one
@@ -1306,7 +1293,7 @@ class TimeDiffusion:
             video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
 
             # find how many samples to generate, batchify generation and distribute along processes
-            this_proc_gen_batches = self._find_this_proc_this_time_batches_for_fid_comp(
+            this_proc_gen_batches = self._find_this_proc_this_time_batches_for_metrics_comp(
                 eval_strat, video_time_idx, true_data_classes_paths
             )
 
@@ -1347,9 +1334,9 @@ class TimeDiffusion:
                     model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
-                save_images_for_fid_compute(
+                save_images_for_metrics_compute(
                     image,
-                    tmp_save_folder / "fid_computation" / str(video_time_idx),
+                    tmp_save_folder / "metrics_computation" / str(video_time_idx),
                     sum(this_proc_gen_batches[:batch_idx]),
                     self.accelerator.process_index,
                 )
@@ -1364,44 +1351,48 @@ class TimeDiffusion:
         # no need to wait here then
         self.logger.info("Finished image generation")
 
-        # 2. Compute FIDs
-        # clear the dataset caches because the dataset might not be exactly the same that in the previous run,
-        # despite having the same cfg.dataset.name (used as ID): risk of invalid cache
+        # 2. Compute metrics
         # consistency of cache naming with below is important
-        caches_to_remove: dict[str | int, Path] = {
-            "all_classes": tmp_save_folder / "fid_computation" / self.cfg.dataset.name
+        metrics_caches: dict[str | int, Path] = {
+            "all_classes": tmp_save_folder / "metrics_computation" / self.cfg.dataset.name
         }
         for video_time_idx in range(len(self.empirical_dists_timesteps)):
-            caches_to_remove[video_time_idx] = (
-                tmp_save_folder / "fid_computation" / (self.cfg.dataset.name + "_class_" + str(video_time_idx))
+            metrics_caches[video_time_idx] = (
+                tmp_save_folder / "metrics_computation" / (self.cfg.dataset.name + "_class_" + str(video_time_idx))
             )
 
-        if self.accelerator.is_main_process:
-            for cache in caches_to_remove.values():
-                if cache.exists():
-                    shutil.rmtree(cache)
+        # clear the dataset caches (on first eval of a run only...)
+        # because the dataset might not be exactly the same that in the previous run,
+        # despite having the same cfg.dataset.name (used as ID): risk of invalid cache
+        if self.first_metrics_eval:
+            self.first_metrics_eval = False
+            # clear on main process
+            if self.accelerator.is_main_process:
+                for cache in metrics_caches.values():
+                    if cache.exists():
+                        shutil.rmtree(cache)
         self.accelerator.wait_for_everyone()
 
         # TODO: weight tasks by number of samples
         tasks = ["all_classes"] + list(range(len(self.empirical_dists_timesteps)))
         tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
 
-        self.logger.info("Computing FID scores...")
+        self.logger.info("Computing metrics...")
         metrics_dict: dict[str, dict[str, float]] = {}
         for task in tasks_for_this_process:
             if task == "all_classes":
                 self.logger.debug(f"Computing metrics against true samples at {Path(self.cfg.dataset.path).as_posix()}")
                 metrics = torch_fidelity.calculate_metrics(
                     input1=Path(self.cfg.dataset.path).as_posix(),
-                    input2=(tmp_save_folder / "fid_computation").as_posix(),
+                    input2=(tmp_save_folder / "metrics_computation").as_posix(),
                     cuda=True,
                     batch_size=eval_strat.batch_size,  # TODO: optimize
                     isc=True,
                     fid=True,
                     prc=True,
                     verbose=self.cfg.debug and self.accelerator.is_main_process,
-                    cache_root=(tmp_save_folder / "fid_computation").as_posix(),
-                    input1_cache_name=caches_to_remove["all_classes"].name,
+                    cache_root=(tmp_save_folder / "metrics_computation").as_posix(),
+                    input1_cache_name=metrics_caches["all_classes"].name,
                     samples_find_deep=True,
                 )
             else:
@@ -1409,15 +1400,15 @@ class TimeDiffusion:
                 self.logger.debug(f"Computing metrics against true samples at {true_data_classes_paths[task]}")
                 metrics = torch_fidelity.calculate_metrics(
                     input1=true_data_classes_paths[task],
-                    input2=(tmp_save_folder / "fid_computation" / str(task)).as_posix(),
+                    input2=(tmp_save_folder / "metrics_computation" / str(task)).as_posix(),
                     cuda=True,
                     batch_size=eval_strat.batch_size,  # TODO: optimize
                     isc=True,
                     fid=True,
                     prc=True,
                     verbose=self.cfg.debug and self.accelerator.is_main_process,
-                    cache_root=(tmp_save_folder / "fid_computation").as_posix(),
-                    input1_cache_name=caches_to_remove[task].name,
+                    cache_root=(tmp_save_folder / "metrics_computation").as_posix(),
+                    input1_cache_name=metrics_caches[task].name,
                 )
             metrics_dict[str(task)] = metrics
             self.logger.debug(
@@ -1451,8 +1442,17 @@ class TimeDiffusion:
                 f"Logged metrics {final_metrics_dict}",
             )
 
-    def _find_this_proc_this_time_batches_for_fid_comp(
-        self, eval_strat: FIDComputation, video_time_idx: int, true_data_classes_paths: dict[int, str]
+        # 4. Check if best model to date
+        if self.accelerator.is_main_process:
+            # WARNING: only "smaller is better" metrics are supported!
+            # WARNING: best_metric_to_date will only be updated on the main process!
+            if self.best_metric_to_date > final_metrics_dict["all_classes"]["frechet_inception_distance"]:  # pyright: ignore[reportPossiblyUnboundVariable]
+                self.best_metric_to_date = final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
+                self.logger.info(f"Saving best model to date with all classes FID: {self.best_metric_to_date}")
+                self._save_pipeline()
+
+    def _find_this_proc_this_time_batches_for_metrics_comp(
+        self, eval_strat: MetricsComputation, video_time_idx: int, true_data_classes_paths: dict[int, str]
     ) -> list[int]:
         # find total number of samples to generate for this video time
         if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
