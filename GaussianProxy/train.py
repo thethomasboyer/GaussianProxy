@@ -26,7 +26,7 @@ from wandb.sdk.wandb_run import Run as WandBRun
 
 from GaussianProxy.conf.training_conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
 from GaussianProxy.utils.data import setup_dataloaders
-from GaussianProxy.utils.misc import args_checker, create_repo_structure, modify_args_for_debug
+from GaussianProxy.utils.misc import create_repo_structure, modify_args_for_debug
 from GaussianProxy.utils.models import VideoTimeEncoding
 from GaussianProxy.utils.training import TimeDiffusion, resume_from_checkpoint
 from my_conf.my_training_conf import config
@@ -115,9 +115,11 @@ def main(cfg: Config) -> None:
         else:
             with open(prev_run_id_file, "r", encoding="utf-8") as f:
                 prev_run_id = f.readline().strip()
-        logger.info(
-            f"Found a 'run_id.txt' file and 'resume_from_checkpoint' is True; imposing wandb to resume the run with id {prev_run_id}"
-        )
+            logger.info(
+                f"Found a 'run_id.txt' file and 'resume_from_checkpoint' is True; imposing wandb to resume the run with id {prev_run_id}"
+            )
+    else:
+        logger.info("No 'run_id.txt' file found; starting a new W&B run")
 
     # Init W&B
     init_kwargs: dict[str, dict[str, str | None]] = {
@@ -133,8 +135,12 @@ def main(cfg: Config) -> None:
             start_step = 0
         else:
             start_step = resuming_args.start_global_optimization_step
-        logger.info(f"Rewinding run {prev_run_id} from step {start_step}")
-        init_kwargs["wandb"]["resume_from"] = f"{prev_run_id}?_step={start_step}"
+        if cfg.fork_run:
+            logger.info(f"Forking run {prev_run_id} from step {start_step}")
+            init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"
+        else:
+            logger.info(f"Rewinding run {prev_run_id} from step {start_step}")
+            init_kwargs["wandb"]["resume_from"] = f"{prev_run_id}?_step={start_step}"
 
     accelerator.init_trackers(
         project_name=cfg.project,
@@ -155,10 +161,6 @@ def main(cfg: Config) -> None:
             f"Logging to: entity:{colored(cfg.entity, 'yellow', None, ['bold'])} | project:{colored(cfg.project, 'blue', None, ['bold'])} | run.name:{colored(cfg.run_name, 'magenta', None, ['bold'])} | run.id:{colored(wandb_tracker.id, 'magenta', None, ['bold'])}"
         )
 
-    # ------------------------------------ Checks ------------------------------------
-    if accelerator.is_main_process:
-        args_checker(cfg, logger)
-
     # ---------------------------------- Dataloaders ---------------------------------
     num_workers = cfg.dataloaders.num_workers if cfg.dataloaders.num_workers is not None else accelerator.num_processes
 
@@ -167,8 +169,6 @@ def main(cfg: Config) -> None:
     # ------------------------------------ Debug -------------------------------------
     if cfg.debug:
         modify_args_for_debug(cfg, logger, wandb_tracker, accelerator.is_main_process)
-        if accelerator.is_main_process:
-            args_checker(cfg, logger, False)  # check again after debug modifications 😈
 
     # ------------------------------------- Net -------------------------------------
     # it's ugly but Hydra's instantiate produces weird errors (even with _convert="all"!?) TODO
@@ -194,7 +194,7 @@ def main(cfg: Config) -> None:
     logger.info(f"VideoTimeEncoding has ~{nb_params_M}K parameters (~{nb_params_M_trainable}K trainable)")
 
     # --------------------------------- Miscellaneous --------------------------------
-    # # Create EMA for the models
+    # # Create EMA for the models # TODO
     # ema_models = {}
     # components_to_train_transcribed = get_HF_component_names(cfg.components_to_train)
     # if cfg.use_ema:
@@ -268,12 +268,13 @@ def main(cfg: Config) -> None:
 
     # --------------------------------- Training loop --------------------------------
     trainer: TimeDiffusion = TimeDiffusion(
-        dynamic=dyn,
-        net=net,
-        net_type=net_type,
-        video_time_encoding=video_time_encoding,
-        accelerator=accelerator,
-        debug=cfg.debug,
+        cfg,
+        dyn,
+        net,
+        net_type,
+        video_time_encoding,
+        accelerator,
+        cfg.debug,
     )
     trainer.fit(
         train_dataloaders,
@@ -284,10 +285,7 @@ def main(cfg: Config) -> None:
         hydra_cfg.run.dir,
         models_save_folder,
         saved_artifacts_folder,
-        cfg.training,
-        cfg.checkpointing,
         chckpt_save_path,
-        cfg.evaluation,
         resuming_args,
         cfg.profile,
     )

@@ -42,7 +42,6 @@ import json
 import operator
 import shutil
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from math import ceil
 from typing import Optional
 
@@ -89,7 +88,12 @@ from GaussianProxy.utils.data import (
     RandomRotationSquareSymmetry,
     remove_flips_and_rotations_from_transforms,
 )
-from GaussianProxy.utils.misc import _normalize_elements_for_logging, get_evenly_spaced_timesteps, warn_about_dtype_conv
+from GaussianProxy.utils.misc import (
+    _normalize_elements_for_logging,
+    get_evenly_spaced_timesteps,
+    save_images_for_fid_compute,
+    warn_about_dtype_conv,
+)
 from GaussianProxy.utils.models import VideoTimeEncoding
 
 # No grads
@@ -1502,23 +1506,6 @@ def _save_grid_of_images(images_tensor: ndarray, save_path: Path, nrows: int, pa
     # Convert to PIL Image
     pil_img = Image.fromarray(grid_img.numpy().transpose(1, 2, 0))
     pil_img.save(save_path)
-
-
-def save_images_for_fid_compute(images: Tensor, save_folder: Path, first_file_idx: int):
-    # Checks
-    assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
-    save_folder.mkdir(parents=True, exist_ok=True)
-
-    # Normalize images to [0;255] np.uint8 range
-    normalized_imgs = _normalize_elements_for_logging(images, ["-1_1 raw"])["-1_1 raw"]
-
-    def save_image(img: ndarray, img_idx: int):
-        pil_img = Image.fromarray(img.transpose(1, 2, 0))
-        filename = str(first_file_idx + img_idx) + ".png"
-        pil_img.save(save_folder / filename)
-
-    with ThreadPoolExecutor() as executor:
-        executor.map(save_image, normalized_imgs, range(len(normalized_imgs)))
 
 
 def save_histogram(

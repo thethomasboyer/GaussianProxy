@@ -1,7 +1,9 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from logging import Logger
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import plotly.express as px
@@ -90,12 +92,6 @@ def create_repo_structure(
     return models_save_folder, saved_artifacts_folder, chckpt_save_path
 
 
-def args_checker(cfg: Config, logger: MultiProcessAdapter, first_check_pass: bool = True) -> None:
-    # warn if no eval_every_... arg is passed is passed
-    if cfg.evaluation.every_n_epochs is None and cfg.evaluation.every_n_opt_steps is None:
-        logger.warning("No evaluation will be performed during training.")
-
-
 def modify_args_for_debug(
     cfg: Config,
     logger: MultiProcessAdapter,
@@ -110,16 +106,12 @@ def modify_args_for_debug(
     # this dict hosts the changes to be made to the configuration
     changes: dict[tuple[str, ...], int] = {
         ("dynamic", "num_train_timesteps"): 100,
-        ("training", "nb_time_samplings"): 30,
+        ("training", "nb_time_samplings"): 300,
         ("checkpointing", "checkpoint_every_n_steps"): 100,
         (
             "evaluation",
-            "every_n_epochs",
-        ): 1,
-        (
-            "evaluation",
             "every_n_opt_steps",
-        ): 300,
+        ): 30,
         ("evaluation", "nb_video_timesteps"): 5,
     }
     # now actually change the configuration,
@@ -443,3 +435,25 @@ def log_state(state_logger: StateLogger):
 def warn_about_dtype_conv(model: torch.nn.Module, target_dtype: torch.dtype, logger: Logger | MultiProcessAdapter):
     if model.dtype == torch.bfloat16 and target_dtype not in (torch.bfloat16, torch.float32):
         logger.warning(f"model is bf16 but target_dtype is {target_dtype}: conversion might be weird/invalid")
+
+
+def save_images_for_fid_compute(
+    images: Tensor, save_folder: Path, first_file_idx: int, process_idx: Optional[int] = None
+):
+    # Checks
+    assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
+    save_folder.mkdir(parents=True, exist_ok=True)
+
+    # Normalize images to [0;255] np.uint8 range
+    normalized_imgs = _normalize_elements_for_logging(images, ["-1_1 raw"])["-1_1 raw"]
+
+    def _save_image_wrapper(img: ndarray, img_idx: int):
+        pil_img = Image.fromarray(img.transpose(1, 2, 0))
+        if process_idx is not None:
+            filename = f"proc_{process_idx}_{first_file_idx + img_idx}.png"
+        else:
+            filename = str(first_file_idx + img_idx) + ".png"
+        pil_img.save(save_folder / filename)
+
+    with ThreadPoolExecutor() as executor:
+        executor.map(_save_image_wrapper, normalized_imgs, range(len(normalized_imgs)))

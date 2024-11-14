@@ -1,4 +1,5 @@
 import json
+import pickle
 import shutil
 from dataclasses import dataclass, field, fields
 
@@ -8,6 +9,7 @@ from typing import Generator, Optional, Type
 
 import numpy as np
 import torch
+import torch_fidelity
 import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
@@ -24,20 +26,20 @@ from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
 from GaussianProxy.conf.training_conf import (
-    Checkpointing,
     Config,
-    Evaluation,
+    FIDComputation,
     ForwardNoising,
     InvertedRegeneration,
     IterativeInvertedRegeneration,
     SimpleGeneration,
-    Training,
 )
+from GaussianProxy.utils.data import BaseDataset
 from GaussianProxy.utils.misc import (
     StateLogger,
     get_evenly_spaced_timesteps,
     log_state,
     save_eval_artifacts_log_to_wandb,
+    save_images_for_fid_compute,
 )
 from GaussianProxy.utils.models import VideoTimeEncoding
 
@@ -55,7 +57,6 @@ class ResumingArgs:
 
     start_instant_batch_idx: int = 0
     start_global_optimization_step: int = 0
-    start_global_epoch: int = 0
     best_model_to_date: bool = True
 
 
@@ -72,6 +73,7 @@ class TimeDiffusion:
     """
 
     # compulsory arguments
+    cfg: Config
     dynamic: DDIMScheduler
     net: UNet2DModel | UNet2DConditionModel
     net_type: Type[UNet2DModel | UNet2DConditionModel]
@@ -79,10 +81,7 @@ class TimeDiffusion:
     accelerator: Accelerator
     debug: bool
     # populated arguments when calling .fit
-    _training_cfg: Training = field(init=False)
-    _checkpointing_cfg: Checkpointing = field(init=False)
     chckpt_save_path: Path = field(init=False)
-    _eval_cfg: Evaluation = field(init=False)
     optimizer: Optimizer = field(init=False)
     lr_scheduler: LRScheduler = field(init=False)
     logger: MultiProcessAdapter = field(init=False)
@@ -98,7 +97,6 @@ class TimeDiffusion:
     # instant state for checkpointing
     instant_batch_idx: int = field(init=False)
     # global training state
-    global_epoch: int = field(init=False)
     global_optimization_step: int = field(init=False)
     best_model_to_date: bool = True  # TODO
     # constant evaluation starting states
@@ -116,24 +114,6 @@ class TimeDiffusion:
         if self._empirical_dists_timesteps is None:
             raise RuntimeError("empirical_dists_timesteps is not set; fit should be called before trying to access it")
         return self._empirical_dists_timesteps
-
-    @property
-    def training_cfg(self) -> Training:
-        if self._training_cfg is None:
-            raise RuntimeError("training_cfg is not set; fit should be called before trying to access it")
-        return self._training_cfg
-
-    @property
-    def checkpointing_cfg(self) -> Checkpointing:
-        if self._checkpointing_cfg is None:
-            raise RuntimeError("checkpointing_cfg is not set; fit should be called before trying to access it")
-        return self._checkpointing_cfg
-
-    @property
-    def eval_cfg(self) -> Evaluation:
-        if self._eval_cfg is None:
-            raise RuntimeError("_eval_cfg is not set; fit should be called before trying to access it")
-        return self._eval_cfg
 
     @property
     def resuming_args(self) -> ResumingArgs:
@@ -176,10 +156,7 @@ class TimeDiffusion:
         output_dir: str,
         model_save_folder: Path,
         saved_artifacts_folder: Path,
-        training_cfg: Training,
-        checkpointing_cfg: Checkpointing,
         chckpt_save_path: Path,
-        eval_cfg: Evaluation,
         resuming_args: Optional[ResumingArgs] = None,
         profile: bool = False,
     ):
@@ -193,10 +170,7 @@ class TimeDiffusion:
         # Set some attributes relative to the data
         self._fit_init(
             train_dataloaders,
-            training_cfg,
-            checkpointing_cfg,
             chckpt_save_path,
-            eval_cfg,
             optimizer,
             lr_scheduler,
             logger,
@@ -222,17 +196,6 @@ class TimeDiffusion:
 
         pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
 
-        epochs_pbar = pbar_manager.counter(
-            total=self.training_cfg.nb_epochs,
-            desc="Epochs" + 32 * " ",
-            position=1,
-            enable=self.accelerator.is_main_process,
-            leave=False,
-            min_delta=1,
-            count=self.resuming_args.start_global_epoch,
-        )
-        epochs_pbar.refresh()
-
         # profiling # TODO: move to train.py
         if profile:
             profiler = torch_profile(
@@ -246,31 +209,60 @@ class TimeDiffusion:
         else:
             profiler = None
 
-        for epoch in range(self.resuming_args.start_global_epoch, self.training_cfg.nb_epochs):
-            self.epoch = epoch
-            self._fit_epoch(
+        init_count = self.resuming_args.start_instant_batch_idx
+        batches_pbar = pbar_manager.counter(
+            total=self.cfg.training.nb_time_samplings,
+            position=1,
+            desc="Training batches" + 10 * " ",
+            enable=self.accelerator.is_main_process,
+            leave=False,
+            min_delta=1,
+            count=init_count,
+        )
+        if self.accelerator.is_main_process:
+            batches_pbar.refresh()
+        # loop through training batches
+        for batch_idx, (time, batch) in enumerate(
+            self._yield_data_batches(
                 train_timestep_dataloaders,
-                test_timestep_dataloaders,
-                pbar_manager,
-                profiler,
+                self.logger,
+                self.cfg.training.nb_time_samplings - init_count,
             )
-            epochs_pbar.update()
-            # evaluate models every n epochs
-            if self.eval_cfg.every_n_epochs is not None and epoch % self.eval_cfg.every_n_epochs == 0:
+        ):
+            self.instant_batch_idx = batch_idx
+            # set network to the right mode
+            self.net.train()
+            # gradient step here
+            self._fit_one_batch(batch, time)
+            # take one profiler step
+            if profiler is not None:
+                profiler.step()
+            # checkpoint
+            if self.global_optimization_step % self.cfg.checkpointing.checkpoint_every_n_steps == 0:
+                self._checkpoint()
+            # update pbar
+            batches_pbar.update()
+            # evaluate models every n optimisation steps
+            if (
+                self.cfg.evaluation.every_n_opt_steps is not None
+                and self.global_optimization_step % self.cfg.evaluation.every_n_opt_steps == 0
+            ):
                 self._evaluate(
                     test_timestep_dataloaders,
                     pbar_manager,
                 )
+        batches_pbar.close()
+        # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
+        gantt_chart = state_logger.create_gantt_chart()
+        self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)}, step=self.global_optimization_step)
+
         if profiler is not None:
             profiler.stop()
 
     def _fit_init(
         self,
         train_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
-        training_cfg: Training,
-        checkpointing_cfg: Checkpointing,
         chckpt_save_path: Path,
-        eval_cfg: Evaluation,
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
         logger: MultiProcessAdapter,
@@ -283,10 +275,7 @@ class TimeDiffusion:
         self._nb_empirical_dists = len(train_dataloaders)
         assert self._nb_empirical_dists > 1, "Expecting at least 2 empirical distributions to train the model."
         self._empirical_dists_timesteps = get_evenly_spaced_timesteps(self.nb_empirical_dists)
-        self._training_cfg = training_cfg
-        self._checkpointing_cfg = checkpointing_cfg
         self.chckpt_save_path = chckpt_save_path
-        self._eval_cfg = eval_cfg
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.logger = logger
@@ -298,7 +287,6 @@ class TimeDiffusion:
         else:
             self._resuming_args = resuming_args
         self.global_optimization_step = self.resuming_args.start_global_optimization_step
-        self.global_epoch = self.resuming_args.start_global_epoch
         self.best_model_to_date = self.resuming_args.best_model_to_date
         # expected data shape
         unwrapped_net_config = self.accelerator.unwrap_model(self.net).config
@@ -309,87 +297,17 @@ class TimeDiffusion:
         )
         # Sample Gaussian noise and video timesteps once for all subsequent evaluations
         self._eval_noise = torch.randn(
-            self.eval_cfg.batch_size,
+            self.cfg.evaluation.batch_size,
             self.accelerator.unwrap_model(self.net).config["in_channels"],
             self.accelerator.unwrap_model(self.net).config["sample_size"],
             self.accelerator.unwrap_model(self.net).config["sample_size"],
             device=self.accelerator.device,
         )
         eval_video_times = torch.rand(
-            self.eval_cfg.batch_size,
+            self.cfg.evaluation.batch_size,
             device=self.accelerator.device,
         )
         self._eval_video_times = torch.sort(eval_video_times).values  # sort it for better viz
-
-    def _fit_epoch(
-        self,
-        train_dataloaders: dict[float, DataLoader],
-        test_dataloaders: dict[float, DataLoader],
-        pbar_manager: Manager,
-        profiler: Optional[torch_profile] = None,
-    ):
-        """
-        Fit a whole epoch of data.
-        """
-        init_count = (
-            self.resuming_args.start_instant_batch_idx if self.epoch == self.resuming_args.start_global_epoch else 0
-        )
-        batches_pbar = pbar_manager.counter(
-            total=self.training_cfg.nb_time_samplings,
-            position=2,
-            desc="Iterating over training data batches" + 2 * " ",
-            enable=self.accelerator.is_main_process,
-            leave=False,
-            min_delta=1,
-            count=init_count,
-        )
-        batches_pbar.refresh()
-        # loop through training batches
-        for batch_idx, (time, batch) in enumerate(
-            self._yield_data_batches(
-                train_dataloaders,
-                self.logger,
-                self.training_cfg.nb_time_samplings - init_count,
-            )
-        ):
-            self.instant_batch_idx = batch_idx
-            # set network to the right mode
-            self.net.train()
-            # gradient step here
-            self._fit_one_batch(batch, time)
-            # take one profiler step
-            if profiler is not None:
-                profiler.step()
-            # checkpoint
-            if self.global_optimization_step % self.checkpointing_cfg.checkpoint_every_n_steps == 0:
-                self._checkpoint()
-            # update pbar
-            batches_pbar.update()
-            # evaluate models every n optimisation steps
-            if (
-                self.eval_cfg.every_n_opt_steps is not None
-                and self.global_optimization_step % self.eval_cfg.every_n_opt_steps == 0
-            ):
-                batches_pbar.close()  # close otherwise interference w/ evaluation pbar
-                self._evaluate(
-                    test_dataloaders,
-                    pbar_manager,
-                )
-                batches_pbar = pbar_manager.counter(
-                    total=self.training_cfg.nb_time_samplings,
-                    position=2,
-                    desc="Iterating over training data batches" + 2 * " ",
-                    enable=self.accelerator.is_main_process,
-                    leave=False,
-                    count=self.instant_batch_idx,
-                    min_delta=1,
-                )
-        batches_pbar.close()
-        # update epoch
-        self.global_epoch += 1
-        # update timeline & save it
-        gantt_chart = state_logger.create_gantt_chart()
-        self.accelerator.log({"state_timeline": wandb.Plotly(gantt_chart)}, step=self.global_optimization_step)
 
     @torch.no_grad()
     @log_state(state_logger)
@@ -414,7 +332,7 @@ class TimeDiffusion:
 
         Note that such behavior is only "stable" when the batch size is large enough. Typically, if batch size is 1
         then each batch will always have samples from one empirical distribution only: quite bad for training along
-        continuous time... Along many epochs the theoretical end result will of course be the same.
+        continuous time... Along many samplings the theoretical end result will of course be the same.
         """
         assert (
             list(dataloaders.keys()) == self.empirical_dists_timesteps
@@ -444,11 +362,11 @@ class TimeDiffusion:
             # form the batch
             batch = []
             # sample from t- with probability x, from t+ with probability 1-x
-            random_sampling = torch.rand((self.training_cfg.train_batch_size,))
+            random_sampling = torch.rand((self.cfg.training.train_batch_size,))
 
             # now sample from the two dataloaders
             nb_t_minus_samples = (random_sampling < x).int().sum().item()
-            nb_t_plus_samples = self.training_cfg.train_batch_size - nb_t_minus_samples
+            nb_t_plus_samples = self.cfg.training.train_batch_size - nb_t_minus_samples
             nb_samples_to_get = {t_minus: nb_t_minus_samples, t_plus: nb_t_plus_samples}
             nb_samples_got = {t_minus: 0, t_plus: 0}
 
@@ -482,9 +400,9 @@ class TimeDiffusion:
 
             # check shape and append
             assert batch.shape == (
-                self.training_cfg.train_batch_size,
+                self.cfg.training.train_batch_size,
                 *self.data_shape,
-            ), f"Expecting sample shape {(self.training_cfg.train_batch_size, *self.data_shape)}, got {batch.shape}"
+            ), f"Expecting sample shape {(self.cfg.training.train_batch_size, *self.data_shape)}, got {batch.shape}"
 
             yield t, batch
 
@@ -501,9 +419,9 @@ class TimeDiffusion:
         """
         # checks
         assert batch.shape == (
-            self.training_cfg.train_batch_size,
+            self.cfg.training.train_batch_size,
             *self.data_shape,
-        ), f"Expecting batch shape {(self.training_cfg.train_batch_size, *self.data_shape)}, got {batch.shape}"
+        ), f"Expecting batch shape {(self.cfg.training.train_batch_size, *self.data_shape)}, got {batch.shape}"
         assert (
             batch.min() >= -1 and batch.max() <= 1
         ), f"Expecting batch to be in [-1;1] range, got {batch.min()} and {batch.max()}"
@@ -544,7 +462,7 @@ class TimeDiffusion:
 
         # Wake me up at 3am if loss is NaN
         if torch.isnan(loss) and self.accelerator.is_main_process:
-            msg = f"loss is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+            msg = f"loss is NaN at step {self.global_optimization_step}, time {time}"
             wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
                 title="NaN loss",
                 text=msg,
@@ -562,11 +480,11 @@ class TimeDiffusion:
         if self.accelerator.sync_gradients:
             grad_norm: Tensor = self.accelerator.clip_grad_norm_(  # pyright: ignore[reportAssignmentType]
                 self.net.parameters(),
-                self.training_cfg.max_grad_norm,
+                self.cfg.training.max_grad_norm,
             )
             # Wake me up at 3am if grad is NaN
             if torch.isnan(grad_norm) and self.accelerator.is_main_process:
-                msg = f"Grad is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+                msg = f"Grad is NaN at step {self.global_optimization_step}, time {time}"
                 if self.accelerator.scaler is not None:
                     msg += f", grad scaler scale {self.accelerator.scaler.get_scale()} from initial scale {self.accelerator.scaler._init_scale}"
                 wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
@@ -586,18 +504,17 @@ class TimeDiffusion:
         # Log to wandb
         self.accelerator.log(
             {
-                "loss": loss.item(),
-                "lr": self.lr_scheduler.get_last_lr()[0],
-                "epoch": self.epoch,
-                "step": self.global_optimization_step,
-                "time": time,
-                "L2 gradient norm": grad_norm,
+                "training/loss": loss.item(),
+                "training/lr": self.lr_scheduler.get_last_lr()[0],
+                "training/step": self.global_optimization_step,
+                "training/time": time,
+                "training/L2 gradient norm": grad_norm,
             },
             step=self.global_optimization_step,
         )
         # Wake me up at 3am if loss is NaN
         if torch.isnan(loss) and self.accelerator.is_main_process:
-            msg = f"Loss is NaN at epoch {self.global_epoch}, step {self.global_optimization_step}, time {time}"
+            msg = f"Loss is NaN at step {self.global_optimization_step}, time {time}"
             wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
                 title="NaN loss",
                 text=msg,
@@ -651,13 +568,14 @@ class TimeDiffusion:
     @torch.inference_mode()
     def _evaluate(
         self,
-        dataloaders: dict[float, DataLoader],
+        dataloaders: dict[float, DataLoader[BaseDataset]],
         pbar_manager: Manager,
     ):
         """
         Generate inference trajectories, compute metrics and save the model if best to date.
 
         Should be called by all processes as distributed barriers are used here.
+        Distributed processing is handled herein.
         """
         # 0. Wait for all processes to reach this point
         self.accelerator.wait_for_everyone()
@@ -704,7 +622,7 @@ class TimeDiffusion:
         # TODO: save & load a compiled artifact (with torch.export?)
 
         # 3. Run through evaluation strategies
-        for eval_strat in self.eval_cfg.strategies:
+        for eval_strat in self.cfg.evaluation.strategies:
             if eval_strat.name == "SimpleGeneration":
                 self._simple_gen(
                     dataloaders,
@@ -737,8 +655,29 @@ class TimeDiffusion:
                     inference_net,
                     inference_video_time_encoding,
                 )
+            elif eval_strat.name == "FIDComputation":
+                true_data_classes_paths = {idx: "" for idx in range(len(dataloaders.keys()))}
+                for cl_idx, dl in enumerate(dataloaders.values()):
+                    inner_ds = dl.dataset
+                    if not isinstance(inner_ds, BaseDataset):
+                        raise ValueError(
+                            f"Expected a `BaseDataset` for the underlying dataset of the evaluation dataloader, got {type(inner_ds)}"
+                        )
+                    # assuming they are share the same parent...
+                    true_data_classes_paths[cl_idx] = Path(inner_ds.samples[0]).parent.as_posix()
+                self._fid_computation(
+                    tmp_save_folder,
+                    pbar_manager,
+                    eval_strat,  # pyright: ignore[reportArgumentType]
+                    inference_net,
+                    inference_video_time_encoding,
+                    true_data_classes_paths,
+                )
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
+
+            # wait for everyone between each eval
+            self.accelerator.wait_for_everyone()
 
         # Save best model
         if self.best_model_to_date:
@@ -776,12 +715,13 @@ class TimeDiffusion:
         gen_pbar = pbar_manager.counter(
             total=len(inference_scheduler.timesteps),
             position=2,
-            desc="Generating samples" + " " * 20,
+            desc="Generating samples" + " " * 8,
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
         )
-        gen_pbar.refresh()
+        if self.accelerator.is_main_process:
+            gen_pbar.refresh()
 
         image = self.get_eval_noise()
         for t in inference_scheduler.timesteps:
@@ -864,12 +804,13 @@ class TimeDiffusion:
         eval_batches_pbar = pbar_manager.counter(
             total=len(first_dl),
             position=2,
-            desc="Iterating over evaluation data batches",
+            desc="Evaluation batches" + 10 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
         )
-        eval_batches_pbar.refresh()
+        if self.accelerator.is_main_process:
+            eval_batches_pbar.refresh()
 
         # Now generate & evaluate the trajectories
         for batch_idx, batch in enumerate(iter(first_dl)):
@@ -928,17 +869,19 @@ class TimeDiffusion:
             # usefull if small inference batch size, otherwise useless
             video = []
             video_time_pbar = pbar_manager.counter(
-                total=self.eval_cfg.nb_video_timesteps,
+                total=self.cfg.evaluation.nb_video_timesteps,
                 position=3,
-                desc="Iterating over video timesteps" + " " * 8,
+                desc="Evaluation video timesteps",
                 enable=self.accelerator.is_main_process,
                 leave=False,
                 min_delta=1,
             )
+            if self.accelerator.is_main_process:
+                video_time_pbar.refresh()
 
-            for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)):
+            for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps)):
                 image = inverted_gauss.clone()
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps - 1}")
+                self.logger.debug(f"Video timestep index {video_t_idx} / {self.cfg.evaluation.nb_video_timesteps - 1}")
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
@@ -949,7 +892,7 @@ class TimeDiffusion:
                 video_time_pbar.update()
                 # _log_to_file_only(
                 #     self.logger,
-                #     f"Video time {video_timestep}/{self.training_cfg.eval_nb_video_timesteps}",
+                #     f"Video time {video_timestep}/{self.cfg.training.eval_nb_video_timesteps}",
                 #     INFO,
                 # )
 
@@ -959,8 +902,8 @@ class TimeDiffusion:
             # wandb expects (batch_size, video_time, channels, height, width)
             video = video.permute(1, 0, 2, 3, 4)
             expected_video_shape = (
-                self.eval_cfg.batch_size,
-                self.eval_cfg.nb_video_timesteps,
+                self.cfg.evaluation.batch_size,
+                self.cfg.evaluation.nb_video_timesteps,
                 self.accelerator.unwrap_model(self.net).config["out_channels"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
@@ -1037,14 +980,15 @@ class TimeDiffusion:
         eval_batches_pbar = pbar_manager.counter(
             total=len(first_dl),
             position=2,
-            desc="Iterating over evaluation data batches",
+            desc="Evaluation batches" + 10 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
         )
-        eval_batches_pbar.refresh()
+        if self.accelerator.is_main_process:
+            eval_batches_pbar.refresh()
 
-        video_times = torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)
+        video_times = torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps)
 
         # Now generate & evaluate the trajectories
         for batch_idx, batch in enumerate(iter(first_dl)):
@@ -1066,18 +1010,20 @@ class TimeDiffusion:
             # usefull if small inference batch size, otherwise useless
             video = []
             video_time_pbar = pbar_manager.counter(
-                total=self.eval_cfg.nb_video_timesteps,
+                total=self.cfg.evaluation.nb_video_timesteps,
                 position=3,
-                desc="Iterating over video timesteps" + " " * 8,
+                desc="Evaluation video timesteps",
                 enable=self.accelerator.is_main_process,
                 leave=False,
                 min_delta=1,
             )
+            if self.accelerator.is_main_process:
+                video_time_pbar.refresh()
 
             prev_video_time = 0
             image = batch
             for video_t_idx, video_time in enumerate(video_times):
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps}")
+                self.logger.debug(f"Video timestep index {video_t_idx} / {self.cfg.evaluation.nb_video_timesteps}")
 
                 # 2. Generate the inverted Gaussians
                 inverted_gauss = image
@@ -1117,8 +1063,8 @@ class TimeDiffusion:
             # wandb expects (batch_size, video_time, channels, height, width)
             video = video.permute(1, 0, 2, 3, 4)
             expected_video_shape = (
-                self.eval_cfg.batch_size,
-                self.eval_cfg.nb_video_timesteps,
+                self.cfg.evaluation.batch_size,
+                self.cfg.evaluation.nb_video_timesteps,
                 self.accelerator.unwrap_model(self.net).config["out_channels"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
@@ -1189,12 +1135,13 @@ class TimeDiffusion:
         eval_batches_pbar = pbar_manager.counter(
             total=len(first_dl),
             position=2,
-            desc="Iterating over evaluation data batches",
+            desc="Evaluation batches" + 10 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
         )
-        eval_batches_pbar.refresh()
+        if self.accelerator.is_main_process:
+            eval_batches_pbar.refresh()
 
         # Now generate & evaluate the trajectories
         for batch_idx, batch in enumerate(iter(first_dl)):
@@ -1244,17 +1191,19 @@ class TimeDiffusion:
             # usefull if small inference batch size, otherwise useless
             video = []
             video_time_pbar = pbar_manager.counter(
-                total=self.eval_cfg.nb_video_timesteps,
+                total=self.cfg.evaluation.nb_video_timesteps,
                 position=3,
-                desc="Iterating over video timesteps" + " " * 8,
+                desc="Evaluation video timesteps",
                 enable=self.accelerator.is_main_process,
                 leave=False,
                 min_delta=1,
             )
+            if self.accelerator.is_main_process:
+                video_time_pbar.refresh()
 
-            for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.eval_cfg.nb_video_timesteps)):
+            for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps)):
                 image = slightly_noised_sample.clone()
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.eval_cfg.nb_video_timesteps}")
+                self.logger.debug(f"Video timestep index {video_t_idx} / {self.cfg.evaluation.nb_video_timesteps}")
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps[noise_timestep_idx:]:
@@ -1265,7 +1214,7 @@ class TimeDiffusion:
                 video_time_pbar.update()
                 # _log_to_file_only(
                 #     self.logger,
-                #     f"Video time {video_timestep}/{self.training_cfg.eval_nb_video_timesteps}",
+                #     f"Video time {video_timestep}/{self.cfg.training.eval_nb_video_timesteps}",
                 #     INFO,
                 # )
 
@@ -1275,8 +1224,8 @@ class TimeDiffusion:
             # wandb expects (batch_size, video_time, channels, height, width)
             video = video.permute(1, 0, 2, 3, 4)
             expected_video_shape = (
-                self.eval_cfg.batch_size,
-                self.eval_cfg.nb_video_timesteps,
+                self.cfg.evaluation.batch_size,
+                self.cfg.evaluation.nb_video_timesteps,
                 self.accelerator.unwrap_model(self.net).config["out_channels"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
@@ -1308,6 +1257,227 @@ class TimeDiffusion:
             f"Finished ForwardNoising on process ({self.accelerator.process_index})",
             main_process_only=False,
         )
+
+    @log_state(state_logger)
+    @torch.inference_mode()
+    def _fid_computation(
+        self,
+        tmp_save_folder: Path,
+        pbar_manager: Manager,
+        eval_strat: FIDComputation,
+        eval_net: UNet2DModel | UNet2DConditionModel,
+        inference_video_time_encoding: VideoTimeEncoding,
+        true_data_classes_paths: dict[int, str],
+    ):
+        """
+        Compute FID vs training data.
+
+        Metrics are computed on main process only.
+        """
+        # 0. Preparations
+        # duplicate the scheduler to not mess with the training one
+        inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
+        inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+        # Misc.
+        self.logger.info(f"Starting {eval_strat.name}")
+        self.logger.debug(
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
+            main_process_only=False,
+        )
+
+        # use training time encodings
+        eval_video_time = torch.tensor(self.empirical_dists_timesteps).to(self.accelerator.device)
+        eval_video_time_enc = inference_video_time_encoding.forward(eval_video_time)
+
+        # 1. Generate the samples
+        # loop over training video times
+        video_times_pbar = pbar_manager.counter(
+            total=len(eval_video_time),
+            position=2,
+            desc="Training video timesteps  ",
+            enable=self.accelerator.is_main_process,
+            leave=False,
+        )
+        if self.accelerator.is_main_process:
+            video_times_pbar.refresh()
+
+        for video_time_idx, video_time_enc in video_times_pbar(enumerate(eval_video_time_enc)):
+            video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
+
+            # find how many samples to generate, batchify generation and distribute along processes
+            this_proc_gen_batches = self._find_this_proc_this_time_batches_for_fid_comp(
+                eval_strat, video_time_idx, true_data_classes_paths
+            )
+
+            batches_pbar = pbar_manager.counter(
+                total=len(this_proc_gen_batches),
+                position=3,
+                desc="Evaluation batch" + 10 * " ",
+                enable=self.accelerator.is_main_process,
+                leave=False,
+            )
+            if self.accelerator.is_main_process:
+                batches_pbar.refresh()
+
+            # loop over generation batches
+            for batch_idx, batch_size in batches_pbar(enumerate(this_proc_gen_batches)):
+                gen_pbar = pbar_manager.counter(
+                    total=len(inference_scheduler.timesteps),
+                    position=4,
+                    desc="Generating samples" + " " * 8,
+                    enable=self.accelerator.is_main_process,
+                    leave=False,
+                )
+                if self.accelerator.is_main_process:
+                    gen_pbar.refresh()
+
+                # generate a batch of samples
+                image = torch.randn(
+                    batch_size,
+                    self.accelerator.unwrap_model(self.net).config["in_channels"],
+                    self.accelerator.unwrap_model(self.net).config["sample_size"],
+                    self.accelerator.unwrap_model(self.net).config["sample_size"],
+                    device=self.accelerator.device,
+                )
+                video_time_enc = video_time_enc[:batch_size]
+
+                # loop over diffusion timesteps
+                for t in gen_pbar(inference_scheduler.timesteps):
+                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
+                    image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+
+                save_images_for_fid_compute(
+                    image,
+                    tmp_save_folder / "fid_computation" / str(video_time_idx),
+                    sum(this_proc_gen_batches[:batch_idx]),
+                    self.accelerator.process_index,
+                )
+
+                gen_pbar.close()
+
+            batches_pbar.close()
+            # wait for everyone at end of each time (should be enough to avoid timeouts)
+            self.accelerator.wait_for_everyone()
+
+        video_times_pbar.close()
+        # no need to wait here then
+        self.logger.info("Finished image generation")
+
+        # 2. Compute FIDs
+        # clear the dataset caches because the dataset might not be exactly the same that in the previous run,
+        # despite having the same cfg.dataset.name (used as ID): risk of invalid cache
+        # consistency of cache naming with below is important
+        caches_to_remove: dict[str | int, Path] = {
+            "all_classes": tmp_save_folder / "fid_computation" / self.cfg.dataset.name
+        }
+        for video_time_idx in range(len(self.empirical_dists_timesteps)):
+            caches_to_remove[video_time_idx] = (
+                tmp_save_folder / "fid_computation" / (self.cfg.dataset.name + "_class_" + str(video_time_idx))
+            )
+
+        if self.accelerator.is_main_process:
+            for cache in caches_to_remove.values():
+                if cache.exists():
+                    shutil.rmtree(cache)
+        self.accelerator.wait_for_everyone()
+
+        # TODO: weight tasks by number of samples
+        tasks = ["all_classes"] + list(range(len(self.empirical_dists_timesteps)))
+        tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
+
+        self.logger.info("Computing FID scores...")
+        metrics_dict: dict[str, dict[str, float]] = {}
+        for task in tasks_for_this_process:
+            if task == "all_classes":
+                self.logger.debug(f"Computing metrics against true samples at {Path(self.cfg.dataset.path).as_posix()}")
+                metrics = torch_fidelity.calculate_metrics(
+                    input1=Path(self.cfg.dataset.path).as_posix(),
+                    input2=(tmp_save_folder / "fid_computation").as_posix(),
+                    cuda=True,
+                    batch_size=eval_strat.batch_size,  # TODO: optimize
+                    isc=True,
+                    fid=True,
+                    prc=True,
+                    verbose=self.cfg.debug and self.accelerator.is_main_process,
+                    cache_root=(tmp_save_folder / "fid_computation").as_posix(),
+                    input1_cache_name=caches_to_remove["all_classes"].name,
+                    samples_find_deep=True,
+                )
+            else:
+                assert isinstance(task, int)
+                self.logger.debug(f"Computing metrics against true samples at {true_data_classes_paths[task]}")
+                metrics = torch_fidelity.calculate_metrics(
+                    input1=true_data_classes_paths[task],
+                    input2=(tmp_save_folder / "fid_computation" / str(task)).as_posix(),
+                    cuda=True,
+                    batch_size=eval_strat.batch_size,  # TODO: optimize
+                    isc=True,
+                    fid=True,
+                    prc=True,
+                    verbose=self.cfg.debug and self.accelerator.is_main_process,
+                    cache_root=(tmp_save_folder / "fid_computation").as_posix(),
+                    input1_cache_name=caches_to_remove[task].name,
+                )
+            metrics_dict[str(task)] = metrics
+            self.logger.debug(
+                f"Computed metrics for class {task} on process {self.accelerator.process_index}: {metrics}",
+                main_process_only=False,
+            )
+        # save this process' metrics to disk
+        with open(tmp_save_folder / f"proc{self.accelerator.process_index}_metrics_dict.pkl", "wb") as pickle_file:
+            pickle.dump(metrics_dict, pickle_file)
+            self.logger.debug(
+                f"Saved metrics for process {self.accelerator.process_index} at {tmp_save_folder}",
+                main_process_only=False,
+            )
+        self.accelerator.wait_for_everyone()
+
+        # 3. Merge metrics from all processes & Log metrics
+        if self.accelerator.is_main_process:
+            final_metrics_dict = {}
+            for metrics_file in [f for f in tmp_save_folder.iterdir() if f.name.endswith("metrics_dict.pkl")]:
+                with open(metrics_file, "rb") as pickle_file:
+                    proc_metrics = pickle.load(pickle_file)
+                    final_metrics_dict.update(proc_metrics)
+            self.accelerator.log(
+                {
+                    f"evaluation/class_{class_idx}/": this_cl_metrics
+                    for class_idx, this_cl_metrics in final_metrics_dict.items()
+                },
+                step=self.global_optimization_step,
+            )
+            self.logger.info(
+                f"Logged metrics {final_metrics_dict}",
+            )
+
+    def _find_this_proc_this_time_batches_for_fid_comp(
+        self, eval_strat: FIDComputation, video_time_idx: int, true_data_classes_paths: dict[int, str]
+    ) -> list[int]:
+        # find total number of samples to generate for this video time
+        if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
+            tot_nb_samples = eval_strat.nb_samples_to_gen_per_time
+        elif eval_strat.nb_samples_to_gen_per_time == "adapt":
+            tot_nb_samples = len(list(Path(true_data_classes_paths[video_time_idx]).iterdir()))
+            self.logger.debug(
+                f"Found {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
+            )
+        else:
+            raise ValueError(
+                f"Expected 'nb_samples_to_gen_per_time' to be an int or 'adapt', got {eval_strat.nb_samples_to_gen_per_time}"
+            )
+        # batchify generation
+        nb_full_batches = tot_nb_samples // eval_strat.batch_size
+        gen_batches_sizes = [eval_strat.batch_size] * nb_full_batches
+        reminder = tot_nb_samples % eval_strat.batch_size
+        gen_batches_sizes += [reminder] if reminder != 0 else []
+        # share batches between processes
+        this_proc_gen_batches = gen_batches_sizes[self.accelerator.process_index :: self.accelerator.num_processes]
+        self.logger.debug(
+            f"Process {self.accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches}",
+            main_process_only=False,
+        )
+        return this_proc_gen_batches
 
     @log_state(state_logger)
     def _save_pipeline(self):
@@ -1348,7 +1518,6 @@ class TimeDiffusion:
         training_info_for_resume = {
             "start_instant_batch_idx": self.instant_batch_idx,
             "start_global_optimization_step": self.global_optimization_step,
-            "start_global_epoch": self.global_epoch,
             "best_model_to_date": self.best_model_to_date,
         }
         if self.accelerator.is_main_process:  # resuming args are common to all processes
@@ -1368,9 +1537,9 @@ class TimeDiffusion:
         if self.accelerator.is_main_process:
             checkpoints_list = [d for d in self.chckpt_save_path.iterdir() if not d.name.startswith(".")]
             nb_checkpoints = len(checkpoints_list)
-            if nb_checkpoints > self.checkpointing_cfg.checkpoints_total_limit:
+            if nb_checkpoints > self.cfg.checkpointing.checkpoints_total_limit:
                 sorted_chkpt_subfolders = sorted(checkpoints_list, key=lambda x: int(x.name.split("_")[1]))
-                to_del = sorted_chkpt_subfolders[: -self.checkpointing_cfg.checkpoints_total_limit]
+                to_del = sorted_chkpt_subfolders[: -self.cfg.checkpointing.checkpoints_total_limit]
                 if len(to_del) > 1:
                     self.logger.error(f"\033[1;33mMORE THAN 1 CHECKPOINT TO DELETE:\033[0m\n {to_del}")
                 for d in to_del:

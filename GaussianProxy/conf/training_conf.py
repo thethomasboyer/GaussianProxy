@@ -96,7 +96,6 @@ class Training:
     gradient_accumulation_steps: int
     train_batch_size: int
     max_grad_norm: int
-    nb_epochs: int  # TODO: remove this
     nb_time_samplings: int
 
 
@@ -146,7 +145,7 @@ class ForwardNoisingLinearScaling(EvaluationStrategy):
 
 @dataclass(kw_only=True)
 class FIDComputation(EvaluationStrategy):
-    nb_samples_to_gen_per_time: int
+    nb_samples_to_gen_per_time: int | str
     batch_size: int
     name: str = field(default="FIDComputation")
     regen_images: bool = True
@@ -154,7 +153,6 @@ class FIDComputation(EvaluationStrategy):
 
 @dataclass
 class Evaluation:
-    every_n_epochs: int | None
     every_n_opt_steps: int | None
     batch_size: int
     nb_video_timesteps: int
@@ -270,6 +268,7 @@ class Config:
     # Miscellaneous
     debug: bool
     profile: bool
+    fork_run: bool
 
     # Caches
     tmpdir_location: Optional[str] = None
