@@ -245,7 +245,9 @@ def _print_short_datasets_info(reprs_to_log: list[str], logger: MultiProcessAdap
     complete_str = f"{first_message}\n"
     for ds_slice in ds_indexes_slices:
         for line in range(tot_nb_lines):
-            this_line_all_ds = [padded_infos[ds_idx].split("\n")[line] for ds_idx in ds_slice]
+            this_line_all_ds = [
+                padded_infos[ds_idx].split("\n")[line] for ds_idx in ds_slice if ds_idx < len(padded_infos)
+            ]
             complete_str += " | ".join(this_line_all_ds) + "\n"
         complete_str += "\n"
     logger.info(complete_str)
