@@ -19,11 +19,11 @@ repos:
   hooks:
   # Run the linter, fixing issues and sorting imports
   - id: ruff
-    types_or: [python, pyi, jupyter]
-    args: ["--extend-select", "I", "--fix"]
+    types_or: [ python, pyi, jupyter ]
+    args: [ "--extend-select", "I", "--fix" ]
   # Run the formatter
   - id: ruff-format
-    types_or: [python, pyi, jupyter]
+    types_or: [ python, pyi, jupyter ]
 
 # TODO: use pyright/mypy/pyre-check instead
 - repo: local
@@ -32,13 +32,5 @@ repos:
     name: pylint (errors only)
     entry: pylint
     language: system
-    types: [python]
-    args: ["-E", "--generated-members", "'cv2.*'", "--rcfile=.pylintrc"]
-
-- repo: local
-  hooks:
-  - id: check-micromamba-env
-    name: check-micromamba-env
-    entry: ./check_micromamba_env.zsh
-    language: script
-    pass_filenames: false
+    types: [ python ]
+    args: [ "-E", "--generated-members", "'cv2.*'", "--rcfile=.pylintrc" ]
