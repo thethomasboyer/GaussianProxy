@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, fields
 
 # from logging import INFO, FileHandler, makeLogRecord
 from pathlib import Path
-from typing import Generator, Optional, Type
+from typing import ClassVar, Generator, Optional, Type
 
 import numpy as np
 import torch
@@ -55,9 +55,35 @@ class ResumingArgs:
     **Must default to "natural" starting values when training from scratch!**
     """
 
-    start_instant_batch_idx: int = 0
+    json_state_filename: ClassVar[str] = "training_state_info.json"  # excluded from fields!
+
     start_global_optimization_step: int = 0
-    best_model_to_date: bool = True
+    # best_metric_to_date must be initialized to the worst possible value
+    # Only "smaller is better" metrics are supported!
+    best_metric_to_date: float = np.inf
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        # Check for exact field matching
+        assert isinstance(data, dict), f"Expecting a dict, got {type(data)}"
+        expected_fields = sorted(f.name for f in fields(cls))
+        provided_fields = sorted(data.keys())
+        assert expected_fields == provided_fields, f"Expecting fields {expected_fields}, got {provided_fields}"
+        return cls(**data)
+
+    def to_dict(self):
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_json(cls, path: Path):
+        # load the json file
+        with open(path) as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
+    def to_json(self, path: Path):
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f)
 
 
 @dataclass
@@ -79,7 +105,6 @@ class TimeDiffusion:
     net_type: Type[UNet2DModel | UNet2DConditionModel]
     video_time_encoding: VideoTimeEncoding
     accelerator: Accelerator
-    debug: bool
     # populated arguments when calling .fit
     chckpt_save_path: Path = field(init=False)
     optimizer: Optimizer = field(init=False)
@@ -94,13 +119,11 @@ class TimeDiffusion:
     _data_shape: tuple[int, int, int] = field(init=False)
     # resuming args
     _resuming_args: ResumingArgs = field(init=False)
-    # instant state for checkpointing
-    instant_batch_idx: int = field(init=False)
     # global training state
     global_optimization_step: int = field(init=False)
     # WARNING: only "smaller is better" metrics are supported!
     # WARNING: best_metric_to_date will only be updated on the main process!
-    best_metric_to_date: float = np.inf
+    best_metric_to_date: float = field(init=False)
     first_metrics_eval: bool = True  # always reset to True even if resuming from a checkpoint
     # constant evaluation starting states
     _eval_noise: Tensor = field(init=False)
@@ -212,7 +235,7 @@ class TimeDiffusion:
         else:
             profiler = None
 
-        init_count = self.resuming_args.start_instant_batch_idx
+        init_count = self.resuming_args.start_global_optimization_step
         batches_pbar = pbar_manager.counter(
             total=self.cfg.training.nb_time_samplings,
             position=1,
@@ -225,16 +248,11 @@ class TimeDiffusion:
         if self.accelerator.is_main_process:
             batches_pbar.refresh()
         # loop through training batches
-        for batch_idx, (time, batch) in enumerate(
-            self._yield_data_batches(
-                train_timestep_dataloaders,
-                self.logger,
-                self.cfg.training.nb_time_samplings - init_count,
-            )
+        for time, batch in self._yield_data_batches(
+            train_timestep_dataloaders,
+            self.logger,
+            self.cfg.training.nb_time_samplings - init_count,
         ):
-            self.instant_batch_idx = batch_idx
-            # set network to the right mode
-            self.net.train()
             # gradient step here
             self._fit_one_batch(batch, time)
             # take one profiler step
@@ -254,10 +272,15 @@ class TimeDiffusion:
                     test_timestep_dataloaders,
                     pbar_manager,
                 )
+                # reset network to the right mode
+                self.net.train()
         batches_pbar.close()
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
         gantt_chart = state_logger.create_gantt_chart()
-        self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)}, step=self.global_optimization_step)
+        self.accelerator.log(
+            {"state_timeline/": wandb.Plotly(gantt_chart)},
+            step=self.global_optimization_step,
+        )
 
         if profiler is not None:
             profiler.stop()
@@ -273,7 +296,11 @@ class TimeDiffusion:
         saved_artifacts_folder: Path,
         resuming_args: Optional[ResumingArgs],
     ):
-        """Fit some remaining attributes before fitting."""
+        """
+        Fit some remaining attributes before fitting.
+
+        Any other method than `load_checkpoint` should be called *after* this method.
+        """
         assert not hasattr(self, "._nb_empirical_dists"), "Already fitted"
         self._nb_empirical_dists = len(train_dataloaders)
         assert self._nb_empirical_dists > 1, "Expecting at least 2 empirical distributions to train the model."
@@ -290,7 +317,7 @@ class TimeDiffusion:
         else:
             self._resuming_args = resuming_args
         self.global_optimization_step = self.resuming_args.start_global_optimization_step
-        self.best_model_to_date = self.resuming_args.best_model_to_date
+        self.best_metric_to_date = self.resuming_args.best_metric_to_date
         # expected data shape
         unwrapped_net_config = self.accelerator.unwrap_model(self.net).config
         self._data_shape = (
@@ -493,11 +520,11 @@ class TimeDiffusion:
                 wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
                     title="NaN grad",
                     text=msg,
-                    level=wandb.AlertLevel.ERROR,  # pyright: ignore[reportAttributeAccessIssue]
+                    level=wandb.AlertLevel.WARN,  # pyright: ignore[reportAttributeAccessIssue]
                     wait_duration=21600,  # 6 hours
                 )
-                self.logger.critical(msg)
-                # TODO: restart from previous checkpoint?
+                self.logger.error(msg)
+                # TODO: restart from previous checkpoint if is NaN repeatedly?
 
         # Optimization step
         self.optimizer.step()
@@ -515,17 +542,6 @@ class TimeDiffusion:
             },
             step=self.global_optimization_step,
         )
-        # Wake me up at 3am if loss is NaN
-        if torch.isnan(loss) and self.accelerator.is_main_process:
-            msg = f"Loss is NaN at step {self.global_optimization_step}, time {time}"
-            wandb.alert(  # pyright: ignore[reportAttributeAccessIssue]
-                title="NaN loss",
-                text=msg,
-                level=wandb.AlertLevel.ERROR,  # pyright: ignore[reportAttributeAccessIssue]
-                wait_duration=21600,  # 6 hours
-            )
-            self.logger.critical(msg)
-            # TODO: restart from previous checkpoint
 
         # Update global opt step
         self.global_optimization_step += 1
@@ -584,6 +600,7 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         # 1. Save instantenous states of models
+        # to ensure models are "clean" are results perfectly reproducible
         # tmp save folder in the checkpoints folder
         tmp_save_folder = self.chckpt_save_path / ".tmp_inference_save"
         if self.accelerator.is_main_process:
@@ -622,7 +639,10 @@ class TimeDiffusion:
             local_files_only=True,
             device_map=self.accelerator.process_index,
         )
-        # TODO: save & load a compiled artifact (with torch.export?)
+        # compile inference model
+        if self.cfg.accelerate.launch_args.dynamo_backend != "no":
+            inference_net = torch.compile(inference_net)  # pyright: ignore[reportAssignmentType]
+        # TODO: save & load a compiled artifact when torch.export is stabilized
 
         # 3. Run through evaluation strategies
         for eval_strat in self.cfg.evaluation.strategies:
@@ -1416,7 +1436,10 @@ class TimeDiffusion:
                 main_process_only=False,
             )
         # save this process' metrics to disk
-        with open(tmp_save_folder / f"proc{self.accelerator.process_index}_metrics_dict.pkl", "wb") as pickle_file:
+        with open(
+            tmp_save_folder / f"proc{self.accelerator.process_index}_metrics_dict.pkl",
+            "wb",
+        ) as pickle_file:
             pickle.dump(metrics_dict, pickle_file)
             self.logger.debug(
                 f"Saved metrics for process {self.accelerator.process_index} at {tmp_save_folder}",
@@ -1446,13 +1469,19 @@ class TimeDiffusion:
         if self.accelerator.is_main_process:
             # WARNING: only "smaller is better" metrics are supported!
             # WARNING: best_metric_to_date will only be updated on the main process!
-            if self.best_metric_to_date > final_metrics_dict["all_classes"]["frechet_inception_distance"]:  # pyright: ignore[reportPossiblyUnboundVariable]
+            if (
+                self.cfg.debug
+                or self.best_metric_to_date > final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
+            ):
                 self.best_metric_to_date = final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
                 self.logger.info(f"Saving best model to date with all classes FID: {self.best_metric_to_date}")
                 self._save_pipeline()
 
     def _find_this_proc_this_time_batches_for_metrics_comp(
-        self, eval_strat: MetricsComputation, video_time_idx: int, true_data_classes_paths: dict[int, str]
+        self,
+        eval_strat: MetricsComputation,
+        video_time_idx: int,
+        true_data_classes_paths: dict[int, str],
     ) -> list[int]:
         # find total number of samples to generate for this video time
         if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
@@ -1466,13 +1495,22 @@ class TimeDiffusion:
             raise ValueError(
                 f"Expected 'nb_samples_to_gen_per_time' to be an int or 'adapt', got {eval_strat.nb_samples_to_gen_per_time}"
             )
-        # batchify generation
-        nb_full_batches = tot_nb_samples // eval_strat.batch_size
-        gen_batches_sizes = [eval_strat.batch_size] * nb_full_batches
-        reminder = tot_nb_samples % eval_strat.batch_size
-        gen_batches_sizes += [reminder] if reminder != 0 else []
-        # share batches between processes
-        this_proc_gen_batches = gen_batches_sizes[self.accelerator.process_index :: self.accelerator.num_processes]
+
+        # TODO: allow resuming from interrupted generation
+        # like "tot_nb_samples -= already_existing_samples"...
+
+        # share equally among processes & batchify
+        # the code below ensures all processes have the same number of batches to generate,
+        # with the same number of samples in each batch but the last one
+        # (with a diff of at most 1 for the last)
+        this_proc_nb_full_batches, last_batch_to_share = divmod(
+            tot_nb_samples, self.accelerator.num_processes * eval_strat.batch_size
+        )
+        this_proc_last_batch, remainder = divmod(last_batch_to_share, self.accelerator.num_processes)
+        this_proc_gen_batches = [eval_strat.batch_size] * this_proc_nb_full_batches + [this_proc_last_batch]
+        if self.accelerator.process_index < remainder:
+            this_proc_gen_batches[-1] += 1
+
         self.logger.debug(
             f"Process {self.accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches}",
             main_process_only=False,
@@ -1482,21 +1520,36 @@ class TimeDiffusion:
     @log_state(state_logger)
     def _save_pipeline(self):
         """
-        Save the net to disk as an independent pretrained pipeline.
+        Save the net, time encoder, and dynamic config to disk as an independent pretrained pipeline.
+        Also save the current ResumingArgs to that same folder for later "model save" resuming.
 
         Can be called by all processes (only main will actually save).
         """
+        # net
         self.accelerator.unwrap_model(self.net).save_pretrained(
             self.model_save_folder / "net",
             is_main_process=self.accelerator.is_main_process,
         )
+        # video time encoder
         self.accelerator.unwrap_model(self.video_time_encoding).save_pretrained(
             self.model_save_folder / "video_time_encoder",
             is_main_process=self.accelerator.is_main_process,
         )
         if self.accelerator.is_main_process:
+            # dynamic config
             self.dynamic.save_pretrained(self.model_save_folder / "dynamic")
-        self.logger.info(f"Saved net, video time encoder and dynamic config to {self.model_save_folder}")
+            # resuming args
+            training_info_for_resume = {
+                "start_global_optimization_step": self.global_optimization_step,
+                "best_metric_to_date": self.best_metric_to_date,
+            }
+            resuming_args = ResumingArgs.from_dict(training_info_for_resume)
+            resuming_args.to_json(self.model_save_folder / ResumingArgs.json_state_filename)
+        self.accelerator.wait_for_everyone()
+
+        self.logger.info(
+            f"Saved net, video time encoder, dynamic config, and resuming args to {self.model_save_folder}"
+        )
 
     @log_state(state_logger)
     def _checkpoint(self):
@@ -1516,19 +1569,23 @@ class TimeDiffusion:
 
         # Resuming args saved in json file
         training_info_for_resume = {
-            "start_instant_batch_idx": self.instant_batch_idx,
             "start_global_optimization_step": self.global_optimization_step,
-            "best_model_to_date": self.best_model_to_date,
+            "best_metric_to_date": self.best_metric_to_date,
         }
         if self.accelerator.is_main_process:  # resuming args are common to all processes
             self.logger.info(
                 f"Checkpointing resuming args at step {self.global_optimization_step}: {training_info_for_resume}"
             )
-            with open(this_chkpt_subfolder / "training_state_info.json", "w", encoding="utf-8") as f:
-                json.dump(training_info_for_resume, f)
+            # create an instance before saving to check consistency
+            resuming_args = ResumingArgs.from_dict(training_info_for_resume)
+            resuming_args.to_json(this_chkpt_subfolder / ResumingArgs.json_state_filename)
         self.accelerator.wait_for_everyone()
         # check consistency between processes
-        with open(this_chkpt_subfolder / "training_state_info.json", "r", encoding="utf-8") as f:
+        with open(
+            this_chkpt_subfolder / ResumingArgs.json_state_filename,
+            "r",
+            encoding="utf-8",
+        ) as f:
             assert (
                 training_info_for_resume == json.load(f)
             ), f"Expected consistency of resuming args between process {self.accelerator.process_index} and main process; got {training_info_for_resume} != {json.load(f)}"
@@ -1548,23 +1605,44 @@ class TimeDiffusion:
 
         self.accelerator.wait_for_everyone()
 
+    @log_state(state_logger)
+    def load_checkpoint(self, resuming_path: str, logger: MultiProcessAdapter):
+        """
+        Load a checkpoint saved with `save_state`.
 
-def resume_from_checkpoint(
+        `accelerator.prepare` must have been called before.
+        """
+        assert (
+            self.cfg.checkpointing.resume_from_checkpoint != "model_save"
+        ), "Cannot load a 'model save' checkpoint here"
+        # no self.logger here as fit_init has not yet been called!
+        logger.info(f"Loading checkpoint and training state from {resuming_path}")
+        # "automatic" resuming from some save_state checkpoint
+        self.accelerator.load_state(resuming_path)
+
+
+def load_resuming_args(
     cfg: Config,
     logger: MultiProcessAdapter,
     accelerator: Accelerator,
     chckpt_save_path: Path,
-) -> ResumingArgs | None:
+    models_save_folder: Path,
+):
     """
-    Should be called by all processes as `accelerator.load_state` handles checkpointing
-    and distributed barriers are used here.
+    Handles the location of the correct checkpoint folder to resume training from,
+    and loads ResumingArgs from it (if applicable).
+
+    Must be called by all processes.
     """
     resume_arg = cfg.checkpointing.resume_from_checkpoint
-    # 1. first find the correct subfolder to resume from
+    # 1. first find the correct subfolder to resume from;
+    # 3 possibilities:
+    # - int: resume from a specific step
+    # - True: resume from the most recent checkpoint
+    # - "model_save": resume from the last *saved model* (!= checkpoint!)
     if type(resume_arg) == int:
-        path = chckpt_save_path / f"step_{resume_arg}"
-    else:
-        assert resume_arg is True, "Expected resume_from_checkpoint to be True here"
+        resuming_path = chckpt_save_path / f"step_{resume_arg}"
+    elif resume_arg is True:
         # Get the most recent checkpoint
         if not chckpt_save_path.exists() and accelerator.is_main_process:
             logger.warning("No 'checkpoints' directory found in run folder; creating one.")
@@ -1572,21 +1650,19 @@ def resume_from_checkpoint(
         accelerator.wait_for_everyone()
         dirs = [d for d in chckpt_save_path.iterdir() if not d.name.startswith(".")]
         dirs = sorted(dirs, key=lambda d: int(d.name.split("_")[1]))
-        path = Path(chckpt_save_path, dirs[-1]) if len(dirs) > 0 else None
-    # 2. load state and other resuming args if applicable
-    if path is None:
+        resuming_path = Path(chckpt_save_path, dirs[-1]) if len(dirs) > 0 else None
+    elif resume_arg == "model_save":
+        resuming_path = models_save_folder
+    else:
+        raise ValueError(
+            f"Expected 'checkpointing.resume_from_checkpoint' to be an int, True or 'model_save' at this point, got {resume_arg}"
+        )
+    # 2. return resuming args if applicable
+    if resuming_path is None:
         logger.warning(f"No checkpoint found in {chckpt_save_path}. Starting a new training run.")
         resuming_args = None
     else:
-        logger.info(f"Resuming from checkpoint {path}")
-        accelerator.load_state(path.as_posix())
-        with open(path / "training_state_info.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-        resuming_args = ResumingArgs(**data)
-        # check consistency
-        field_names = [field.name for field in fields(ResumingArgs)]
-        assert (
-            field_names == list(data.keys())
-        ), f"Expected matching field names between ResumingArgs and the loaded JSON file , but got {field_names} and {data.keys()}"
-
-    return resuming_args
+        logger.info(f"Loading resuming args from {resuming_path}")
+        resuming_args = ResumingArgs.from_json(resuming_path / ResumingArgs.json_state_filename)
+        logger.info(f"Loaded resuming arguments: {resuming_args}")
+    return resuming_path, resuming_args

@@ -161,10 +161,10 @@ class Evaluation:
     strategies: list[EvaluationStrategy]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Checkpointing:
     checkpoints_total_limit: int
-    resume_from_checkpoint: bool | int
+    resume_from_checkpoint: bool | int | str
     checkpoint_every_n_steps: int
     chckpt_base_path: Path
 

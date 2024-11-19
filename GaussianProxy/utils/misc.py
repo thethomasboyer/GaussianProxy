@@ -12,6 +12,7 @@ import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
+from diffusers.configuration_utils import FrozenDict
 from numpy import ndarray
 from omegaconf import OmegaConf
 from PIL import Image
@@ -97,6 +98,7 @@ def modify_args_for_debug(
     logger: MultiProcessAdapter,
     wandb_tracker: WandBRun,
     is_main_process: bool,
+    init_count: int,
 ):
     """
     Modify the configuration for quick debugging purposes.
@@ -106,7 +108,7 @@ def modify_args_for_debug(
     # this dict hosts the changes to be made to the configuration
     changes: dict[tuple[str, ...], int] = {
         ("dynamic", "num_train_timesteps"): 100,
-        ("training", "nb_time_samplings"): 300,
+        ("training", "nb_time_samplings"): init_count + 300,
         ("checkpointing", "checkpoint_every_n_steps"): 100,
         (
             "evaluation",
@@ -137,7 +139,11 @@ def get_evenly_spaced_timesteps(nb_empirical_dists: int) -> list[float]:
 
 
 def sample_with_replacement(
-    data: Tensor, batch_size: int, logger: MultiProcessAdapter, proc_idx: int, do_log: bool = True
+    data: Tensor,
+    batch_size: int,
+    logger: MultiProcessAdapter,
+    proc_idx: int,
+    do_log: bool = True,
 ) -> Tensor:
     """
     Sample `batch_size` samples with replacement from `data`.
@@ -215,7 +221,8 @@ def save_eval_artifacts_log_to_wandb(
         file_path.unlink()  # must manually remove it as it's most probably read-only
     torch.save(sel_to_save.to("cpu", torch.float16), file_path)
     logger.debug(
-        f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}", main_process_only=False
+        f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}",
+        main_process_only=False,
     )
     logger.debug(
         f"On process {accelerator.process_index}, data to save is: shape={sel_to_save.shape} | min={sel_to_save.min()} | max={sel_to_save.max()}",
@@ -229,7 +236,10 @@ def save_eval_artifacts_log_to_wandb(
             sel_to_save.shape[tensors_to_save.ndim - 3] == 1
         ), f"Expected 1 or 3 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
         logger.debug(f"Adding fake channels trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3}")
-        sel_to_save = torch.cat([sel_to_save, torch.zeros_like(sel_to_save), torch.zeros_like(sel_to_save)], dim=-3)
+        sel_to_save = torch.cat(
+            [sel_to_save, torch.zeros_like(sel_to_save), torch.zeros_like(sel_to_save)],
+            dim=-3,
+        )
     normalized_elements_for_logging = _normalize_elements_for_logging(sel_to_save, logging_normalization)
     # videos case
     if tensors_to_save.ndim == 5:
@@ -413,7 +423,11 @@ class StateLogger:
     def _generate_new_color(self):
         self.last_color_index = (self.last_color_index + 1) % len(self._cmap)
         selected_color = self._cmap[self.last_color_index]
-        r, g, b = int(selected_color[1:3], 16), int(selected_color[3:5], 16), int(selected_color[5:], 16)
+        r, g, b = (
+            int(selected_color[1:3], 16),
+            int(selected_color[3:5], 16),
+            int(selected_color[5:], 16),
+        )
         return f"rgb({r},{g},{b})"
 
 
@@ -432,13 +446,23 @@ def log_state(state_logger: StateLogger):
     return decorator
 
 
-def warn_about_dtype_conv(model: torch.nn.Module, target_dtype: torch.dtype, logger: Logger | MultiProcessAdapter):
-    if model.dtype == torch.bfloat16 and target_dtype not in (torch.bfloat16, torch.float32):
+def warn_about_dtype_conv(
+    model: torch.nn.Module,
+    target_dtype: torch.dtype,
+    logger: Logger | MultiProcessAdapter,
+):
+    if model.dtype == torch.bfloat16 and target_dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
         logger.warning(f"model is bf16 but target_dtype is {target_dtype}: conversion might be weird/invalid")
 
 
 def save_images_for_metrics_compute(
-    images: Tensor, save_folder: Path, first_file_idx: int, process_idx: Optional[int] = None
+    images: Tensor,
+    save_folder: Path,
+    first_file_idx: int,
+    process_idx: Optional[int] = None,
 ):
     # Checks
     assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
@@ -457,3 +481,43 @@ def save_images_for_metrics_compute(
 
     with ThreadPoolExecutor() as executor:
         executor.map(_save_image_wrapper, normalized_imgs, range(len(normalized_imgs)))
+
+
+def verify_model_configs(
+    loaded_config: FrozenDict | dict,
+    declared_config: FrozenDict | dict,
+    model_name: str,
+):
+    """Compare model configurations excluding internal fields.
+
+    Args:
+        loaded_config: (FrozenDict) from loaded model
+        declared_config: (FrozenDict) from declaration in config
+        model_name: (str) for error messages
+
+    Raises:
+        ValueError if configs don't match
+    """
+
+    def filter_internal_fields(config_dict: FrozenDict | dict):
+        """Remove internal fields (starting with '_') from FrozenDict config dictionary."""
+        return {k: v for k, v in dict(config_dict).items() if not k.startswith("_")}
+
+    filtered_loaded = filter_internal_fields(loaded_config)
+    filtered_declared = filter_internal_fields(declared_config)
+
+    if filtered_loaded != filtered_declared:
+        # Find differing keys
+        all_keys = set(filtered_loaded.keys()) | set(filtered_declared.keys())
+        diffs = []
+        for key in sorted(all_keys):
+            if key not in filtered_loaded:
+                diffs.append(f"Missing in loaded: {key}")
+            elif key not in filtered_declared:
+                diffs.append(f"Missing in declared: {key}")
+            elif filtered_loaded[key] != filtered_declared[key]:
+                diffs.append(f"Different value for {key}:")
+                diffs.append(f"  Loaded:   {filtered_loaded[key]}")
+                diffs.append(f"  Declared: {filtered_declared[key]}")
+
+        raise ValueError(f"The config of the loaded {model_name} does not match the declared one:\n" + "\n".join(diffs))

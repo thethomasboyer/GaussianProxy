@@ -26,9 +26,9 @@ from wandb.sdk.wandb_run import Run as WandBRun
 
 from GaussianProxy.conf.training_conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
 from GaussianProxy.utils.data import setup_dataloaders
-from GaussianProxy.utils.misc import create_repo_structure, modify_args_for_debug
+from GaussianProxy.utils.misc import create_repo_structure, modify_args_for_debug, verify_model_configs
 from GaussianProxy.utils.models import VideoTimeEncoding
-from GaussianProxy.utils.training import TimeDiffusion, resume_from_checkpoint
+from GaussianProxy.utils.training import TimeDiffusion, load_resuming_args
 from my_conf.my_training_conf import config
 
 # nice tracebacks
@@ -91,20 +91,21 @@ def main(cfg: Config) -> None:
     )
     accelerator.wait_for_everyone()
 
-    # ---------------------------- Resume from Checkpoint ----------------------------
+    # ---------------------------- Retrieve Resuming Args ----------------------------
+    resuming_path = None  # pyright...
     if cfg.checkpointing.resume_from_checkpoint is not False:
-        resuming_args = resume_from_checkpoint(
+        resuming_path, resuming_args = load_resuming_args(
             cfg,
             logger,
             accelerator,
             chckpt_save_path,
+            models_save_folder,
         )
-        logger.info(f"Loaded resuming arguments: {resuming_args}")
     else:
         resuming_args = None
 
     # ------------------------------------- WandB ------------------------------------
-    # Handle run resuming
+    # Handle run resuming with WandB
     prev_run_id = None
     prev_run_id_file = Path(accelerator_project_config.project_dir, "run_id.txt")
     if prev_run_id_file.exists():
@@ -134,7 +135,8 @@ def main(cfg: Config) -> None:
             logger.warning("No resuming state found, will rewind run from zero!")
             start_step = 0
         else:
-            start_step = resuming_args.start_global_optimization_step
+            # start from the step *before* the one we stopped at, because that one did not finish!
+            start_step = max(resuming_args.start_global_optimization_step - 1, 0)
         if cfg.fork_run:
             logger.info(f"Forking run {prev_run_id} from step {start_step}")
             init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"
@@ -168,26 +170,47 @@ def main(cfg: Config) -> None:
 
     # ------------------------------------ Debug -------------------------------------
     if cfg.debug:
-        modify_args_for_debug(cfg, logger, wandb_tracker, accelerator.is_main_process)
+        modify_args_for_debug(
+            cfg,
+            logger,
+            wandb_tracker,
+            accelerator.is_main_process,
+            resuming_args.start_global_optimization_step if resuming_args is not None else 0,
+        )
 
     # ------------------------------------- Net -------------------------------------
-    # it's ugly but Hydra's instantiate produces weird errors (even with _convert="all"!?) TODO
-    # also need saving model here type because that info is apparently lost when compiling?!
+    # get net type
     if type(OmegaConf.to_object(cfg.net)) == UNet2DModelConfig:
-        net = UNet2DModel(**OmegaConf.to_container(cfg.net))  # pyright: ignore[reportCallIssue]
         net_type = UNet2DModel
     elif type(OmegaConf.to_object(cfg.net)) == UNet2DConditionModelConfig:
-        net = UNet2DConditionModel(**OmegaConf.to_container(cfg.net))  # pyright: ignore[reportCallIssue]
         net_type = UNet2DConditionModel
     else:
         raise ValueError(f"Invalid type for 'cfg.net': {type(cfg.net)}")
 
+    # load pretrained model if resuming from a "model save"
+    if cfg.checkpointing.resume_from_checkpoint == "model_save" and resuming_path is not None:
+        # load models
+        logger.info(f"Loading pretrained net from {resuming_path / 'net'}")
+        net: UNet2DModel | UNet2DConditionModel = net_type.from_pretrained(resuming_path / "net")  # pyright: ignore[reportAssignmentType]
+        logger.info(f"Loading video time encoder net from {resuming_path / 'video_time_encoder'}")
+        video_time_encoding: VideoTimeEncoding = VideoTimeEncoding.from_pretrained(resuming_path / "video_time_encoder")  # pyright: ignore[reportAssignmentType]
+
+        if accelerator.is_main_process:
+            # check consistency between declared config and loaded one
+            declared_net_config = net_type(**OmegaConf.to_container(cfg.net)).config  # pyright: ignore[reportCallIssue]
+            verify_model_configs(net.config, declared_net_config, "net")
+            declared_time_encoder_config = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder)).config  # pyright: ignore[reportCallIssue]
+            verify_model_configs(video_time_encoding.config, declared_time_encoder_config, "time encoder")
+
+    # else start from scratch (and maybe resume from a "proper checkpoint" just before fitting)
+    else:
+        # it's ugly but Hydra's instantiate produces weird errors (even with _convert="all"!?) TODO
+        net = net_type(**OmegaConf.to_container(cfg.net))  # pyright: ignore[reportCallIssue]
+        video_time_encoding = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder))  # pyright: ignore[reportCallIssue]
+
     nb_params_M = round(net.num_parameters() / 1e6)
     nb_params_M_trainable = round(net.num_parameters(True) / 1e6)
     logger.info(f"Net has ~{nb_params_M}M parameters (~{nb_params_M_trainable}M trainable)")
-
-    # video time encoding
-    video_time_encoding = VideoTimeEncoding(**OmegaConf.to_container(cfg.time_encoder))  # pyright: ignore[reportCallIssue]
 
     nb_params_M = round(video_time_encoding.num_parameters() / 1e3)
     nb_params_M_trainable = round(video_time_encoding.num_parameters(True) / 1e3)
@@ -240,8 +263,7 @@ def main(cfg: Config) -> None:
     # accelerator.register_for_checkpointing(lr_scheduler)
 
     # ----------------------------- Distributed Compute  -----------------------------
-    # We do NOT prepare *training* dataloaders!
-    # they are "fake" dataloader!
+    # We do NOT prepare *training* dataloaders! They are "fake" dataloader!
 
     # test dataloaders:
     for key, dl in test_dataloaders.items():
@@ -259,14 +281,12 @@ def main(cfg: Config) -> None:
     # learning rate scheduler:
     lr_scheduler = accelerator.prepare(lr_scheduler)
 
-    # ----------------------------- Initial best metrics -----------------------------
-    # if accelerator.is_main_process:
-    #     best_metric = get_initial_best_metric()
-
     # ------------------------------------ Dynamic -----------------------------------
+    # dynamic config is never pulled from model save although it is present in the model save folder
+    # => will overwrite the currently saved one (if it exists) at next model save without warning!
     dyn = DDIMScheduler(**OmegaConf.to_container(cfg.dynamic))  # pyright: ignore[reportCallIssue]
 
-    # --------------------------------- Training loop --------------------------------
+    # ------------------------------ Instantiate Trainer -----------------------------
     trainer: TimeDiffusion = TimeDiffusion(
         cfg,
         dyn,
@@ -274,8 +294,17 @@ def main(cfg: Config) -> None:
         net_type,
         video_time_encoding,
         accelerator,
-        cfg.debug,
     )
+
+    # ----------------------------- Resume Training State ----------------------------
+    if (
+        cfg.checkpointing.resume_from_checkpoint is not False
+        and cfg.checkpointing.resume_from_checkpoint != "model_save"
+        and resuming_path is not None  # pyright: ignore[reportPossiblyUnboundVariable]
+    ):
+        trainer.load_checkpoint(resuming_path.as_posix(), logger)  # pyright: ignore[reportPossiblyUnboundVariable]
+
+    # ----------------------------------- Fit data  ----------------------------------
     trainer.fit(
         train_dataloaders,
         test_dataloaders,
@@ -289,6 +318,8 @@ def main(cfg: Config) -> None:
         resuming_args,
         cfg.profile,
     )
+
+    # ----------------------------------- The End  -----------------------------------
     accelerator.end_training()
 
 
