@@ -30,7 +30,7 @@ repos:
   hooks:
   - id: pylint
     name: pylint (errors only)
-    entry: pylint
+    entry: .venv/bin/pylint
     language: system
     types: [ python ]
-    args: [ "-E", "--generated-members", "'cv2.*'", "--rcfile=.pylintrc" ]
+    args: [ "-E", "--generated-members", "'cv2.*'" ]
