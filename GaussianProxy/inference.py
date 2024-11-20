@@ -1345,7 +1345,6 @@ def fid_computation(
                 save_images_for_metrics_compute(
                     image,
                     base_save_path / str(vid_t),
-                    sum(actual_batches[:batch_idx]),
                 )
 
             batches_pbar.close()

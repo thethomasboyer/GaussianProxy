@@ -1313,8 +1313,12 @@ class TimeDiffusion:
             video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
 
             # find how many samples to generate, batchify generation and distribute along processes
+            gen_dir = tmp_save_folder / "metrics_computation" / str(video_time_idx)
             this_proc_gen_batches = self._find_this_proc_this_time_batches_for_metrics_comp(
-                eval_strat, video_time_idx, true_data_classes_paths
+                eval_strat,
+                video_time_idx,
+                true_data_classes_paths,
+                gen_dir,
             )
 
             batches_pbar = pbar_manager.counter(
@@ -1356,8 +1360,7 @@ class TimeDiffusion:
 
                 save_images_for_metrics_compute(
                     image,
-                    tmp_save_folder / "metrics_computation" / str(video_time_idx),
-                    sum(this_proc_gen_batches[:batch_idx]),
+                    gen_dir,
                     self.accelerator.process_index,
                 )
 
@@ -1477,11 +1480,18 @@ class TimeDiffusion:
                 self.logger.info(f"Saving best model to date with all classes FID: {self.best_metric_to_date}")
                 self._save_pipeline()
 
+        # 5. Clean up (important because we reuse existing generated samples!)
+        if self.accelerator.is_main_process:
+            shutil.rmtree(tmp_save_folder / "metrics_computation")
+            self.logger.debug(f"Cleaned up metrics computation folder {tmp_save_folder / 'metrics_computation'}")
+        self.accelerator.wait_for_everyone()
+
     def _find_this_proc_this_time_batches_for_metrics_comp(
         self,
         eval_strat: MetricsComputation,
         video_time_idx: int,
         true_data_classes_paths: dict[int, str],
+        gen_dir: Path,
     ) -> list[int]:
         # find total number of samples to generate for this video time
         if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
@@ -1496,8 +1506,12 @@ class TimeDiffusion:
                 f"Expected 'nb_samples_to_gen_per_time' to be an int or 'adapt', got {eval_strat.nb_samples_to_gen_per_time}"
             )
 
-        # TODO: allow resuming from interrupted generation
-        # like "tot_nb_samples -= already_existing_samples"...
+        # Resume from interrupted generation
+        already_existing_samples = len(list(gen_dir.iterdir()))
+        self.logger.debug(
+            f"Found {already_existing_samples} already existing samples for class n°{video_time_idx} at {gen_dir}"
+        )
+        tot_nb_samples -= already_existing_samples
 
         # share equally among processes & batchify
         # the code below ensures all processes have the same number of batches to generate,
@@ -1512,7 +1526,7 @@ class TimeDiffusion:
             this_proc_gen_batches[-1] += 1
 
         self.logger.debug(
-            f"Process {self.accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches}",
+            f"Process {self.accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches} for time n°{video_time_idx}",
             main_process_only=False,
         )
         return this_proc_gen_batches

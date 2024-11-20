@@ -1,5 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from functools import wraps
 from logging import Logger
 from pathlib import Path
@@ -461,7 +462,6 @@ def warn_about_dtype_conv(
 def save_images_for_metrics_compute(
     images: Tensor,
     save_folder: Path,
-    first_file_idx: int,
     process_idx: Optional[int] = None,
 ):
     # Checks
@@ -473,10 +473,12 @@ def save_images_for_metrics_compute(
 
     def _save_image_wrapper(img: ndarray, img_idx: int):
         pil_img = Image.fromarray(img.transpose(1, 2, 0))
+        tmpst = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         if process_idx is not None:
-            filename = f"proc_{process_idx}_{first_file_idx + img_idx}.png"
+            filename = f"proc_{process_idx}_{tmpst}.png"
         else:
-            filename = str(first_file_idx + img_idx) + ".png"
+            filename = tmpst + ".png"
+        assert not (save_folder / filename).exists(), f"File {filename} already exists"
         pil_img.save(save_folder / filename)
 
     with ThreadPoolExecutor() as executor:
