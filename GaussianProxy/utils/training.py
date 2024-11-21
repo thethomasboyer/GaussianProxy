@@ -1314,6 +1314,7 @@ class TimeDiffusion:
 
             # find how many samples to generate, batchify generation and distribute along processes
             gen_dir = tmp_save_folder / "metrics_computation" / str(video_time_idx)
+            gen_dir.mkdir(parents=True, exist_ok=True)
             this_proc_gen_batches = self._find_this_proc_this_time_batches_for_metrics_comp(
                 eval_strat,
                 video_time_idx,
