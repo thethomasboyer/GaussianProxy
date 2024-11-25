@@ -24,7 +24,6 @@ dependencies = [
     "omegaconf>=2.3.0",
     "opencv-python-headless>=4.10.0.84",
     "pillow>=11.0.0",
-    "pip>=24.3.1",
     "plotly>=5.24.1",
     "pre-commit>=4.0.1",
     "pylint>=3.3.1",
@@ -48,9 +47,12 @@ torch-fidelity = { git = "https://github.com/thethomasboyer/torch-fidelity-symli
 
 [tool.ruff]
 line-length = 120
+lint.ignore = ["E721", "E731"]
 
-[tool.ruff.lint]
-ignore = ["E721", "E731"]
+[tool.pylint]
+MASTER.ignore = [".venv", "src"]
+MESSAGES_CONTROL.disable = ["E0401", "E0611", "C0301"]
 
-[tool.pylint.MESSAGES_CONTROL]
-disable = ["E0401", "E0611"]
+[tool.pyright]
+include = ["GaussianProxy", "my_conf", "notebooks", "scripts", "./*.py"]
+exclude = [".venv", ".ruff_cache", "src", "**/experiments", "**/__pycache__"]

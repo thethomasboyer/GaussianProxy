@@ -25,3 +25,4 @@ pytorch_traces
 *.pt
 *.json
 src
+.envrc
