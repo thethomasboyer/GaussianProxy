@@ -55,4 +55,11 @@ MESSAGES_CONTROL.disable = ["E0401", "E0611", "C0301"]
 
 [tool.pyright]
 include = ["GaussianProxy", "my_conf", "notebooks", "scripts", "./*.py"]
-exclude = [".venv", ".ruff_cache", "src", "**/experiments", "**/__pycache__"]
+exclude = [
+    ".venv",
+    ".ruff_cache",
+    "src",
+    "**/experiments",
+    "**/__pycache__",
+    "**/.local/share/uv/python",
+]

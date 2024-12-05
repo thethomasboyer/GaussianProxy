@@ -90,6 +90,7 @@ from GaussianProxy.utils.data import (
 )
 from GaussianProxy.utils.misc import (
     _normalize_elements_for_logging,
+    generate_all_augs,
     get_evenly_spaced_timesteps,
     save_images_for_metrics_compute,
     warn_about_dtype_conv,
@@ -630,52 +631,6 @@ def similarity_with_train_data(
         plt.grid()
         plt.tight_layout()
         plt.savefig(base_save_path / f"all_{metric_name}_hist.png")
-
-
-SUPPORTED_TRANSFORMS_TO_GENERATE = (
-    RandomHorizontalFlip,
-    RandomVerticalFlip,
-    RandomRotationSquareSymmetry,
-)
-
-
-def generate_all_augs(img: torch.Tensor, transforms: list[type]) -> list[Tensor]:
-    """Generate all augmentations of `img` based on `transforms`."""
-    # checks
-    assert img.ndim == 3, f"Expected 3D image, got shape {img.shape}"
-    assert all(t in SUPPORTED_TRANSFORMS_TO_GENERATE for t in transforms), f"Unsupported transforms: {transforms}"
-
-    # generate all possible augmentations
-    aug_imgs = [img]
-    if RandomHorizontalFlip in transforms:
-        aug_imgs.append(torch.flip(img, [2]))
-    if RandomVerticalFlip in transforms:
-        for base_img_idx in range(len(aug_imgs)):
-            aug_imgs.append(torch.flip(aug_imgs[base_img_idx], [1]))
-    if RandomRotationSquareSymmetry in transforms:
-        if len(aug_imgs) == 4:  # must have been flipped in both directions then
-            aug_imgs += [
-                torch.rot90(aug_imgs[0], k=1, dims=(1, 2)),
-                torch.rot90(aug_imgs[0], k=3, dims=(1, 2)),
-            ]
-            aug_imgs += [
-                torch.rot90(aug_imgs[1], k=1, dims=(1, 2)),
-                torch.rot90(aug_imgs[1], k=3, dims=(1, 2)),
-            ]
-        elif len(aug_imgs) in (1, 2):  # simply perform all 4 rotations on each image
-            for base_img_idx in range(len(aug_imgs)):
-                for nb_rot in [1, 2, 3]:
-                    aug_imgs.append(torch.rot90(aug_imgs[base_img_idx], k=nb_rot, dims=(1, 2)))
-        else:
-            raise ValueError(f"Expected 1, 2, or 4 images at this point, got {len(aug_imgs)}")
-
-    assert len(aug_imgs) in (
-        1,
-        2,
-        4,
-        8,
-    ), f"Expected 1, 2, 4, or 8 images at this point, got {len(aug_imgs)}"
-    return aug_imgs
 
 
 def forward_noising(

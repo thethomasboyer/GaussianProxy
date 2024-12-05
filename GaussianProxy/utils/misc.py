@@ -4,13 +4,12 @@ from datetime import datetime
 from functools import wraps
 from logging import Logger
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from diffusers.configuration_utils import FrozenDict
@@ -19,9 +18,12 @@ from omegaconf import OmegaConf
 from PIL import Image
 from termcolor import colored
 from torch import Tensor
-from wandb.sdk.wandb_run import Run as WandBRun
+from torchvision.transforms import RandomHorizontalFlip, RandomVerticalFlip
 
+import wandb
 from GaussianProxy.conf.training_conf import Config
+from GaussianProxy.utils.data import RandomRotationSquareSymmetry
+from wandb.sdk.wandb_run import Run as WandBRun
 
 
 def create_repo_structure(
@@ -129,6 +131,13 @@ def modify_args_for_debug(
             setattr(cfg_level, param_name, new_param_value)
             if is_main_process:
                 wandb_tracker.config.update({"/".join(param_name_tuple): new_param_value}, allow_val_change=True)
+    # now change the evaluation strategies' configurations
+    for strat in cfg.evaluation.strategies:
+        strat.nb_diffusion_timesteps = 5
+        if hasattr(strat, "nb_samples_to_gen_per_time"):
+            assert hasattr(strat, "batch_size"), "Expected batch_size to be present"
+            setattr(strat, "nb_samples_to_gen_per_time", getattr(strat, "batch_size"))
+    # TODO: update registered wandb config
 
 
 def get_evenly_spaced_timesteps(nb_empirical_dists: int) -> list[float]:
@@ -163,14 +172,9 @@ def sample_with_replacement(
     return data
 
 
-ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING = (
-    "trajectories",
-    "inversions",
-    "starting_samples",
-    "regenerations",
-    "simple_generations",
-    "noised_samples",
-)
+ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING = Literal[
+    "trajectories", "inversions", "starting_samples", "regenerations", "simple_generations", "noised_samples"
+]
 
 
 @torch.inference_mode()
@@ -181,10 +185,11 @@ def save_eval_artifacts_log_to_wandb(
     accelerator: Accelerator,
     logger: MultiProcessAdapter,
     eval_strat: str,
-    artifact_name: str,
+    artifact_name: ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING,
     logging_normalization: list[str],
     max_nb_to_save_and_log: int = 16,
     captions: None | list[None] | list[str] = None,
+    split_name: str | None = None,
 ):
     """
     Save trajectories (videos) to disk and log images and videos to W&B.
@@ -192,9 +197,6 @@ def save_eval_artifacts_log_to_wandb(
     Can be called by all processes.
     """
     # 0. Checks
-    assert (
-        artifact_name in ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING
-    ), f"Expected name in {ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING}, got {artifact_name}"
     assert tensors_to_save.ndim in (
         4,
         5,
@@ -211,22 +213,27 @@ def save_eval_artifacts_log_to_wandb(
     sel_captions = [captions[i] for i in sel_idxes]
 
     # 2. Save some raw images / trajectories to disk (all processes)
-    file_path = (
-        save_folder
-        / eval_strat
-        / artifact_name
-        / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
-    )
+    if split_name is not None:
+        file_path = (
+            save_folder
+            / eval_strat
+            / artifact_name
+            / split_name
+            / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
+        )
+    else:
+        file_path = (
+            save_folder
+            / eval_strat
+            / artifact_name
+            / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
+        )
     file_path.parent.mkdir(exist_ok=True, parents=True)
     if file_path.exists():  # might exist if resuming
         file_path.unlink()  # must manually remove it as it's most probably read-only
     torch.save(sel_to_save.to("cpu", torch.float16), file_path)
     logger.debug(
         f"Saved raw samples to {file_path.parent} on process {accelerator.process_index}",
-        main_process_only=False,
-    )
-    logger.debug(
-        f"On process {accelerator.process_index}, data to save is: shape={sel_to_save.shape} | min={sel_to_save.min()} | max={sel_to_save.max()}",
         main_process_only=False,
     )
 
@@ -253,12 +260,16 @@ def save_eval_artifacts_log_to_wandb(
         }
         for norm_method, normed_vids in normalized_elements_for_logging.items():
             videos = wandb.Video(normed_vids, **kwargs)  # pyright: ignore[reportArgumentType]
+            if split_name is not None:
+                artifact_path = f"{eval_strat}/Generated videos/{split_name}/{norm_method} normalized"
+            else:
+                artifact_path = f"{eval_strat}/Generated videos/{norm_method} normalized"
             accelerator.log(
-                {f"{eval_strat}/Generated videos/{norm_method} normalized": videos},
-                step=global_optimization_step,
+                {artifact_path: videos},
+                step=global_optimization_step - 1,
             )
             logger.debug(
-                f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B on main process"
+                f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B at step {global_optimization_step - 1}",
             )
     # images case (inverted Gaussians)
     else:
@@ -283,15 +294,21 @@ def save_eval_artifacts_log_to_wandb(
                 Image.fromarray(image.transpose(1, 2, 0), mode="RGB")
                 for image in normalized_elements_for_logging[norm_method]
             ]
+            if split_name is not None:
+                artifact_path = f"{eval_strat}/{wandb_title}/{split_name}/{norm_method} normalized"
+            else:
+                artifact_path = f"{eval_strat}/{wandb_title}/{norm_method} normalized"
             accelerator.log(
                 {
-                    f"{eval_strat}/{wandb_title}/{norm_method} normalized": [
+                    artifact_path: [
                         wandb.Image(image, caption=sel_captions[img_idx]) for img_idx, image in enumerate(images)
                     ]
                 },
-                step=global_optimization_step,
+                step=global_optimization_step - 1,
             )
-        logger.info(f"Logged {len(sel_to_save)} {wandb_title[0].lower() + wandb_title[1:]} to W&B on main process")
+        logger.info(
+            f"Logged {len(sel_to_save)} {wandb_title[0].lower() + wandb_title[1:]} to W&B at step {global_optimization_step - 1}",
+        )
 
 
 @torch.inference_mode()
@@ -523,3 +540,49 @@ def verify_model_configs(
                 diffs.append(f"  Declared: {filtered_declared[key]}")
 
         raise ValueError(f"The config of the loaded {model_name} does not match the declared one:\n" + "\n".join(diffs))
+
+
+SUPPORTED_TRANSFORMS_TO_GENERATE = (
+    RandomHorizontalFlip,
+    RandomVerticalFlip,
+    RandomRotationSquareSymmetry,
+)
+
+
+def generate_all_augs(img: torch.Tensor, transforms: list[type]) -> list[Tensor]:
+    """Generate all augmentations of `img` based on `transforms`."""
+    # checks
+    assert img.ndim == 3, f"Expected 3D image, got shape {img.shape}"
+    assert all(t in SUPPORTED_TRANSFORMS_TO_GENERATE for t in transforms), f"Unsupported transforms: {transforms}"
+
+    # generate all possible augmentations
+    aug_imgs = [img]
+    if RandomHorizontalFlip in transforms:
+        aug_imgs.append(torch.flip(img, [2]))
+    if RandomVerticalFlip in transforms:
+        for base_img_idx in range(len(aug_imgs)):
+            aug_imgs.append(torch.flip(aug_imgs[base_img_idx], [1]))
+    if RandomRotationSquareSymmetry in transforms:
+        if len(aug_imgs) == 4:  # must have been flipped in both directions then
+            aug_imgs += [
+                torch.rot90(aug_imgs[0], k=1, dims=(1, 2)),
+                torch.rot90(aug_imgs[0], k=3, dims=(1, 2)),
+            ]
+            aug_imgs += [
+                torch.rot90(aug_imgs[1], k=1, dims=(1, 2)),
+                torch.rot90(aug_imgs[1], k=3, dims=(1, 2)),
+            ]
+        elif len(aug_imgs) in (1, 2):  # simply perform all 4 rotations on each image
+            for base_img_idx in range(len(aug_imgs)):
+                for nb_rot in [1, 2, 3]:
+                    aug_imgs.append(torch.rot90(aug_imgs[base_img_idx], k=nb_rot, dims=(1, 2)))
+        else:
+            raise ValueError(f"Expected 1, 2, or 4 images at this point, got {len(aug_imgs)}")
+
+    assert len(aug_imgs) in (
+        1,
+        2,
+        4,
+        8,
+    ), f"Expected 1, 2, 4, or 8 images at this point, got {len(aug_imgs)}"
+    return aug_imgs

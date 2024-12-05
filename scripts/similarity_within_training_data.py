@@ -14,22 +14,24 @@ from typing import Callable
 
 import colorlog
 import matplotlib.pyplot as plt
+import torch
 from enlighten import Manager
-from torch import float32, full, int64, maximum, minimum, save, stack, where
 from torch.nn import CosineSimilarity, PairwiseDistance
 from torch.utils.data import DataLoader
 from torchvision.transforms import RandomHorizontalFlip, RandomVerticalFlip  # noqa: F401
 
-from GaussianProxy.inference import generate_all_augs
 from GaussianProxy.utils.data import (
     BaseDataset,
     RandomRotationSquareSymmetry,  # noqa: F401
     remove_flips_and_rotations_from_transforms,
 )
+from GaussianProxy.utils.misc import generate_all_augs
 from my_conf.dataset.BBBC021_196_docetaxel_inference import BBBC021_196_docetaxel_inference  # noqa: F401
 from my_conf.dataset.biotine_image_inference import biotine_image_inference  # noqa: F401
 from my_conf.dataset.diabetic_retinopathy_inference import diabetic_retinopathy_inference  # noqa: F401
 from my_conf.dataset.Jurkat_inference import Jurkat_inference  # noqa: F401
+
+torch.set_grad_enabled(False)
 
 # Script Arguments
 METRICS = ("cosine", "L2")
@@ -103,11 +105,11 @@ for metric in METRICS:
 aug_factor = len(generate_all_augs(all_times_ds[0], TRANSFORMS))
 logger.debug(f"Augmentation factor: {aug_factor}")
 all_sims = {
-    metric_name: full(
+    metric_name: torch.full(
         (tot_nb_samples, tot_nb_samples, aug_factor),
         float("NaN"),
         device=DEVICE,
-        dtype=float32,
+        dtype=torch.float32,
     )
     for metric_name in metrics.keys()
 }
@@ -118,25 +120,25 @@ COMPARISON_OPERATORS = {
     "L2": lt,
 }
 MAX_OR_MIN = {
-    "cosine": maximum,
-    "L2": minimum,
+    "cosine": torch.maximum,
+    "L2": torch.minimum,
 }
 worst_values = {
-    metric_name: full(
+    metric_name: torch.full(
         (tot_nb_samples,),
         BEST_VAL[metric_name],
         device=DEVICE,
-        dtype=float32,
+        dtype=torch.float32,
     )
     for metric_name in metrics.keys()
 }
 # closest_ds_idx_aug_idx[metric_name][i] = (closest_ds_idx, closest_aug_idx)
 closest_ds_idx_aug_idx = {
-    metric_name: full(
+    metric_name: torch.full(
         (tot_nb_samples, 2),
         -1,
         device=DEVICE,
-        dtype=int64,
+        dtype=torch.int64,
     )
     for metric_name in metrics.keys()
 }
@@ -164,7 +166,7 @@ for batch_idx, bs in enumerate(actual_bses):
     inner_pbar.refresh()
 
     # compute cosine similarities over full (augmented) all-times dataset and report largest
-    base_ds_images = stack(all_times_ds.__getitems__(list(range(start, end)))).to(DEVICE)
+    base_ds_images = torch.stack(all_times_ds.__getitems__(list(range(start, end)))).to(DEVICE)
 
     all_times_dl = DataLoader(
         all_times_ds,
@@ -188,12 +190,12 @@ for batch_idx, bs in enumerate(actual_bses):
                 all_sims[metric_name][start:end, img_idx, aug_img_idx] = value
                 # update worst found indexes
                 condition = COMPARISON_OPERATORS[metric_name](value, worst_values[metric_name][start:end])
-                new_idxes = where(
+                new_idxes = torch.where(
                     condition,
                     img_idx,
                     closest_ds_idx_aug_idx[metric_name][start:end, 0],
                 )
-                new_aug_idxes = where(
+                new_aug_idxes = torch.where(
                     condition,
                     aug_img_idx,
                     closest_ds_idx_aug_idx[metric_name][start:end, 1],
@@ -221,7 +223,7 @@ for metric_name in metrics.keys():
 # save all metrics and plot their histogram
 for metric_name in metrics.keys():
     this_metric_all_sims = all_sims[metric_name].cpu()
-    save(this_metric_all_sims, BASE_SAVE_PATH / f"all_{metric_name}.pt")
+    torch.save(this_metric_all_sims, BASE_SAVE_PATH / f"all_{metric_name}.pt")
     plt.figure(figsize=(10, 6))
     plt.hist(this_metric_all_sims.flatten().numpy(), bins=300)
     plt.title(

@@ -253,7 +253,7 @@ def _print_short_datasets_info(reprs_to_log: list[str], logger: MultiProcessAdap
     logger.info(complete_str)
 
 
-class BaseDataset(Dataset):
+class BaseDataset(Dataset[Tensor]):
     """Just a dataset."""
 
     def __init__(

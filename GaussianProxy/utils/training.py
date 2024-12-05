@@ -10,7 +10,6 @@ from typing import ClassVar, Generator, Optional, Type
 import numpy as np
 import torch
 import torch_fidelity
-import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from diffusers.models.unets.unet_2d import UNet2DModel
@@ -25,6 +24,7 @@ from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
+import wandb
 from GaussianProxy.conf.training_conf import (
     Config,
     ForwardNoising,
@@ -188,6 +188,10 @@ class TimeDiffusion:
     ):
         """
         Global high-level fitting method.
+
+        Arguments:
+            train_dataloaders (dict[int, DataLoader] | dict[str, DataLoader])
+            Dictionary of "_fake_"training dataloaders. The actual training batch creation is done in the `_yield_data_batches` method.
         """
         logger.debug(
             f"Starting TimeDiffusion fitting on process {self.accelerator.process_index}",
@@ -269,6 +273,7 @@ class TimeDiffusion:
                 and self.global_optimization_step % self.cfg.evaluation.every_n_opt_steps == 0
             ):
                 self._evaluate(
+                    train_timestep_dataloaders,
                     test_timestep_dataloaders,
                     pbar_manager,
                 )
@@ -409,11 +414,11 @@ class TimeDiffusion:
                         new_sample = next(dl_to_sample_from)[:max_nb_samples_to_get]
                         batch += new_sample
                         nb_samples_got[t_to_sample_from] += len(new_sample)
-                    # DataLoaders will quickly be exhausted (resulting in silent hangs then undebuggable NCCL timeouts 🙃)
+                    # DataLoader iterators will quickly be exhausted (resulting in silent hangs then undebuggable NCCL timeouts 🙃)
                     # so reform them when needed
                     except StopIteration:
                         self.logger.debug(
-                            f"Reforming dataloader for timestep {t_to_sample_from} on process {self.accelerator.process_index}",
+                            f"Reforming dataloader iterator for timestep {t_to_sample_from} on process {self.accelerator.process_index}",
                             main_process_only=False,
                         )
                         dataloaders_iterators[t_to_sample_from] = iter(dataloaders[t_to_sample_from])
@@ -587,7 +592,8 @@ class TimeDiffusion:
     @torch.inference_mode()
     def _evaluate(
         self,
-        dataloaders: dict[float, DataLoader[BaseDataset]],
+        raw_train_dataloaders: dict[float, DataLoader[Tensor]],
+        test_dataloaders: dict[float, DataLoader[Tensor]],
         pbar_manager: Manager,
     ):
         """
@@ -648,39 +654,66 @@ class TimeDiffusion:
         for eval_strat in self.cfg.evaluation.strategies:
             if eval_strat.name == "SimpleGeneration":
                 self._simple_gen(
-                    dataloaders,
                     pbar_manager,
                     eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
                 )
+
             elif eval_strat.name == "ForwardNoising":
                 self._forward_noising(
-                    dataloaders,
+                    test_dataloaders,
                     pbar_manager,
                     eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
                 )
+
             elif eval_strat.name == "InvertedRegeneration":
+                # get first batches of train and test time-0 dataloaders
+                train_dl_time0 = raw_train_dataloaders[0]
+                train_batch_time0: Tensor = next(iter(train_dl_time0))[: self.cfg.training.train_batch_size]
+                while train_batch_time0.shape[0] != self.cfg.training.train_batch_size:
+                    train_batch_time0 = torch.cat([train_batch_time0, next(iter(train_dl_time0))])
+                    train_batch_time0 = train_batch_time0[: self.cfg.training.train_batch_size]
+                assert (
+                    expected_shape := (
+                        self.cfg.training.train_batch_size,
+                        *self.data_shape,
+                    )
+                ) == train_batch_time0.shape, f"Expected shape {expected_shape}, got {train_batch_time0.shape}"
+
+                test_dl_time0 = list(test_dataloaders.values())[0]
+                test_batch_time0: Tensor = next(iter(test_dl_time0))
+                assert (
+                    expected_shape := (
+                        self.cfg.evaluation.batch_size,
+                        *self.data_shape,
+                    )
+                ) == test_batch_time0.shape, f"Expected shape {expected_shape}, got {test_batch_time0.shape}"
+
+                # run the evaluation strategy on theses
                 self._inv_regen(
-                    dataloaders,
+                    train_batch_time0,
+                    test_batch_time0,
                     pbar_manager,
                     eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
                 )
+
             elif eval_strat.name == "IterativeInvertedRegeneration":
                 self._iter_inv_regen(
-                    dataloaders,
+                    test_dataloaders,
                     pbar_manager,
                     eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
                 )
+
             elif eval_strat.name == "MetricsComputation":
-                true_data_classes_paths = {idx: "" for idx in range(len(dataloaders.keys()))}
-                for cl_idx, dl in enumerate(dataloaders.values()):
+                true_data_classes_paths = {idx: "" for idx in range(len(test_dataloaders.keys()))}
+                for cl_idx, dl in enumerate(test_dataloaders.values()):
                     inner_ds = dl.dataset
                     if not isinstance(inner_ds, BaseDataset):
                         raise ValueError(
@@ -696,6 +729,7 @@ class TimeDiffusion:
                     inference_video_time_encoding,
                     true_data_classes_paths,
                 )
+
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -706,7 +740,6 @@ class TimeDiffusion:
     @torch.inference_mode()
     def _simple_gen(
         self,
-        _: dict[float, DataLoader],
         pbar_manager: Manager,
         eval_strat: SimpleGeneration,
         eval_net: UNet2DModel | UNet2DConditionModel,
@@ -786,24 +819,21 @@ class TimeDiffusion:
     @torch.inference_mode()
     def _inv_regen(
         self,
-        dataloaders: dict[float, DataLoader],
+        train_batch_time_zero: Tensor,
+        test_batch_time_zero: Tensor,
         pbar_manager: Manager,
         eval_strat: InvertedRegeneration,
         eval_net: UNet2DModel | UNet2DConditionModel,
         inference_video_time_encoding: VideoTimeEncoding,
     ):
         """
-        Two steps are performed on each batch of the first dataloader:
+        A quick visualization test that generates a (small) batch of videos, both on train and test starting data.
+        Starting data *must* be of time zero.
+
+        Two steps are performed on the 2 batches:
             1. Perform inversion to obtain the starting Gaussian
             2. Generate te trajectory from that inverted Gaussian sample
-
-        Note that any other dataloader than the first one is actually not used for evaluation.
         """
-        # Checks
-        assert (
-            list(dataloaders.keys())[0] == 0
-        ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
-
         # Setup schedulers
         inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
@@ -819,9 +849,8 @@ class TimeDiffusion:
         )
 
         # Use only 1st dataloader for now TODO
-        first_dl = list(dataloaders.values())[0]
         eval_batches_pbar = pbar_manager.counter(
-            total=len(first_dl),
+            total=2,
             position=2,
             desc="Evaluation batches" + 10 * " ",
             enable=self.accelerator.is_main_process,
@@ -832,19 +861,22 @@ class TimeDiffusion:
             eval_batches_pbar.refresh()
 
         # Now generate & evaluate the trajectories
-        for batch_idx, batch in enumerate(iter(first_dl)):
+        for split, batch in [
+            ("train_split", train_batch_time_zero),
+            ("test_split", test_batch_time_zero),
+        ]:
             # 1. Save the to-be inverted images
-            if batch_idx == 0:
-                save_eval_artifacts_log_to_wandb(
-                    batch,
-                    self.saved_artifacts_folder,
-                    self.global_optimization_step,
-                    self.accelerator,
-                    self.logger,
-                    eval_strat.name,
-                    "starting_samples",
-                    ["-1_1 raw", "image min-max"],
-                )
+            save_eval_artifacts_log_to_wandb(
+                batch,
+                self.saved_artifacts_folder,
+                self.global_optimization_step,
+                self.accelerator,
+                self.logger,
+                eval_strat.name,
+                "starting_samples",
+                ["-1_1 raw", "image min-max"],
+                split_name=split,
+            )
 
             # 2. Generate the inverted Gaussians
             inverted_gauss = batch
@@ -854,38 +886,37 @@ class TimeDiffusion:
                 model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
 
-            if batch_idx == 0:
-                save_eval_artifacts_log_to_wandb(
-                    inverted_gauss,
-                    self.saved_artifacts_folder,
-                    self.global_optimization_step,
-                    self.accelerator,
-                    self.logger,
-                    eval_strat.name,
-                    "inversions",
-                    ["image min-max", "image 5perc-95perc"],
-                )
+            save_eval_artifacts_log_to_wandb(
+                inverted_gauss,
+                self.saved_artifacts_folder,
+                self.global_optimization_step,
+                self.accelerator,
+                self.logger,
+                eval_strat.name,
+                "inversions",
+                ["image min-max", "image 5perc-95perc"],
+                split_name=split,
+            )
 
             # 3. Regenerate the starting samples from their inversion
             regen = inverted_gauss.clone()
             for t in inference_scheduler.timesteps:
                 model_output = self._net_pred(regen, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                 regen = inference_scheduler.step(model_output, int(t), regen, return_dict=False)[0]
-            if batch_idx == 0:
-                save_eval_artifacts_log_to_wandb(
-                    regen,
-                    self.saved_artifacts_folder,
-                    self.global_optimization_step,
-                    self.accelerator,
-                    self.logger,
-                    eval_strat.name,
-                    "regenerations",
-                    ["image min-max", "-1_1 raw", "-1_1 clipped"],
-                )
+            save_eval_artifacts_log_to_wandb(
+                regen,
+                self.saved_artifacts_folder,
+                self.global_optimization_step,
+                self.accelerator,
+                self.logger,
+                eval_strat.name,
+                "regenerations",
+                ["image min-max", "-1_1 raw", "-1_1 clipped"],
+                split_name=split,
+            )
 
             # 4. Generate the trajectory from it
             # TODO: parallelize the generation along video time?
-            # usefull if small inference batch size, otherwise useless
             video = []
             video_time_pbar = pbar_manager.counter(
                 total=self.cfg.evaluation.nb_video_timesteps,
@@ -909,11 +940,6 @@ class TimeDiffusion:
 
                 video.append(image)
                 video_time_pbar.update()
-                # _log_to_file_only(
-                #     self.logger,
-                #     f"Video time {video_timestep}/{self.cfg.training.eval_nb_video_timesteps}",
-                #     INFO,
-                # )
 
             video_time_pbar.close(clear=True)
 
@@ -921,29 +947,27 @@ class TimeDiffusion:
             # wandb expects (batch_size, video_time, channels, height, width)
             video = video.permute(1, 0, 2, 3, 4)
             expected_video_shape = (
-                self.cfg.evaluation.batch_size,
+                batch.shape[0],
                 self.cfg.evaluation.nb_video_timesteps,
                 self.accelerator.unwrap_model(self.net).config["out_channels"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
             )
             assert (
-                video.shape == expected_video_shape
+                expected_video_shape == video.shape
             ), f"Expected video shape {expected_video_shape}, got {video.shape}"
-            if batch_idx == 0:
-                save_eval_artifacts_log_to_wandb(
-                    video,
-                    self.saved_artifacts_folder,
-                    self.global_optimization_step,
-                    self.accelerator,
-                    self.logger,
-                    eval_strat.name,
-                    "trajectories",
-                    ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-                )
-
+            save_eval_artifacts_log_to_wandb(
+                video,
+                self.saved_artifacts_folder,
+                self.global_optimization_step,
+                self.accelerator,
+                self.logger,
+                eval_strat.name,
+                "trajectories",
+                ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
+                split_name=split,
+            )
             eval_batches_pbar.update()
-            break  # TODO: clean this up either by making this smol-batch-logging and duplicating it on train data
 
         eval_batches_pbar.close()
         self.logger.info(
@@ -1463,7 +1487,7 @@ class TimeDiffusion:
                     f"evaluation/class_{class_idx}/": this_cl_metrics
                     for class_idx, this_cl_metrics in final_metrics_dict.items()
                 },
-                step=self.global_optimization_step,
+                step=self.global_optimization_step - 1,
             )
             self.logger.info(
                 f"Logged metrics {final_metrics_dict}",
@@ -1494,17 +1518,30 @@ class TimeDiffusion:
         true_data_classes_paths: dict[int, str],
         gen_dir: Path,
     ) -> list[int]:
+        """
+        Return the list of batch sizes for this process to generate, for this `video_time_idx`.
+
+        `eval_strat.nb_samples_to_gen_per_time` can be:
+        - an `int`: the number of samples to generate
+        - `"adapt"`: generate as many samples as there are in the true data class
+        - `"adapt half"`: generate half as many samples as there are in the true data class
+        """
         # find total number of samples to generate for this video time
         if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
             tot_nb_samples = eval_strat.nb_samples_to_gen_per_time
         elif eval_strat.nb_samples_to_gen_per_time == "adapt":
             tot_nb_samples = len(list(Path(true_data_classes_paths[video_time_idx]).iterdir()))
             self.logger.debug(
-                f"Found {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
+                f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
+            )
+        elif eval_strat.nb_samples_to_gen_per_time == "adapt half":
+            tot_nb_samples = len(list(Path(true_data_classes_paths[video_time_idx]).iterdir())) // 2
+            self.logger.debug(
+                f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
             )
         else:
             raise ValueError(
-                f"Expected 'nb_samples_to_gen_per_time' to be an int or 'adapt', got {eval_strat.nb_samples_to_gen_per_time}"
+                f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', or 'adapt half', got {eval_strat.nb_samples_to_gen_per_time}"
             )
 
         # Resume from interrupted generation
@@ -1655,7 +1692,7 @@ def load_resuming_args(
     # - int: resume from a specific step
     # - True: resume from the most recent checkpoint
     # - "model_save": resume from the last *saved model* (!= checkpoint!)
-    if type(resume_arg) == int:
+    if type(resume_arg) == int:  # noqa E721
         resuming_path = chckpt_save_path / f"step_{resume_arg}"
     elif resume_arg is True:
         # Get the most recent checkpoint
