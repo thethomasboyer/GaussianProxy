@@ -209,7 +209,7 @@ def save_eval_artifacts_log_to_wandb(
     sel_idxes = shuffled_idxes[:actual_nb_elems_to_save].sort().values
     sel_to_save = tensors_to_save[sel_idxes]
     if captions is None:
-        captions = [None] * len(sel_to_save)
+        captions = [None] * len(tensors_to_save)
     sel_captions = [captions[i] for i in sel_idxes]
 
     # 2. Save some raw images / trajectories to disk (all processes)
