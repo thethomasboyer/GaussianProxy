@@ -135,8 +135,7 @@ def main(cfg: Config) -> None:
             logger.warning("No resuming state found, will rewind run from zero!")
             start_step = 0
         else:
-            # start from the step *before* the one we stopped at, because that one did not finish!
-            start_step = max(resuming_args.start_global_optimization_step - 1, 0)
+            start_step = max(resuming_args.start_global_optimization_step, 0)
         if cfg.fork_run:
             logger.info(f"Forking run {prev_run_id} from step {start_step}")
             init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"

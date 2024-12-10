@@ -10,6 +10,7 @@ from typing import ClassVar, Generator, Optional, Type
 import numpy as np
 import torch
 import torch_fidelity
+import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from diffusers.models.unets.unet_2d import UNet2DModel
@@ -24,7 +25,6 @@ from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 
-import wandb
 from GaussianProxy.conf.training_conf import (
     Config,
     ForwardNoising,
@@ -279,6 +279,10 @@ class TimeDiffusion:
                 )
                 # reset network to the right mode
                 self.net.train()
+
+            # Update global opt step at very end of everything
+            self.global_optimization_step += 1
+
         batches_pbar.close()
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
         gantt_chart = state_logger.create_gantt_chart()
@@ -547,9 +551,6 @@ class TimeDiffusion:
             },
             step=self.global_optimization_step,
         )
-
-        # Update global opt step
-        self.global_optimization_step += 1
 
     def _unet2d_pred(
         self,
@@ -1487,7 +1488,7 @@ class TimeDiffusion:
                     f"evaluation/class_{class_idx}/": this_cl_metrics
                     for class_idx, this_cl_metrics in final_metrics_dict.items()
                 },
-                step=self.global_optimization_step - 1,
+                step=self.global_optimization_step,
             )
             self.logger.info(
                 f"Logged metrics {final_metrics_dict}",
