@@ -1563,6 +1563,9 @@ class TimeDiffusion:
         this_proc_gen_batches = [eval_strat.batch_size] * this_proc_nb_full_batches + [this_proc_last_batch]
         if self.accelerator.process_index < remainder:
             this_proc_gen_batches[-1] += 1
+        # pop the last batch if it is empty
+        if this_proc_gen_batches[-1] == 0:
+            this_proc_gen_batches.pop()
 
         self.logger.debug(
             f"Process {self.accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches} for time n°{video_time_idx}",
