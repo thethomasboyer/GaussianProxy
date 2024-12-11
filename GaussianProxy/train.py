@@ -1,6 +1,7 @@
 # Copyright 2024 Thomas Boyer
 
 import logging
+from datetime import timedelta
 from math import sqrt
 from os import get_terminal_size
 from pathlib import Path
@@ -10,7 +11,7 @@ import torch
 import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter, get_logger
-from accelerate.utils import ProjectConfiguration
+from accelerate.utils import InitProcessGroupKwargs, ProjectConfiguration
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
@@ -71,10 +72,13 @@ def main(cfg: Config) -> None:
         project_dir=this_run_folder.as_posix(),
     )
 
+    accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=1200))  # 20 minutes before NCCL timeout
+
     accelerator = Accelerator(
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
         log_with=cfg.logger,
         project_config=accelerator_project_config,
+        kwargs_handlers=[accelerator_kwargs],
     )
     try:
         terminal_width = get_terminal_size().columns

@@ -849,11 +849,10 @@ class TimeDiffusion:
             main_process_only=False,
         )
 
-        # Use only 1st dataloader for now TODO
         eval_batches_pbar = pbar_manager.counter(
             total=2,
             position=2,
-            desc="Evaluation batches" + 10 * " ",
+            desc="Evaluation batches" + 8 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
             min_delta=1,
@@ -969,6 +968,9 @@ class TimeDiffusion:
                 split_name=split,
             )
             eval_batches_pbar.update()
+
+            # wait for everyone between each split
+            self.accelerator.wait_for_everyone()
 
         eval_batches_pbar.close()
         self.logger.info(
@@ -1503,6 +1505,9 @@ class TimeDiffusion:
                 or self.best_metric_to_date > final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
             ):
                 self.best_metric_to_date = final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
+                self.accelerator.log(
+                    {"training/best_metric_to_date": self.best_metric_to_date}, step=self.global_optimization_step
+                )
                 self.logger.info(f"Saving best model to date with all classes FID: {self.best_metric_to_date}")
                 self._save_pipeline()
 
