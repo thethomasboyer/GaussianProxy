@@ -1605,20 +1605,24 @@ class TimeDiffusion:
             self.logger.debug(
                 f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
             )
-        elif eval_strat.nb_samples_to_gen_per_time.startswith("adapt half"):
+        elif eval_strat.nb_samples_to_gen_per_time == "adapt half":
             tot_nb_samples = len(list(Path(true_data_classes_paths[video_time_idx]).iterdir())) // 2
             self.logger.debug(
                 f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
             )
-            if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-                self.logger.debug("Will augment samples 8⨉ after generation")
-            else:
-                assert (
-                    eval_strat.nb_samples_to_gen_per_time == "adapt half"
-                ), f"Expected 'adapt half' or 'adapt half aug' at this point, got {eval_strat.nb_samples_to_gen_per_time}"
+        elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+            nb_all_aug_samples = len(list(Path(true_data_classes_paths[video_time_idx]).iterdir()))
+            assert (
+                nb_all_aug_samples % 8 == 0
+            ), f"Expected number of samples to be a multiple of 8, got {nb_all_aug_samples}"
+            tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
+            self.logger.debug(
+                f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
+            )
+            self.logger.debug("Will augment samples 8⨉ after generation")
         else:
             raise ValueError(
-                f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', or 'adapt half', got {eval_strat.nb_samples_to_gen_per_time}"
+                f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', 'adapt half', or 'adapt half aug', got {eval_strat.nb_samples_to_gen_per_time}"
             )
 
         # Resume from interrupted generation
