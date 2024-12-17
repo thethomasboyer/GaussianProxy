@@ -40,6 +40,8 @@ dependencies = [
     "torchvision>=0.20.1",
     "tqdm>=4.67.0",
     "wandb>=0.18.7",
+    "tifffile>=2024.12.12",
+    "joblib>=1.4.2",
 ]
 
 [tool.uv.sources]
@@ -62,4 +64,5 @@ exclude = [
     "**/experiments",
     "**/__pycache__",
     "**/.local/share/uv/python",
+    "**/.vscode-server/extensions",
 ]
