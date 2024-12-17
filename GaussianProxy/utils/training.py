@@ -37,6 +37,7 @@ from GaussianProxy.utils.data import BaseDataset
 from GaussianProxy.utils.misc import (
     StateLogger,
     get_evenly_spaced_timesteps,
+    hard_augment_dataset_all_square_symmetries,
     log_state,
     save_eval_artifacts_log_to_wandb,
     save_images_for_metrics_compute,
@@ -125,6 +126,7 @@ class TimeDiffusion:
     # WARNING: best_metric_to_date will only be updated on the main process!
     best_metric_to_date: float = field(init=False)
     first_metrics_eval: bool = True  # always reset to True even if resuming from a checkpoint
+    eval_on_start: bool = False
     # constant evaluation starting states
     _eval_noise: Tensor = field(init=False)
     _eval_video_times: Tensor = field(init=False)
@@ -271,6 +273,7 @@ class TimeDiffusion:
             if (
                 self.cfg.evaluation.every_n_opt_steps is not None
                 and self.global_optimization_step % self.cfg.evaluation.every_n_opt_steps == 0
+                and (self.global_optimization_step != 0 or self.eval_on_start)
             ):
                 self._evaluate(
                     train_timestep_dataloaders,
@@ -652,7 +655,7 @@ class TimeDiffusion:
         # TODO: save & load a compiled artifact when torch.export is stabilized
 
         # 3. Run through evaluation strategies
-        for eval_strat in self.cfg.evaluation.strategies:
+        for eval_strat in self.cfg.evaluation.strategies:  # TODO: match on type when config is updated
             if eval_strat.name == "SimpleGeneration":
                 self._simple_gen(
                     pbar_manager,
@@ -713,6 +716,7 @@ class TimeDiffusion:
                 )
 
             elif eval_strat.name == "MetricsComputation":
+                # TODO: index with class names
                 true_data_classes_paths = {idx: "" for idx in range(len(test_dataloaders.keys()))}
                 for cl_idx, dl in enumerate(test_dataloaders.values()):
                     inner_ds = dl.dataset
@@ -720,8 +724,27 @@ class TimeDiffusion:
                         raise ValueError(
                             f"Expected a `BaseDataset` for the underlying dataset of the evaluation dataloader, got {type(inner_ds)}"
                         )
-                    # assuming they are share the same parent...
-                    true_data_classes_paths[cl_idx] = Path(inner_ds.samples[0]).parent.as_posix()
+                    # assuming they all share the same parent...
+                    this_class_path = Path(inner_ds.samples[0]).parent
+                    if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":  # pyright: ignore[reportAttributeAccessIssue]
+                        # use the hard augmented version of the dataset if it's not the one we are already training on
+                        if "_hard_augmented" not in this_class_path.parent.name:
+                            self.logger.debug(
+                                f"Using hard augmented version of {this_class_path}: {this_class_path.parent.name}_hard_augmented"
+                            )
+                            hard_augmented_dataset_path = (
+                                this_class_path.parent.with_name(this_class_path.parent.name + "_hard_augmented")
+                                / this_class_path.name
+                            )
+                        else:
+                            hard_augmented_dataset_path = this_class_path
+
+                        assert (
+                            hard_augmented_dataset_path.exists()
+                        ), f"hard augmented dataset does not exist at {hard_augmented_dataset_path} "
+                        true_data_classes_paths[cl_idx] = hard_augmented_dataset_path.as_posix()
+                    else:
+                        true_data_classes_paths[cl_idx] = this_class_path.as_posix()
                 self._metrics_computation(
                     tmp_save_folder,
                     pbar_manager,
@@ -931,7 +954,6 @@ class TimeDiffusion:
 
             for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps)):
                 image = inverted_gauss.clone()
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.cfg.evaluation.nb_video_timesteps - 1}")
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps:
@@ -1065,8 +1087,6 @@ class TimeDiffusion:
             prev_video_time = 0
             image = batch
             for video_t_idx, video_time in enumerate(video_times):
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.cfg.evaluation.nb_video_timesteps}")
-
                 # 2. Generate the inverted Gaussians
                 inverted_gauss = image
                 inversion_video_time = inference_video_time_encoding.forward(prev_video_time, batch.shape[0])
@@ -1241,7 +1261,6 @@ class TimeDiffusion:
 
             for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps)):
                 image = slightly_noised_sample.clone()
-                self.logger.debug(f"Video timestep index {video_t_idx} / {self.cfg.evaluation.nb_video_timesteps}")
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
                 for t in inference_scheduler.timesteps[noise_timestep_idx:]:
@@ -1308,23 +1327,31 @@ class TimeDiffusion:
 
         Everything is distributed.
         """
-        # 0. Preparations
+        ##### 0. Preparations
         # duplicate the scheduler to not mess with the training one
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
         # Misc.
-        self.logger.info(f"Starting {eval_strat.name}")
+        self.logger.info(f"Starting {eval_strat.name}: {eval_strat}")
         self.logger.debug(
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
             main_process_only=False,
         )
+        metrics_computation_folder = tmp_save_folder / "metrics_computation"
+        assert (
+            len(self.empirical_dists_timesteps) == len(true_data_classes_paths)
+        ), f"Mismatch between number of timesteps and classes: empirical_dists_timesteps={self.empirical_dists_timesteps}, true_data_classes_paths={true_data_classes_paths}"
+        if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+            assert all(
+                "hard_augmented" in true_data_classes_paths[key] for key in true_data_classes_paths
+            ), f"Expected all true data paths to be hard augmented, got:\n{true_data_classes_paths}"
 
         # use training time encodings
         eval_video_time = torch.tensor(self.empirical_dists_timesteps).to(self.accelerator.device)
         eval_video_time_enc = inference_video_time_encoding.forward(eval_video_time)
 
-        # 1. Generate the samples
+        ##### 1. Generate the samples
         # loop over training video times
         video_times_pbar = pbar_manager.counter(
             total=len(eval_video_time),
@@ -1340,7 +1367,7 @@ class TimeDiffusion:
             video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
 
             # find how many samples to generate, batchify generation and distribute along processes
-            gen_dir = tmp_save_folder / "metrics_computation" / str(video_time_idx)
+            gen_dir = metrics_computation_folder / str(video_time_idx)
             gen_dir.mkdir(parents=True, exist_ok=True)
             this_proc_gen_batches = self._find_this_proc_this_time_batches_for_metrics_comp(
                 eval_strat,
@@ -1360,7 +1387,7 @@ class TimeDiffusion:
                 batches_pbar.refresh()
 
             # loop over generation batches
-            for batch_idx, batch_size in batches_pbar(enumerate(this_proc_gen_batches)):
+            for batch_size in batches_pbar(this_proc_gen_batches):
                 gen_pbar = pbar_manager.counter(
                     total=len(inference_scheduler.timesteps),
                     position=4,
@@ -1402,19 +1429,42 @@ class TimeDiffusion:
         # no need to wait here then
         self.logger.info("Finished image generation")
 
-        # 2. Compute metrics
+        ##### 1.5 Augment the generated samples if applicable
+        if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+            # on main process:
+            if self.accelerator.is_main_process:
+                # augment
+                extension = "png"  # TODO: remove this hardcoded extension (by moving DatasetParams'params into the base DataSet class used in config, another TODO)
+                hard_augment_dataset_all_square_symmetries(
+                    metrics_computation_folder,
+                    self.logger,
+                    pbar_manager,
+                    3,
+                    extension,
+                )
+                # check result
+                subdirs = [d for d in metrics_computation_folder.iterdir() if d.is_dir()]
+                nb_elems_per_class = {
+                    class_path.name: len(list((metrics_computation_folder / class_path.name).glob(f"*.{extension}")))
+                    for class_path in subdirs
+                }
+                assert all(
+                    nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class
+                ), f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
+
+        self.accelerator.wait_for_everyone()
+
+        ##### 2. Compute metrics
         # consistency of cache naming with below is important
-        metrics_caches: dict[str | int, Path] = {
-            "all_classes": tmp_save_folder / "metrics_computation" / self.cfg.dataset.name
-        }
+        metrics_caches: dict[str | int, Path] = {"all_classes": metrics_computation_folder / self.cfg.dataset.name}
         for video_time_idx in range(len(self.empirical_dists_timesteps)):
-            metrics_caches[video_time_idx] = (
-                tmp_save_folder / "metrics_computation" / (self.cfg.dataset.name + "_class_" + str(video_time_idx))
+            metrics_caches[video_time_idx] = metrics_computation_folder / (
+                self.cfg.dataset.name + "_class_" + str(video_time_idx)
             )
 
         # clear the dataset caches (on first eval of a run only...)
         # because the dataset might not be exactly the same that in the previous run,
-        # despite having the same cfg.dataset.name (used as ID): risk of invalid cache
+        # despite having the same cfg.dataset.name (used as ID): risk of invalid cache!
         if self.first_metrics_eval:
             self.first_metrics_eval = False
             # clear on main process
@@ -1425,40 +1475,48 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         # TODO: weight tasks by number of samples
-        tasks = ["all_classes"] + list(range(len(self.empirical_dists_timesteps)))
+        # TODO: include "all_classes" in the tasks, but differentiation between using seen data only and all the available dataset
+        # tasks = ["all_classes"] + list(range(len(self.empirical_dists_timesteps)))
+        tasks = list(range(len(self.empirical_dists_timesteps)))
         tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
 
         self.logger.info("Computing metrics...")
         metrics_dict: dict[str, dict[str, float]] = {}
         for task in tasks_for_this_process:
             if task == "all_classes":
-                self.logger.debug(f"Computing metrics against true samples at {Path(self.cfg.dataset.path).as_posix()}")
+                self.logger.debug(
+                    f"Computing metrics against true samples at {Path(self.cfg.dataset.path).as_posix()} on process {self.accelerator.process_index}",
+                    main_process_only=False,
+                )
                 metrics = torch_fidelity.calculate_metrics(
                     input1=Path(self.cfg.dataset.path).as_posix(),
-                    input2=(tmp_save_folder / "metrics_computation").as_posix(),
+                    input2=metrics_computation_folder.as_posix(),
                     cuda=True,
-                    batch_size=eval_strat.batch_size,  # TODO: optimize
-                    isc=True,
+                    batch_size=eval_strat.batch_size * 4,  # TODO: optimize
+                    isc=False,
                     fid=True,
-                    prc=True,
+                    prc=False,
                     verbose=self.cfg.debug and self.accelerator.is_main_process,
-                    cache_root=(tmp_save_folder / "metrics_computation").as_posix(),
+                    cache_root=metrics_computation_folder.as_posix(),
                     input1_cache_name=metrics_caches["all_classes"].name,
                     samples_find_deep=True,
                 )
             else:
                 assert isinstance(task, int)
-                self.logger.debug(f"Computing metrics against true samples at {true_data_classes_paths[task]}")
+                self.logger.debug(
+                    f"Computing metrics against true samples at {true_data_classes_paths[task]} on process {self.accelerator.process_index}",
+                    main_process_only=False,
+                )
                 metrics = torch_fidelity.calculate_metrics(
                     input1=true_data_classes_paths[task],
-                    input2=(tmp_save_folder / "metrics_computation" / str(task)).as_posix(),
+                    input2=(metrics_computation_folder / str(task)).as_posix(),
                     cuda=True,
-                    batch_size=eval_strat.batch_size,  # TODO: optimize
-                    isc=True,
+                    batch_size=eval_strat.batch_size * 4,  # TODO: optimize
+                    isc=False,
                     fid=True,
-                    prc=True,
+                    prc=False,
                     verbose=self.cfg.debug and self.accelerator.is_main_process,
-                    cache_root=(tmp_save_folder / "metrics_computation").as_posix(),
+                    cache_root=metrics_computation_folder.as_posix(),
                     input1_cache_name=metrics_caches[task].name,
                 )
             metrics_dict[str(task)] = metrics
@@ -1478,7 +1536,7 @@ class TimeDiffusion:
             )
         self.accelerator.wait_for_everyone()
 
-        # 3. Merge metrics from all processes & Log metrics
+        ##### 3. Merge metrics from all processes & Log metrics
         if self.accelerator.is_main_process:
             final_metrics_dict = {}
             for metrics_file in [f for f in tmp_save_folder.iterdir() if f.name.endswith("metrics_dict.pkl")]:
@@ -1496,41 +1554,48 @@ class TimeDiffusion:
                 f"Logged metrics {final_metrics_dict}",
             )
 
-        # 4. Check if best model to date
+        ##### 4. Check if best model to date
         if self.accelerator.is_main_process:
             # WARNING: only "smaller is better" metrics are supported!
             # WARNING: best_metric_to_date will only be updated on the main process!
+            if "all_classes" not in final_metrics_dict:  # pyright: ignore[reportPossiblyUnboundVariable]
+                key = list(final_metrics_dict.keys())[0]  # pyright: ignore[reportPossiblyUnboundVariable]
+                assert isinstance(key, str), f"Expected a string key, got {key} of type {type(key)}"
+                self.logger.warning(
+                    f"No 'all_classes' key in final_metrics_dict, will update best_metric_to_date with the FID of the first class ({key})"
+                )
+            else:
+                key = "all_classes"
             if (
-                self.cfg.debug
-                or self.best_metric_to_date > final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
+                self.cfg.debug or self.best_metric_to_date > final_metrics_dict[key]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
             ):
-                self.best_metric_to_date = final_metrics_dict["all_classes"]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
+                self.best_metric_to_date = final_metrics_dict[key]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
                 self.accelerator.log(
                     {"training/best_metric_to_date": self.best_metric_to_date}, step=self.global_optimization_step
                 )
-                self.logger.info(f"Saving best model to date with all classes FID: {self.best_metric_to_date}")
-                self._save_pipeline()
+                self.logger.info(f"Saving best model to date with class='{key}' FID: {self.best_metric_to_date}")
+                self._save_pipeline(called_on_main_process_only=True)
 
-        # 5. Clean up (important because we reuse existing generated samples!)
+        ##### 5. Clean up (important because we reuse existing generated samples!)
         if self.accelerator.is_main_process:
-            shutil.rmtree(tmp_save_folder / "metrics_computation")
+            shutil.rmtree(metrics_computation_folder)
             self.logger.debug(f"Cleaned up metrics computation folder {tmp_save_folder / 'metrics_computation'}")
-        self.accelerator.wait_for_everyone()
 
     def _find_this_proc_this_time_batches_for_metrics_comp(
         self,
         eval_strat: MetricsComputation,
-        video_time_idx: int,
+        video_time_idx: int,  # TODO: use class name instead of index
         true_data_classes_paths: dict[int, str],
         gen_dir: Path,
     ) -> list[int]:
         """
-        Return the list of batch sizes for this process to generate, for this `video_time_idx`.
+        Return the list of batch sizes to generate, for a given `video_time_idx` and splitting between processes.
 
         `eval_strat.nb_samples_to_gen_per_time` can be:
         - an `int`: the number of samples to generate
         - `"adapt"`: generate as many samples as there are in the true data class
         - `"adapt half"`: generate half as many samples as there are in the true data class
+        - `"adapt half aug"`: generate half as many samples as there are in the true data class, then 8⨉ augment them (Dih4)
         """
         # find total number of samples to generate for this video time
         if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
@@ -1540,11 +1605,17 @@ class TimeDiffusion:
             self.logger.debug(
                 f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
             )
-        elif eval_strat.nb_samples_to_gen_per_time == "adapt half":
+        elif eval_strat.nb_samples_to_gen_per_time.startswith("adapt half"):
             tot_nb_samples = len(list(Path(true_data_classes_paths[video_time_idx]).iterdir())) // 2
             self.logger.debug(
                 f"Will generate {tot_nb_samples} samples for class n°{video_time_idx} at {true_data_classes_paths[video_time_idx]}"
             )
+            if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+                self.logger.debug("Will augment samples 8⨉ after generation")
+            else:
+                assert (
+                    eval_strat.nb_samples_to_gen_per_time == "adapt half"
+                ), f"Expected 'adapt half' or 'adapt half aug' at this point, got {eval_strat.nb_samples_to_gen_per_time}"
         else:
             raise ValueError(
                 f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', or 'adapt half', got {eval_strat.nb_samples_to_gen_per_time}"
@@ -1579,12 +1650,12 @@ class TimeDiffusion:
         return this_proc_gen_batches
 
     @log_state(state_logger)
-    def _save_pipeline(self):
+    def _save_pipeline(self, called_on_main_process_only: bool = False):
         """
         Save the net, time encoder, and dynamic config to disk as an independent pretrained pipeline.
         Also save the current ResumingArgs to that same folder for later "model save" resuming.
 
-        Can be called by all processes (only main will actually save).
+        Can be called by all processes (only main will actually save), or by main only (then no barrier).
         """
         # net
         self.accelerator.unwrap_model(self.net).save_pretrained(
@@ -1606,7 +1677,9 @@ class TimeDiffusion:
             }
             resuming_args = ResumingArgs.from_dict(training_info_for_resume)
             resuming_args.to_json(self.model_save_folder / ResumingArgs.json_state_filename)
-        self.accelerator.wait_for_everyone()
+
+        if not called_on_main_process_only:
+            self.accelerator.wait_for_everyone()
 
         self.logger.info(
             f"Saved net, video time encoder, dynamic config, and resuming args to {self.model_save_folder}"
