@@ -813,7 +813,7 @@ class TimeDiffusion:
             self.logger,
             eval_strat.name,
             "simple_generations",
-            ["-1_1 raw", "image min-max", "-1_1 clipped"],
+            ["-1_1 raw"],
             captions=[f"time: {round(t.item(), 3)}" for t in random_video_time],
         )
 
@@ -897,7 +897,7 @@ class TimeDiffusion:
                 self.logger,
                 eval_strat.name,
                 "starting_samples",
-                ["-1_1 raw", "image min-max"],
+                ["-1_1 raw"],
                 split_name=split,
             )
 
@@ -934,12 +934,12 @@ class TimeDiffusion:
                 self.logger,
                 eval_strat.name,
                 "regenerations",
-                ["image min-max", "-1_1 raw", "-1_1 clipped"],
+                ["-1_1 raw"],
                 split_name=split,
             )
 
             # 4. Generate the trajectory from it
-            # TODO: parallelize the generation along video time?
+            # TODO: parallelize the generation along video time
             video = []
             video_time_pbar = pbar_manager.counter(
                 total=self.cfg.evaluation.nb_video_timesteps,
@@ -986,7 +986,7 @@ class TimeDiffusion:
                 self.logger,
                 eval_strat.name,
                 "trajectories",
-                ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
+                ["-1_1 raw"],
                 split_name=split,
             )
             eval_batches_pbar.update()
@@ -1484,12 +1484,13 @@ class TimeDiffusion:
         metrics_dict: dict[str, dict[str, float]] = {}
         for task in tasks_for_this_process:
             if task == "all_classes":
+                true_samples_path = Path(self.cfg.dataset.path)
                 self.logger.debug(
-                    f"Computing metrics against true samples at {Path(self.cfg.dataset.path).as_posix()} on process {self.accelerator.process_index}",
+                    f"Computing metrics against {len(list(true_samples_path.iterdir()))} true samples at {true_samples_path.as_posix()} on process {self.accelerator.process_index}",
                     main_process_only=False,
                 )
                 metrics = torch_fidelity.calculate_metrics(
-                    input1=Path(self.cfg.dataset.path).as_posix(),
+                    input1=true_samples_path.as_posix(),
                     input2=metrics_computation_folder.as_posix(),
                     cuda=True,
                     batch_size=eval_strat.batch_size * 4,  # TODO: optimize
@@ -1504,7 +1505,7 @@ class TimeDiffusion:
             else:
                 assert isinstance(task, int)
                 self.logger.debug(
-                    f"Computing metrics against true samples at {true_data_classes_paths[task]} on process {self.accelerator.process_index}",
+                    f"Computing metrics against {len(list(Path(true_data_classes_paths[task]).iterdir()))} true samples at {true_data_classes_paths[task]} on process {self.accelerator.process_index}",
                     main_process_only=False,
                 )
                 metrics = torch_fidelity.calculate_metrics(

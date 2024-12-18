@@ -1,3 +1,4 @@
+import random
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -7,17 +8,17 @@ from PIL import Image
 from rich.traceback import install
 from tqdm.rich import tqdm
 
-sys.path.insert(0, "..")
+sys.path.insert(0, Path(__file__).resolve().parents[1].as_posix())
 from GaussianProxy.utils.misc import generate_all_augs
 
 install()
 
 ###################################################### Arguments ######################################################
 DATASET_BASE_PATH = Path(
-    "/projects/static2dynamic/datasets/biotine/3_channels_min_99_perc_normalized_rgb_stacks_png/patches_255"
+    "/projects/static2dynamic/datasets/20231017ChromaLive_6hr_4ch/MIP_normalized/paired_dataset/patches"
 )
 EXTENSION = "png"
-DEBUG = True
+DEBUG = False
 TRANSFORMS = ["RandomHorizontalFlip", "RandomVerticalFlip", "RandomRotationSquareSymmetry"]
 
 ######################################################### Info ########################################################
@@ -27,7 +28,7 @@ print("DEBUG:", DEBUG, flush=True)
 sleep(3)
 
 
-def ending(path: Path, n):
+def ending(path: Path, n: int):
     return Path(*path.parts[-n:])
 
 
@@ -54,6 +55,7 @@ if __name__ == "__main__":
     # create augmented subdirs in a adjacent dir to the base dataset one
     aug_subdir_path = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
     print(f"Saving augmented images at {aug_subdir_path}")
+    sleep(3)
     for subdir_name in subdirs_names:
         (aug_subdir_path / subdir_name).mkdir(parents=True, exist_ok=True)
 
@@ -61,6 +63,9 @@ if __name__ == "__main__":
     pbar = tqdm(total=len(all_files), desc="Saving augmented images")
 
     with ProcessPoolExecutor() as executor:
+        if DEBUG:
+            print("DEBUG MODE: only testing 30 random patches")
+            all_files = random.sample(all_files, 30)
         futures = {executor.submit(augment_save_one_file, file, aug_subdir_path): file for file in all_files}
         for future in as_completed(futures):
             try:
@@ -72,10 +77,11 @@ if __name__ == "__main__":
     pbar.close()
 
     # check result
-    for subdir_name in subdirs_names:
-        found_nb = len(list((aug_subdir_path / subdir_name).glob(f"*.{EXTENSION}")))
-        expected_nb = 8 * len(list((DATASET_BASE_PATH / subdir_name).glob(f"*.{EXTENSION}")))
-        assert (
-            found_nb == expected_nb
-        ), f"Expected {expected_nb} files in {ending(aug_subdir_path / subdir_name, 2)}, found {found_nb}"
-    print("All checks passed")
+    if not DEBUG:
+        for subdir_name in subdirs_names:
+            found_nb = len(list((aug_subdir_path / subdir_name).glob(f"*.{EXTENSION}")))
+            expected_nb = 8 * len(list((DATASET_BASE_PATH / subdir_name).glob(f"*.{EXTENSION}")))
+            assert (
+                found_nb == expected_nb
+            ), f"Expected {expected_nb} files in {ending(aug_subdir_path / subdir_name, 2)}, found {found_nb}"
+        print("All checks passed")

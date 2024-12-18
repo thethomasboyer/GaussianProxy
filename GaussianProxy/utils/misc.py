@@ -241,17 +241,26 @@ def save_eval_artifacts_log_to_wandb(
     )
 
     # 3. Log to W&B (main process only)
-    # transform 1-channel images into fake 3-channel RGB images for compatibility
-    if sel_to_save.shape[tensors_to_save.ndim - 3] != 3:
-        assert (
-            sel_to_save.shape[tensors_to_save.ndim - 3] == 1
-        ), f"Expected 1 or 3 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
+    if sel_to_save.shape[tensors_to_save.ndim - 3] == 1:
+        # transform 1-channel images into fake 3-channel RGB images for compatibility
         logger.debug(f"Adding fake channels trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3}")
         sel_to_save = torch.cat(
             [sel_to_save, torch.zeros_like(sel_to_save), torch.zeros_like(sel_to_save)],
             dim=-3,
         )
+    elif sel_to_save.shape[tensors_to_save.ndim - 3] == 4:
+        # transform 4-channel images into 3-channel RGB images for compatibility
+        logger.debug(f"Composing RGB images from 4-channel images at dim {tensors_to_save.ndim - 3}")
+        logger.debug("WARNING: the 4th channel is discarded")
+        sel_to_save = sel_to_save[:, :3]  # TODO: actually compose from 4 channels
+    else:
+        assert (
+            sel_to_save.shape[tensors_to_save.ndim - 3] == 3
+        ), f"Expected 1, 3 or 4 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
+
+    # normalize images / videos for logging
     normalized_elements_for_logging = _normalize_elements_for_logging(sel_to_save, logging_normalization)
+
     # videos case
     if tensors_to_save.ndim == 5:
         assert (
@@ -274,7 +283,8 @@ def save_eval_artifacts_log_to_wandb(
             logger.debug(
                 f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B at step {global_optimization_step}",
             )
-    # images case (inverted Gaussians)
+
+    # images case
     else:
         match artifact_name:
             case "inversions":
@@ -665,7 +675,7 @@ def hard_augment_dataset_all_square_symmetries(
     Each image will be augmented with the 8 square symmetries (Dih4)
     and saved in the same subfolder with '_aug_<idx>' appended.
 
-    This function should only be ran on main process.
+    **This function should only be ran on main process!**
     """
     # Get all base images
     all_base_imgs = list(dataset_path.rglob(f"*.{files_ext}"))
@@ -674,7 +684,9 @@ def hard_augment_dataset_all_square_symmetries(
 
     # Save augmented images
     logger.debug("Writing augmented datasets to disk")
-    pbar = pbar_manager.counter(total=..., unit="base image", desc="Saving augmented images", position=pbar_pos)
+    pbar = pbar_manager.counter(
+        total=len(all_base_imgs), unit="base image", desc="Saving augmented images", position=pbar_pos
+    )
 
     def aug_save_img(base_img_path: Path):
         base_img = Image.open(base_img_path)
@@ -682,7 +694,6 @@ def hard_augment_dataset_all_square_symmetries(
         for aug_idx, aug in enumerate(augs[1:]):  # skip the original image
             save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}.{base_img_path.suffix}"
             aug.save(save_path)
-        pbar.update()
 
     with ThreadPoolExecutor() as executor:
         futures = []
@@ -691,5 +702,6 @@ def hard_augment_dataset_all_square_symmetries(
 
         for future in as_completed(futures):
             future.result()  # raises exception if any
+            pbar.update()
 
     pbar.close()

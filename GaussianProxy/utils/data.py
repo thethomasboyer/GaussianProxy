@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+import tifffile
 import torchvision.transforms.functional as tf
 from accelerate.logging import MultiProcessAdapter
 from hydra.utils import instantiate
@@ -103,6 +104,20 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name.split("_")[1]),
                 dataset_class=ImageDataset,
             )
+        case "chromaLive6h_4ch_tif_patches_380px":
+            ds_params = DatasetParams(
+                file_extension="tif",
+                key_transform=str,
+                sorting_func=lambda subdir: int(subdir.name.split("_")[1]),
+                dataset_class=TIFFDataset,
+            )
+        case "chromaLive6h_3ch_png_patches_380px":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=str,
+                sorting_func=lambda subdir: int(subdir.name.split("_")[1]),
+                dataset_class=ImageDataset,
+            )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
@@ -128,7 +143,9 @@ def _dataset_builder(
         timestep = subdir.name
         timestep = dataset_params.key_transform(timestep)
         files_dict_per_time[timestep] = subdir_files  # pyright: ignore[reportArgumentType]
-    logger.debug(f"Found {sum([len(f) for f in files_dict_per_time.values()])} files in total")
+    tot_nb_files_found = sum([len(f) for f in files_dict_per_time.values()])
+    assert tot_nb_files_found != 0, f"No files found in {database_path} with extension {dataset_params.file_extension}"
+    logger.debug(f"Found {tot_nb_files_found} files in total")
 
     # selected files
     if not OmegaConf.is_missing(cfg.dataset, "selected_dists") and cfg.dataset.selected_dists is not None:
@@ -327,6 +344,17 @@ class ImageDataset(BaseDataset):
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
         return from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
+
+
+class TIFFDataset(BaseDataset):
+    """Just a dataset loading TIFF images, and moving the channel dim last."""
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        array = tifffile.imread(path)
+        if array.dtype == np.uint16:
+            # from_numpy does not support uint16, so convert to int32 to not loose precision
+            array = array.astype(np.int32, casting="safe")
+        return from_numpy(array).permute(2, 0, 1)
 
 
 class RandomRotationSquareSymmetry(Transform):
