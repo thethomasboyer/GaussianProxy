@@ -161,7 +161,7 @@ class TimeDiffusion:
 
     @property
     def timesteps_names_to_floats(self) -> dict[str, float]:
-        """dict of empirical distribution names to their float representation"""
+        """dict of empirical distribution str names to their float representation"""
         if self._timesteps_names_to_floats is None:
             raise RuntimeError(
                 "timesteps_names_to_floats is not set; _fit_init should be called before trying to access it"
@@ -170,7 +170,7 @@ class TimeDiffusion:
 
     @property
     def timesteps_floats_to_names(self) -> dict[float, str]:
-        """dict of empirical distribution floats to their names representation"""
+        """dict of empirical distribution floats to their str names representation"""
         if self._timesteps_floats_to_names is None:
             raise RuntimeError(
                 "timesteps_floats_to_names is not set; _fit_init should be called before trying to access it"
@@ -1372,7 +1372,11 @@ class TimeDiffusion:
             ), f"Expected all true data paths to be hard augmented, got:\n{true_data_classes_paths}"
 
         # use training time encodings
-        eval_video_time = torch.tensor(self.empirical_dists_timesteps).to(self.accelerator.device)
+        eval_video_time = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
+        self.logger.info(
+            f"Selected video times for metrics computation: {eval_video_time} from {eval_strat.selected_times}"
+        )
+        eval_video_time = torch.tensor(eval_video_time).to(self.accelerator.device)
         eval_video_time_enc = inference_video_time_encoding.forward(eval_video_time)
 
         ##### 1. Generate the samples
