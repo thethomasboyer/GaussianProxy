@@ -270,7 +270,6 @@ class TimeDiffusion:
             desc="Training batches" + 10 * " ",
             enable=self.accelerator.is_main_process,
             leave=False,
-            min_delta=1,
             count=init_count,
         )
         if self.accelerator.is_main_process:
@@ -281,16 +280,12 @@ class TimeDiffusion:
             self.logger,
             self.cfg.training.nb_time_samplings - init_count,
         ):
-            # gradient step here
-            self._fit_one_batch(batch, time)
-            # take one profiler step
-            if profiler is not None:
-                profiler.step()
+            ### first check if checkpoint or evaluation at *this* opt step (before next gradient step)
             # checkpoint
-            if self.global_optimization_step % self.cfg.checkpointing.checkpoint_every_n_steps == 0:
+            if self.global_optimization_step % self.cfg.checkpointing.checkpoint_every_n_steps == 0 and (
+                self.global_optimization_step != 0 or self.eval_on_start
+            ):
                 self._checkpoint()
-            # update pbar
-            batches_pbar.update()
             # evaluate models every n optimisation steps
             if (
                 self.cfg.evaluation.every_n_opt_steps is not None
@@ -304,17 +299,23 @@ class TimeDiffusion:
                 )
                 # reset network to the right mode
                 self.net.train()
+                self.logger.info(f"Resuming training after evaluation during step {self.global_optimization_step}")
 
-            # Update global opt step at very end of everything
+            ### Then train for one gradient step
+            # gradient step here
+            self._fit_one_batch(batch, time)
+            # take one profiler step
+            if profiler is not None:
+                profiler.step()
+
+            ### Update global opt step and pbar at very end of everything
             self.global_optimization_step += 1
+            batches_pbar.update()
 
-        batches_pbar.close()
+        batches_pbar.close(clear=True)
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
         gantt_chart = state_logger.create_gantt_chart()
-        self.accelerator.log(
-            {"state_timeline/": wandb.Plotly(gantt_chart)},
-            step=self.global_optimization_step,
-        )
+        self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)})
 
         if profiler is not None:
             profiler.stop()
@@ -578,8 +579,7 @@ class TimeDiffusion:
                 "training/step": self.global_optimization_step,
                 "training/time": time,
                 "training/L2 gradient norm": grad_norm,
-            },
-            step=self.global_optimization_step,
+            }
         )
 
     def _unet2d_pred(
@@ -756,12 +756,12 @@ class TimeDiffusion:
                     if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":  # pyright: ignore[reportAttributeAccessIssue]
                         # use the hard augmented version of the dataset if it's not the one we are already training on
                         if "_hard_augmented" not in this_class_path.parent.name:
-                            self.logger.debug(
-                                f"Using hard augmented version of {this_class_path}: {this_class_path.parent.name}_hard_augmented"
-                            )
                             hard_augmented_dataset_path = (
                                 this_class_path.parent.with_name(this_class_path.parent.name + "_hard_augmented")
                                 / this_class_path.name
+                            )
+                            self.logger.debug(
+                                f"Using hard augmented version of {this_class_path}: {hard_augmented_dataset_path}"
                             )
                         else:
                             hard_augmented_dataset_path = this_class_path
@@ -844,7 +844,7 @@ class TimeDiffusion:
             captions=[f"time: {round(t.item(), 3)}" for t in random_video_time],
         )
 
-        gen_pbar.close()
+        gen_pbar.close(clear=True)
 
     @log_state(state_logger)
     @torch.inference_mode()
@@ -1020,7 +1020,7 @@ class TimeDiffusion:
             # wait for everyone between each split
             self.accelerator.wait_for_everyone()
 
-        eval_batches_pbar.close()
+        eval_batches_pbar.close(clear=True)
         self.logger.info(
             f"Finished InvertedRegeneration on process ({self.accelerator.process_index})",
             main_process_only=False,
@@ -1174,7 +1174,7 @@ class TimeDiffusion:
             eval_batches_pbar.update()
             break  # TODO: clean this up either by making this smol-batch-logging and duplicating it on train data
 
-        eval_batches_pbar.close()
+        eval_batches_pbar.close(clear=True)
         self.logger.info(
             f"Finished IterativeInvertedRegeneration on process ({self.accelerator.process_index})",
             main_process_only=False,
@@ -1329,7 +1329,7 @@ class TimeDiffusion:
             eval_batches_pbar.update()
             break  # TODO: clean this up either by making this smol-batch-logging and duplicating it on train data
 
-        eval_batches_pbar.close()
+        eval_batches_pbar.close(clear=True)
         self.logger.info(
             f"Finished ForwardNoising on process ({self.accelerator.process_index})",
             main_process_only=False,
@@ -1445,15 +1445,15 @@ class TimeDiffusion:
                     self.accelerator.process_index,
                 )
 
-                gen_pbar.close()
+                gen_pbar.close(clear=True)
 
-            batches_pbar.close()
+            batches_pbar.close(clear=True)
             # wait for everyone at end of each time (should be enough to avoid timeouts)
             self.accelerator.wait_for_everyone()
 
-        video_times_pbar.close()
+        video_times_pbar.close(clear=True)
         # no need to wait here then
-        self.logger.info("Finished image generation")
+        self.logger.debug("Finished image generation in MetricsComputation")
 
         ##### 1.5 Augment the generated samples if applicable
         if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
@@ -1504,7 +1504,9 @@ class TimeDiffusion:
         # tasks = ["all_classes"] + list(self.timesteps_names_to_floats.keys())
         tasks = list(self.timesteps_names_to_floats.keys())  # time names
         tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
-        self.logger.debug(f"Tasks for this process: {tasks_for_this_process}", main_process_only=False)
+        self.logger.debug(
+            f"Tasks for process {self.accelerator.process_index}: {tasks_for_this_process}", main_process_only=False
+        )
 
         self.logger.info("Computing metrics...")
         metrics_dict: dict[str, dict[str, float]] = {}
@@ -1573,10 +1575,9 @@ class TimeDiffusion:
             # log it
             self.accelerator.log(
                 {
-                    f"evaluation/{time_name}": this_time_metrics
+                    f"evaluation/{time_name}/": this_time_metrics
                     for time_name, this_time_metrics in final_metrics_dict.items()
-                },
-                step=self.global_optimization_step,
+                }
             )
             self.logger.info(
                 f"Logged metrics {final_metrics_dict}",
@@ -1598,9 +1599,7 @@ class TimeDiffusion:
                 self.cfg.debug or self.best_metric_to_date > final_metrics_dict[key]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
             ):
                 self.best_metric_to_date = final_metrics_dict[key]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
-                self.accelerator.log(
-                    {"training/best_metric_to_date": self.best_metric_to_date}, step=self.global_optimization_step
-                )
+                self.accelerator.log({"training/best_metric_to_date": self.best_metric_to_date})
                 self.logger.info(f"Saving best model to date with class='{key}' FID: {self.best_metric_to_date}")
                 self._save_pipeline(called_on_main_process_only=True)
 

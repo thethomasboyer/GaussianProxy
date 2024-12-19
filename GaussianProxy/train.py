@@ -247,6 +247,9 @@ def main(cfg: Config) -> None:
     torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.allow_tf32 = True
 
+    # ----------------------------------- Evaluation ----------------------------------
+    logger.info(f"Will use evaluation: {cfg.evaluation}")
+
     # ----------------------------------- Optimizer -----------------------------------
     # scale the learning rate with the square root of the number of GPUs
     logger.info(
