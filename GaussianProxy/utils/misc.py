@@ -14,7 +14,6 @@ import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from diffusers.configuration_utils import FrozenDict
-from enlighten import Manager
 from numpy import ndarray
 from omegaconf import OmegaConf
 from PIL import Image
@@ -139,7 +138,7 @@ def modify_args_for_debug(
             assert hasattr(strat, "batch_size"), "Expected batch_size to be present"
             # only change it if it's a hard-coded value
             if isinstance(getattr(strat, "nb_samples_to_gen_per_time"), int):
-                setattr(strat, "nb_samples_to_gen_per_time", getattr(strat, "batch_size"))
+                setattr(strat, "nb_samples_to_gen_per_time", 2 * getattr(strat, "batch_size"))
     # TODO: update registered wandb config
 
 
@@ -663,9 +662,7 @@ def _generate_all_augs_pil(img: Image.Image, transforms: list[type] | list[str])
     return aug_imgs
 
 
-def hard_augment_dataset_all_square_symmetries(
-    dataset_path: Path, logger: MultiProcessAdapter, pbar_manager: Manager, pbar_pos: int, files_ext: str
-):
+def hard_augment_dataset_all_square_symmetries(dataset_path: Path, logger: MultiProcessAdapter, files_ext: str):
     """
     Save ("in-place") the 8 augmented versions of each image in the given `dataset_path`.
 
@@ -684,9 +681,6 @@ def hard_augment_dataset_all_square_symmetries(
 
     # Save augmented images
     logger.debug("Writing augmented datasets to disk")
-    pbar = pbar_manager.counter(
-        total=len(all_base_imgs), unit="base image", desc="Saving augmented images", position=pbar_pos
-    )
 
     def aug_save_img(base_img_path: Path):
         base_img = Image.open(base_img_path)
@@ -695,13 +689,12 @@ def hard_augment_dataset_all_square_symmetries(
             save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}.{base_img_path.suffix}"
             aug.save(save_path)
 
+    futures = []
     with ThreadPoolExecutor() as executor:
-        futures = []
         for base_img in all_base_imgs:
             futures.append(executor.submit(aug_save_img, base_img))
 
         for future in as_completed(futures):
             future.result()  # raises exception if any
-            pbar.update()
 
-    pbar.close()
+    logger.debug("Finished augmenting datasets to disk")
