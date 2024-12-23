@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
 
 import numpy as np
 import tifffile
@@ -20,9 +20,120 @@ from torchvision.transforms.v2 import Transform
 from GaussianProxy.conf.training_conf import Config, DatasetParams
 
 
+class BaseDataset(Dataset[Tensor]):
+    """Just a dataset."""
+
+    def __init__(
+        self,
+        samples: list[Path],
+        transforms: Callable,
+        expected_initial_data_range: Optional[tuple[float, float]] = None,
+        expected_dtype: Optional[dtype] = None,  # TODO: this is never set?!?
+    ) -> None:
+        """
+        - base_path (`Path`): the path to the dataset directory
+        """
+        super().__init__()
+        self.samples = samples
+        self.transforms = transforms
+        self.expected_initial_data_range = expected_initial_data_range
+        self.expected_dtype = expected_dtype
+        # common base path for the dataset
+        # Create train dataloader
+        base_path = samples[0].parents[1]
+        assert all(
+            (this_sample_base_path := f.parents[1]) == base_path for f in samples
+        ), f"All files should be under the same directory, got base_path={base_path} and sample_base_path={this_sample_base_path}"
+        self.base_path = base_path
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        raise NotImplementedError("Subclasses must implement this method")
+
+    def load_to_pt_and_transform(self, path: str | Path) -> Tensor:
+        # load data
+        t = self._raw_file_loader(path)
+        # checks
+        if self.expected_initial_data_range is not None:
+            if t.min() < self.expected_initial_data_range[0] or t.max() > self.expected_initial_data_range[1]:
+                raise ValueError(
+                    f"Expected initial data range {self.expected_initial_data_range} but got [{t.min()}, {t.max()}] at {path}"
+                )
+        if self.expected_dtype is not None:
+            if t.dtype != self.expected_dtype:
+                raise ValueError(f"Expected dtype {self.expected_dtype} but got {t.dtype} at {path}")
+        # transform
+        t = self.transforms(t)
+        return t
+
+    def __getitem__(self, index: int) -> Tensor:
+        path = self.samples[index]
+        sample = self.load_to_pt_and_transform(path)
+        return sample
+
+    def __getitems__(self, indexes: list[int]) -> list[Tensor]:
+        paths = [self.samples[idx] for idx in indexes]
+        samples = self.get_items_by_name(paths)
+        return samples
+
+    def get_items_by_name(self, names: list[str | Path] | list[str] | list[Path]) -> list[Tensor]:
+        samples = [self.load_to_pt_and_transform(p) for p in names]
+        return samples
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __repr__(self) -> str:
+        head = self.__class__.__name__
+        body_lines = [f"Number of datapoints: {self.__len__()}"]
+        if self.expected_initial_data_range is not None:
+            body_lines.append(f"Expected initial data range: {self.expected_initial_data_range}")
+        # Indent each line in the body
+        indented_body_lines = [" " * 4 + line for line in body_lines]
+        return "\n".join([head] + indented_body_lines)
+
+
+class NumpyDataset(BaseDataset):
+    """Just a dataset loading NumPy arrays."""
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        return from_numpy(np.load(path))
+
+
+class ImageDataset(BaseDataset):
+    """Just a dataset loading images, and moving the channel dim last."""
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        return from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
+
+
+class TIFFDataset(BaseDataset):
+    """Just a dataset loading TIFF images, and moving the channel dim last."""
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        array = tifffile.imread(path)
+        if array.dtype == np.uint16:
+            # from_numpy does not support uint16, so convert to int32 to not loose precision
+            array = array.astype(np.int32, casting="safe")
+        return from_numpy(array).permute(2, 0, 1)
+
+
+class RandomRotationSquareSymmetry(Transform):
+    """Randomly rotate the input by a multiple of π/2."""
+
+    def __init__(self):
+        super().__init__()
+
+    def _transform(self, inpt: Tensor, params) -> Tensor:
+        rot = 90 * np.random.randint(4)
+        return tf.rotate(inpt, rot)
+
+
+TimeKey = TypeVar("TimeKey", int, str)
+
+
 def setup_dataloaders(
     cfg: Config, num_workers: int, logger: MultiProcessAdapter, debug: bool = False
-) -> tuple[dict[int, DataLoader], dict[int, DataLoader]] | tuple[dict[str, DataLoader], dict[str, DataLoader]]:
+) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
     Each dataloader is a `torch.utils.data.DataLoader` over a custom `Dataset`.
@@ -131,13 +242,13 @@ def _dataset_builder(
     logger: MultiProcessAdapter,
     debug: bool = False,
     train_split_frac: float = 0.9,
-) -> tuple[dict[int, DataLoader], dict[int, DataLoader]] | tuple[dict[str, DataLoader], dict[str, DataLoader]]:
+) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
     """Builds the train & test dataloaders."""
     database_path = Path(cfg.dataset.path)
     subdirs = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=dataset_params.sorting_func)
 
-    files_dict_per_time: dict[int, list[Path]] | dict[str, list[Path]] = {}
+    files_dict_per_time: dict[TimeKey, list[Path]] = {}
     for subdir in subdirs:
         subdir_files = sorted(subdir.glob(f"*.{dataset_params.file_extension}"))
         timestep = subdir.name
@@ -161,9 +272,12 @@ def _dataset_builder(
     train_dataloaders_dict = {}
     test_dataloaders_dict = {}
     transforms = instantiate(cfg.dataset.transforms)
+    # no flips nor rotations for consistent evaluation
+    test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
     logger.warning(
         f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
     )
+    logger.warning(f"Using test transforms: {test_transforms}")
     if debug:
         logger.warning("Debug mode: limiting test dataloader to 2 evaluation batch")
     # time per time
@@ -191,8 +305,12 @@ def _dataset_builder(
         assert (
             set(train_files) | (set(test_files)) == set(files)
         ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
-        # Create train dataloader
-        train_ds = dataset_params.dataset_class(train_files, transforms, cfg.dataset.expected_initial_data_range)
+        ### Create train dataloader
+        train_ds = dataset_params.dataset_class(
+            samples=train_files,
+            transforms=transforms,
+            expected_initial_data_range=cfg.dataset.expected_initial_data_range,
+        )
         assert (
             train_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
@@ -212,10 +330,12 @@ def _dataset_builder(
             pin_memory=cfg.dataloaders.pin_memory,
             persistent_workers=cfg.dataloaders.persistent_workers,
         )
-        # Create test dataloader
-        # no flips nor rotations for consistent evaluation
-        test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
-        test_ds = dataset_params.dataset_class(test_files, test_transforms, cfg.dataset.expected_initial_data_range)
+        ### Create test dataloader
+        test_ds = dataset_params.dataset_class(
+            samples=test_files,
+            transforms=test_transforms,
+            expected_initial_data_range=cfg.dataset.expected_initial_data_range,
+        )
         assert (
             test_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
@@ -225,9 +345,11 @@ def _dataset_builder(
             batch_size=cfg.evaluation.batch_size,
             shuffle=False,  # keep the order for consistent logging
         )
+
     # print some info about the datasets
     _print_short_datasets_info(train_reprs_to_log, logger, "Train datasets:")
     _print_short_datasets_info(test_reprs_to_log, logger, "Test datasets:")
+
     # Return the dataloaders
     return train_dataloaders_dict, test_dataloaders_dict
 
@@ -268,101 +390,3 @@ def _print_short_datasets_info(reprs_to_log: list[str], logger: MultiProcessAdap
             complete_str += " | ".join(this_line_all_ds) + "\n"
         complete_str += "\n"
     logger.info(complete_str)
-
-
-class BaseDataset(Dataset[Tensor]):
-    """Just a dataset."""
-
-    def __init__(
-        self,
-        samples: list[str] | list[Path],
-        transforms: Callable,
-        expected_initial_data_range: Optional[tuple[float, float]] = None,
-        expected_dtype: Optional[dtype] = None,  # TODO: this is never set?!?
-    ) -> None:
-        super().__init__()
-        self.samples = samples
-        self.transforms = transforms
-        self.expected_initial_data_range = expected_initial_data_range
-        self.expected_dtype = expected_dtype
-
-    def _raw_file_loader(self, path: str | Path) -> Tensor:
-        raise NotImplementedError("Subclasses must implement this method")
-
-    def load_to_pt_and_transform(self, path: str | Path) -> Tensor:
-        # load data
-        t = self._raw_file_loader(path)
-        # checks
-        if self.expected_initial_data_range is not None:
-            if t.min() < self.expected_initial_data_range[0] or t.max() > self.expected_initial_data_range[1]:
-                raise ValueError(
-                    f"Expected initial data range {self.expected_initial_data_range} but got [{t.min()}, {t.max()}] at {path}"
-                )
-        if self.expected_dtype is not None:
-            if t.dtype != self.expected_dtype:
-                raise ValueError(f"Expected dtype {self.expected_dtype} but got {t.dtype} at {path}")
-        # transform
-        t = self.transforms(t)
-        return t
-
-    def __getitem__(self, index: int) -> Tensor:
-        path = self.samples[index]
-        sample = self.load_to_pt_and_transform(path)
-        return sample
-
-    def __getitems__(self, indexes: list[int]) -> list[Tensor]:
-        paths = [self.samples[idx] for idx in indexes]
-        samples = self.get_items_by_name(paths)
-        return samples
-
-    def get_items_by_name(self, names: list[str | Path] | list[str] | list[Path]) -> list[Tensor]:
-        samples = [self.load_to_pt_and_transform(p) for p in names]
-        return samples
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __repr__(self) -> str:
-        head = self.__class__.__name__
-        body_lines = [f"Number of datapoints: {self.__len__()}"]
-        if self.expected_initial_data_range is not None:
-            body_lines.append(f"Expected initial data range: {self.expected_initial_data_range}")
-        # Indent each line in the body
-        indented_body_lines = [" " * 4 + line for line in body_lines]
-        return "\n".join([head] + indented_body_lines)
-
-
-class NumpyDataset(BaseDataset):
-    """Just a dataset loading NumPy arrays."""
-
-    def _raw_file_loader(self, path: str | Path) -> Tensor:
-        return from_numpy(np.load(path))
-
-
-class ImageDataset(BaseDataset):
-    """Just a dataset loading images, and moving the channel dim last."""
-
-    def _raw_file_loader(self, path: str | Path) -> Tensor:
-        return from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
-
-
-class TIFFDataset(BaseDataset):
-    """Just a dataset loading TIFF images, and moving the channel dim last."""
-
-    def _raw_file_loader(self, path: str | Path) -> Tensor:
-        array = tifffile.imread(path)
-        if array.dtype == np.uint16:
-            # from_numpy does not support uint16, so convert to int32 to not loose precision
-            array = array.astype(np.int32, casting="safe")
-        return from_numpy(array).permute(2, 0, 1)
-
-
-class RandomRotationSquareSymmetry(Transform):
-    """Randomly rotate the input by a multiple of π/2."""
-
-    def __init__(self):
-        super().__init__()
-
-    def _transform(self, inpt: Tensor, params) -> Tensor:
-        rot = 90 * np.random.randint(4)
-        return tf.rotate(inpt, rot)

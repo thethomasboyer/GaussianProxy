@@ -489,6 +489,7 @@ def save_images_for_metrics_compute(
     save_folder: Path,
     process_idx: Optional[int] = None,
 ):
+    """Saves to [0; 255] uint8 PNG images in the given folder."""
     # Checks
     assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
     save_folder.mkdir(parents=True, exist_ok=True)
@@ -682,11 +683,11 @@ def hard_augment_dataset_all_square_symmetries(dataset_path: Path, logger: Multi
         base_img = Image.open(base_img_path)
         augs = generate_all_augs(base_img, [RandomRotationSquareSymmetry, RandomHorizontalFlip, RandomVerticalFlip])
         for aug_idx, aug in enumerate(augs[1:]):  # skip the original image
-            save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}.{base_img_path.suffix}"
+            save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}{base_img_path.suffix}"
             aug.save(save_path)
 
     futures = []
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor() as executor:  # TODO: try processes if this becomes long
         for base_img in all_base_imgs:
             futures.append(executor.submit(aug_save_img, base_img))
 

@@ -24,6 +24,8 @@ from torch.optim.optimizer import Optimizer
 from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.transforms.transforms import Compose
 
 from GaussianProxy.conf.training_conf import (
     Config,
@@ -33,7 +35,7 @@ from GaussianProxy.conf.training_conf import (
     MetricsComputation,
     SimpleGeneration,
 )
-from GaussianProxy.utils.data import BaseDataset
+from GaussianProxy.utils.data import BaseDataset, TimeKey
 from GaussianProxy.utils.misc import (
     StateLogger,
     get_evenly_spaced_timesteps,
@@ -198,8 +200,8 @@ class TimeDiffusion:
 
     def fit(
         self,
-        train_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
-        test_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
+        train_dataloaders: dict[TimeKey, DataLoader],
+        test_dataloaders: dict[TimeKey, DataLoader],
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
         logger: MultiProcessAdapter,
@@ -214,7 +216,7 @@ class TimeDiffusion:
         Global high-level fitting method.
 
         Arguments:
-            train_dataloaders (dict[int, DataLoader] | dict[str, DataLoader])
+            train_dataloaders (dict[TimeKey, DataLoader])
             Dictionary of "_fake_"training dataloaders. The actual training batch creation is done in the `_yield_data_batches` method.
         """
         logger.debug(
@@ -322,7 +324,7 @@ class TimeDiffusion:
 
     def _fit_init(
         self,
-        train_dataloaders: dict[int, DataLoader] | dict[str, DataLoader],
+        train_dataloaders: dict[TimeKey, DataLoader],
         chckpt_save_path: Path,
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
@@ -743,44 +745,15 @@ class TimeDiffusion:
                 )
 
             elif eval_strat.name == "MetricsComputation":
-                true_data_classes_paths: dict[str, str] = {}  # time names to str paths
-                for time_float, dl in test_dataloaders.items():
-                    inner_ds = dl.dataset
-                    if not isinstance(inner_ds, BaseDataset):
-                        raise ValueError(
-                            f"Expected a `BaseDataset` for the underlying dataset of the evaluation dataloader, got {type(inner_ds)}"
-                        )
-                    # assuming they all share the same parent...
-                    this_class_path = Path(inner_ds.samples[0]).parent
-                    tp_name = self.timesteps_floats_to_names[time_float]
-                    if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":  # pyright: ignore[reportAttributeAccessIssue]
-                        # use the hard augmented version of the dataset if it's not the one we are already training on
-                        if "_hard_augmented" not in this_class_path.parent.name:
-                            hard_augmented_dataset_path = (
-                                this_class_path.parent.with_name(this_class_path.parent.name + "_hard_augmented")
-                                / this_class_path.name
-                            )
-                            self.logger.debug(
-                                f"Using hard augmented version of {this_class_path}: {hard_augmented_dataset_path}"
-                            )
-                        else:
-                            hard_augmented_dataset_path = this_class_path
-                        # check if it exists
-                        assert (
-                            hard_augmented_dataset_path.exists()
-                        ), f"hard augmented dataset does not exist at {hard_augmented_dataset_path} "
-                        true_data_classes_paths[tp_name] = hard_augmented_dataset_path.as_posix()
-                    else:
-                        true_data_classes_paths[tp_name] = this_class_path.as_posix()
                 self._metrics_computation(
                     tmp_save_folder,
                     pbar_manager,
                     eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
-                    true_data_classes_paths,
+                    raw_train_dataloaders,
+                    test_dataloaders,
                 )
-
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -1344,7 +1317,9 @@ class TimeDiffusion:
         eval_strat: MetricsComputation,
         eval_net: UNet2DModel | UNet2DConditionModel,
         inference_video_time_encoding: VideoTimeEncoding,
-        true_data_classes_paths: dict[str, str],
+        train_data_dataloaders: dict[float, DataLoader],
+        test_data_dataloaders: dict[float, DataLoader],
+        # dataset_class: type[BaseDataset],
     ):
         """
         Compute metrics such as FID.
@@ -1362,27 +1337,26 @@ class TimeDiffusion:
             f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
             main_process_only=False,
         )
-        metrics_computation_folder = tmp_save_folder / "metrics_computation"
-        assert (
-            len(self.empirical_dists_timesteps) == len(true_data_classes_paths)
-        ), f"Mismatch between number of timesteps and classes: empirical_dists_timesteps={self.empirical_dists_timesteps}, true_data_classes_paths={true_data_classes_paths}"
-        if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-            assert all(
-                "hard_augmented" in true_data_classes_paths[key] for key in true_data_classes_paths
-            ), f"Expected all true data paths to be hard augmented, got:\n{true_data_classes_paths}"
+        metrics_computation_folder = tmp_save_folder / f"metrics_computation_step_{self.global_optimization_step}"
 
         # use training time encodings
-        eval_video_time = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
+        eval_video_times = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
         self.logger.info(
-            f"Selected video times for metrics computation: {eval_video_time} from {eval_strat.selected_times}"
+            f"Selected video times for metrics computation: {eval_video_times} from {eval_strat.selected_times}"
         )
-        eval_video_time = torch.tensor(eval_video_time).to(self.accelerator.device)
-        eval_video_time_enc = inference_video_time_encoding.forward(eval_video_time)
+        eval_video_time_enc = inference_video_time_encoding.forward(
+            torch.tensor(eval_video_times).to(self.accelerator.device)
+        )
+
+        # get true datasets to compare against (in [0; 255] uint8 PNG images)
+        true_datasets_to_compare_with = self._get_true_datasets_for_metrics_computation(
+            eval_strat, eval_video_times, train_data_dataloaders, test_data_dataloaders
+        )
 
         ##### 1. Generate the samples
         # loop over training video times
         video_times_pbar = pbar_manager.counter(
-            total=len(eval_video_time),
+            total=len(eval_video_times),
             position=2,
             desc="Training video timesteps  ",
             enable=self.accelerator.is_main_process,
@@ -1395,14 +1369,14 @@ class TimeDiffusion:
             video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
 
             # get timestep name
-            video_time_name = self.timesteps_floats_to_names[self.empirical_dists_timesteps[video_time_idx]]
+            video_time_name = self.timesteps_floats_to_names[eval_video_times[video_time_idx]]
 
             # find how many samples to generate, batchify generation and distribute along processes
             gen_dir = metrics_computation_folder / video_time_name
             gen_dir.mkdir(parents=True, exist_ok=True)
             this_proc_gen_batches = self._find_this_proc_this_time_batches_for_metrics_comp(
                 eval_strat,
-                Path(true_data_classes_paths[video_time_name]),
+                true_datasets_to_compare_with[video_time_name].base_path / video_time_name,
                 gen_dir,
             )
 
@@ -1443,6 +1417,7 @@ class TimeDiffusion:
                     model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
+                # save to [0; 255] uint8 PNG images
                 save_images_for_metrics_compute(
                     image,
                     gen_dir,
@@ -1484,7 +1459,7 @@ class TimeDiffusion:
 
         ##### 2. Compute metrics
         # consistency of cache naming with below is important
-        metrics_caches: dict[str, Path] = {"all_classes": metrics_computation_folder / self.cfg.dataset.name}
+        metrics_caches: dict[str, Path] = {"all_times": metrics_computation_folder / self.cfg.dataset.name}
         for video_time_names in list(self.timesteps_names_to_floats.keys()):
             metrics_caches[video_time_names] = metrics_computation_folder / (
                 self.cfg.dataset.name + "_time_" + video_time_names
@@ -1504,9 +1479,9 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         # TODO: weight tasks by number of samples
-        # TODO: include "all_classes" in the tasks, but ***differentiate between using seen data only and all the available dataset!***
-        # tasks = ["all_classes"] + list(self.timesteps_names_to_floats.keys())
-        tasks = list(self.timesteps_names_to_floats.keys())  # time names
+        # TODO: include "all_times" in the tasks, but ***differentiate between using seen data only and all the available dataset!***
+        # tasks = ["all_times"] + list(self.timesteps_names_to_floats.keys())
+        tasks = [self.timesteps_floats_to_names[eval_time] for eval_time in eval_video_times]  # eval time names
         tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
         self.logger.debug(
             f"Tasks for process {self.accelerator.process_index}: {tasks_for_this_process}", main_process_only=False
@@ -1515,42 +1490,24 @@ class TimeDiffusion:
         self.logger.info("Computing metrics...")
         metrics_dict: dict[str, dict[str, float]] = {}
         for task in tasks_for_this_process:
-            if task == "all_classes":
-                true_samples_path = Path(self.cfg.dataset.path)
-                self.logger.debug(
-                    f"Computing metrics against {len(list(true_samples_path.iterdir()))} true samples at {true_samples_path.as_posix()} on process {self.accelerator.process_index}",
-                    main_process_only=False,
-                )
-                metrics = torch_fidelity.calculate_metrics(
-                    input1=true_samples_path.as_posix(),
-                    input2=metrics_computation_folder.as_posix(),
-                    cuda=True,
-                    batch_size=eval_strat.batch_size * 4,  # TODO: optimize
-                    isc=False,
-                    fid=True,
-                    prc=False,
-                    verbose=self.cfg.debug and self.accelerator.is_main_process,
-                    cache_root=metrics_computation_folder.as_posix(),
-                    input1_cache_name=metrics_caches["all_classes"].name,
-                    samples_find_deep=True,
-                )
-            else:
-                self.logger.debug(
-                    f"Computing metrics against {len(list(Path(true_data_classes_paths[task]).iterdir()))} true samples at {true_data_classes_paths[task]} on process {self.accelerator.process_index}",
-                    main_process_only=False,
-                )
-                metrics = torch_fidelity.calculate_metrics(
-                    input1=true_data_classes_paths[task],
-                    input2=(metrics_computation_folder / task).as_posix(),
-                    cuda=True,
-                    batch_size=eval_strat.batch_size * 4,  # TODO: optimize
-                    isc=False,
-                    fid=True,
-                    prc=False,
-                    verbose=self.cfg.debug and self.accelerator.is_main_process,
-                    cache_root=metrics_computation_folder.as_posix(),
-                    input1_cache_name=metrics_caches[task].name,
-                )
+            gen_samples_input = metrics_computation_folder / task if task != "all_times" else metrics_computation_folder
+            self.logger.debug(
+                f"Computing metrics on {len(list(gen_samples_input.iterdir()))} generated samples at {gen_samples_input.as_posix()} vs {len(true_datasets_to_compare_with[task])} true samples at {true_datasets_to_compare_with[task].base_path} on process {self.accelerator.process_index}",
+                main_process_only=False,
+            )
+            metrics = torch_fidelity.calculate_metrics(
+                input1=true_datasets_to_compare_with[task],
+                input2=gen_samples_input.as_posix(),
+                cuda=True,
+                batch_size=eval_strat.batch_size * 4,  # TODO: optimize
+                isc=False,
+                fid=True,
+                prc=False,
+                verbose=self.cfg.debug and self.accelerator.is_main_process,
+                cache_root=metrics_computation_folder.as_posix(),
+                input1_cache_name=metrics_caches[task].name,
+                samples_find_deep=task == "all_times",
+            )
             metrics_dict[task] = metrics
             self.logger.debug(
                 f"Computed metrics for time {task} on process {self.accelerator.process_index}: {metrics}",
@@ -1569,45 +1526,46 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         ##### 3. Merge metrics from all processes & Log metrics
-        if self.accelerator.is_main_process:
-            final_metrics_dict: dict[str, dict[str, float]] = {}
-            # load all processes' metrics
-            for metrics_file in [f for f in tmp_save_folder.iterdir() if f.name.endswith("metrics_dict.pkl")]:
-                with open(metrics_file, "rb") as pickle_file:
-                    proc_metrics = pickle.load(pickle_file)
-                    final_metrics_dict.update(proc_metrics)
-            # log it
-            self.accelerator.log(
-                {
-                    f"evaluation/{time_name}/": this_time_metrics
-                    for time_name, this_time_metrics in final_metrics_dict.items()
-                }
-            )
-            self.logger.info(
-                f"Logged metrics {final_metrics_dict}",
-            )
+        final_metrics_dict: dict[str, dict[str, float]] = {}
+        # load all processes' metrics
+        for metrics_file in [f for f in tmp_save_folder.iterdir() if f.name.endswith("metrics_dict.pkl")]:
+            with open(metrics_file, "rb") as pickle_file:
+                proc_metrics = pickle.load(pickle_file)
+                final_metrics_dict.update(proc_metrics)
+        # log it
+        self.accelerator.log(
+            {
+                f"evaluation/{time_name}/": this_time_metrics
+                for time_name, this_time_metrics in final_metrics_dict.items()
+            }
+        )
+        self.logger.info(
+            f"Logged metrics {final_metrics_dict}",
+        )
 
         ##### 4. Check if best model to date
-        if self.accelerator.is_main_process:
-            # WARNING: only "smaller is better" metrics are supported!
-            # WARNING: best_metric_to_date will only be updated on the main process!
-            if "all_classes" not in final_metrics_dict:  # pyright: ignore[reportPossiblyUnboundVariable]
-                key = list(final_metrics_dict.keys())[0]  # pyright: ignore[reportPossiblyUnboundVariable]
-                assert isinstance(key, str), f"Expected a string key, got {key} of type {type(key)}"
-                self.logger.warning(
-                    f"No 'all_classes' key in final_metrics_dict, will update best_metric_to_date with the FID of the first class ({key})"
-                )
-            else:
-                key = "all_classes"
-            if (
-                self.cfg.debug or self.best_metric_to_date > final_metrics_dict[key]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
-            ):
-                self.best_metric_to_date = final_metrics_dict[key]["frechet_inception_distance"]  # pyright: ignore[reportPossiblyUnboundVariable]
-                self.accelerator.log({"training/best_metric_to_date": self.best_metric_to_date})
-                self.logger.info(f"Saving best model to date with class='{key}' FID: {self.best_metric_to_date}")
-                self._save_pipeline(called_on_main_process_only=True)
+        # TODO: WARNING: only "smaller is better" metrics are supported!
+        best_metric_to_date = None  # both flag and value holder for potential new best metric
+        if "all_times" not in final_metrics_dict:
+            self.logger.warning(
+                "No 'all_times' key in final_metrics_dict, will update best_metric_to_date with the average FID of all times"
+            )
+            avg_metric = sum(
+                final_metrics_dict[time]["frechet_inception_distance"] for time in final_metrics_dict
+            ) / len(final_metrics_dict)
+            if self.cfg.debug or self.best_metric_to_date > avg_metric:
+                best_metric_to_date = avg_metric
+        elif self.cfg.debug or self.best_metric_to_date > final_metrics_dict["all_times"]["frechet_inception_distance"]:
+            best_metric_to_date = final_metrics_dict["all_times"]["frechet_inception_distance"]
+
+        if best_metric_to_date is not None:
+            self.best_metric_to_date = best_metric_to_date
+            self.accelerator.log({"training/best_metric_to_date": self.best_metric_to_date})
+            self.logger.info(f"Saving best model to date with FID: {self.best_metric_to_date}")
+            self._save_pipeline()
 
         ##### 5. Clean up (important because we reuse existing generated samples!)
+        # pickled metrics can be left without issue
         if self.accelerator.is_main_process:
             shutil.rmtree(metrics_computation_folder)
             self.logger.debug(f"Cleaned up metrics computation folder {metrics_computation_folder}")
@@ -1682,6 +1640,80 @@ class TimeDiffusion:
             main_process_only=False,
         )
         return this_proc_gen_batches
+
+    @log_state(state_logger)
+    def _get_true_datasets_for_metrics_computation(
+        self,
+        eval_strat: MetricsComputation,
+        eval_video_times: list[float],
+        train_data_dataloaders: dict[float, DataLoader],
+        test_data_dataloaders: dict[float, DataLoader],
+    ):
+        """Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images"""
+        # Misc.
+        base_dataset_path = Path(self.cfg.dataset.path)
+        eval_time_names = [self.timesteps_floats_to_names[eval_time] for eval_time in eval_video_times]
+        true_datasets_to_compare_with: dict[str, BaseDataset] = {}
+        # TODO: clean this mess when the dataset params is moved into the config (see TODO in data.py)
+        dataset_class: type[BaseDataset] = type(train_data_dataloaders[0].dataset)  # pyright: ignore[reportAssignmentType]
+        common_suffix = train_data_dataloaders[0].dataset.samples[0].suffix  # pyright: ignore[reportAttributeAccessIssue]
+
+        # Use the correct image processing ([0; 255] uint8) for metrics computation
+        test_transforms: Compose = test_data_dataloaders[0].dataset.transforms  # pyright: ignore[reportAttributeAccessIssue]
+        assert any(
+            isinstance(t, transforms.Normalize) for t in test_transforms.transforms
+        ), f"Expected normalization to be in test transforms, got : {test_transforms}"
+        metrics_compute_transforms = Compose(
+            [
+                test_transforms,  # test transforms *must* include the normalization to [-1, 1]
+                transforms.Normalize(mean=[-1], std=[2]),  # Convert from [-1, 1] to [0, 1]
+                transforms.ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
+            ]
+        )
+        # TODO: programmatically check consistency with true samples processing in misc/save_images_for_metrics_compute
+
+        # Use the hard augmented version of the dataset if it's not the one we are already training on
+        if (
+            eval_strat.nb_samples_to_gen_per_time == "adapt half aug"  # pyright: ignore[reportAttributeAccessIssue]
+            and "_hard_augmented" not in base_dataset_path.parent.name
+        ):
+            for time_name in eval_time_names:
+                hard_aug_ds_this_time_path = (
+                    base_dataset_path.with_name(base_dataset_path.name + "_hard_augmented") / time_name
+                )
+                self.logger.debug(f"Using hard augmented version of time {time_name}: {hard_aug_ds_this_time_path}")
+                all_files = [
+                    f for f in hard_aug_ds_this_time_path.iterdir() if f.is_file() and f.suffix == common_suffix
+                ]
+                true_datasets_to_compare_with[time_name] = dataset_class(
+                    samples=all_files,
+                    transforms=metrics_compute_transforms,
+                )
+        # Otherwise, simply use all available data from the dataset we're using to train (and test)
+        else:
+            for time_name in eval_time_names:
+                time_float = self.timesteps_names_to_floats[time_name]
+                all_files = (
+                    train_data_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
+                    + test_data_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
+                )
+                true_datasets_to_compare_with[time_name] = dataset_class(
+                    samples=all_files,
+                    transforms=metrics_compute_transforms,
+                )
+
+        # Check that datasets are well-formed
+        for time_name, dataset in true_datasets_to_compare_with.items():
+            assert (
+                len(dataset) > 0
+            ), f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
+            if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+                assert len(dataset) % 8 == 0, f"Expected number of samples to be a multiple of 8, got {len(dataset)}"
+            self.logger.debug(
+                f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
+            )
+
+        return true_datasets_to_compare_with
 
     @log_state(state_logger)
     def _save_pipeline(self, called_on_main_process_only: bool = False):

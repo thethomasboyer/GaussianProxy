@@ -149,7 +149,7 @@ class MetricsComputation(EvaluationStrategy):
     batch_size: int
     name: str = field(default="MetricsComputation")
     regen_images: bool = True
-    nb_recompute: int = 1
+    nb_recompute: int = 1  # TODO: not used
     selected_times: list
 
 
