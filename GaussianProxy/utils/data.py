@@ -1,3 +1,6 @@
+import json
+import random
+import re
 from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
@@ -131,11 +134,11 @@ class RandomRotationSquareSymmetry(Transform):
         return tf.rotate(inpt, rot)
 
 
-TimeKey = TypeVar("TimeKey", int, str)
+TimeKey = TypeVar("TimeKey", int, str)  # TODO: remove this mess and just use str from as early as possible
 
 
 def setup_dataloaders(
-    cfg: Config, num_workers: int, logger: MultiProcessAdapter, debug: bool = False
+    cfg: Config, num_workers: int, logger: MultiProcessAdapter, this_run_folder, debug: bool = False
 ) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
@@ -235,7 +238,7 @@ def setup_dataloaders(
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
-    return _dataset_builder(cfg, ds_params, num_workers, logger, debug)
+    return _dataset_builder(cfg, ds_params, num_workers, logger, this_run_folder, debug)
 
 
 def _dataset_builder(
@@ -243,13 +246,14 @@ def _dataset_builder(
     dataset_params: DatasetParams,
     num_workers: int,
     logger: MultiProcessAdapter,
+    this_run_folder: Path,
     debug: bool = False,
     train_split_frac: float = 0.9,
 ) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
     """Builds the train & test dataloaders."""
     database_path = Path(cfg.dataset.path)
     subdirs = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
-    subdirs.sort(key=dataset_params.sorting_func)
+    subdirs.sort(key=dataset_params.sorting_func)  # sort by time!
 
     files_dict_per_time: dict[TimeKey, list[Path]] = {}
     for subdir in subdirs:
@@ -271,6 +275,45 @@ def _dataset_builder(
     else:
         logger.info(f"No timesteps selected, using all available {len(files_dict_per_time)}")
 
+    # use time-unpaired data if asked for
+    # (does not assume all videos span the same/total time range)
+    video_ids_times: dict[str, dict[TimeKey, Path]] = {}  # dict[video_id, dict[time, file]]
+    time_key_type = type(list(files_dict_per_time.keys())[0])
+    if cfg.training.unpaired_data:
+        logger.warning("Building time-unpaired dataset")
+        # fill dict
+        for time, files in files_dict_per_time.items():
+            for f in files:
+                video_id, time = extract_video_id(f.stem, time_key_type)
+                if video_id not in video_ids_times:
+                    video_ids_times[video_id] = {time: f}
+                else:
+                    assert (
+                        time not in video_ids_times[video_id]
+                    ), f"Found multiple files at time {time} for video {video_id}: {f} and {video_ids_times[video_id][time]}"
+                    video_ids_times[video_id][time] = f
+        # select one time at random for each video_id
+        unpaired_files_dict_per_time: dict[TimeKey, list[Path]] = {}
+        for video_id, times_files_d in video_ids_times.items():
+            time = random.choice(list(times_files_d.keys()))
+            selected_frame = times_files_d[time]
+            if time not in unpaired_files_dict_per_time:
+                unpaired_files_dict_per_time[time] = [selected_frame]
+            else:
+                unpaired_files_dict_per_time[time].append(selected_frame)
+        # checks
+        assert (
+            files_dict_per_time.keys() == unpaired_files_dict_per_time.keys()
+        ), f"Some times are missing in the unpaired dataset! original: {files_dict_per_time.keys()} vs unpaired: {unpaired_files_dict_per_time.keys()}"
+        # re-sort per time now that we know all times are present
+        unpaired_files_dict_per_time = {
+            common_key: unpaired_files_dict_per_time[common_key] for common_key in files_dict_per_time.keys()
+        }
+        logger.info(
+            f"Unpaired dataset built with {sum([len(f) for f in unpaired_files_dict_per_time.values()])} files in total"
+        )
+        files_dict_per_time = unpaired_files_dict_per_time
+
     # Build train datasets & test dataloaders
     train_dataloaders_dict = {}
     test_dataloaders_dict = {}
@@ -286,10 +329,12 @@ def _dataset_builder(
     # time per time
     train_reprs_to_log: list[str] = []
     test_reprs_to_log: list[str] = []
+    all_train_files: dict[TimeKey, list[Path]] = {}
+    all_test_files: dict[TimeKey, list[Path]] = {}
     for timestamp, files in files_dict_per_time.items():
         if debug:
             # test_idxes are different between processes but that's fine for debug
-            test_idxes = (
+            test_idxes: list[int] = (  # pyright: ignore[reportAssignmentType]
                 np.random.default_rng()
                 .choice(
                     len(files),
@@ -308,6 +353,8 @@ def _dataset_builder(
         assert (
             set(train_files) | (set(test_files)) == set(files)
         ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
+        all_train_files[timestamp] = train_files
+        all_test_files[timestamp] = test_files
         ### Create train dataloader
         train_ds = dataset_params.dataset_class(
             samples=train_files,
@@ -349,12 +396,44 @@ def _dataset_builder(
             shuffle=False,  # keep the order for consistent logging
         )
 
+    # Save train/test split to disk
+    serializable_train_files = {
+        time: [f"{p.parent.name}/{p.name}" for p in list_paths] for time, list_paths in all_train_files.items()
+    }
+    with Path(this_run_folder, "train_samples.json").open("w") as f:
+        json.dump(serializable_train_files, f)
+    serializable_test_files = {
+        time: [f"{p.parent.name}/{p.name}" for p in list_paths] for time, list_paths in all_test_files.items()
+    }
+    with Path(this_run_folder, "test_samples.json").open("w") as f:
+        json.dump(serializable_test_files, f)
+    logger.info("Saved train & test samples to train_samples.json & test_samples.json")
+
     # print some info about the datasets
     _print_short_datasets_info(train_reprs_to_log, logger, "Train datasets:")
     _print_short_datasets_info(test_reprs_to_log, logger, "Test datasets:")
 
     # Return the dataloaders
     return train_dataloaders_dict, test_dataloaders_dict
+
+
+def extract_video_id(filename: str, time_key_type: type[TimeKey]) -> tuple[str, TimeKey]:
+    """
+    Ugly helper to extract video_id and time from a filename, using hard-coded rules.
+
+    TODO: include time key - finding regex in dataset config!
+    """
+    if m := re.search(r"_time_(\d+)_", filename):
+        time: str = m.group(1)
+        video_id = filename.replace(f"_time_{time}_", "_")
+    elif m := re.search(r"_T(\d+)_", filename):
+        time: str = m.group(1)
+        video_id = filename.replace(f"_T{time}_", "_")
+    else:
+        raise ValueError(f"Could not extract time from filename {filename}")
+
+    t = time_key_type(time)
+    return video_id, t
 
 
 def remove_flips_and_rotations_from_transforms(transforms: Compose):
@@ -367,7 +446,7 @@ def remove_flips_and_rotations_from_transforms(transforms: Compose):
     return Compose(kept_transforms), removed_transforms
 
 
-NB_DS_PRINTED_SINGLE_LINE = 4  # limite width of the printed datasets info because of the terminal width
+NB_DS_PRINTED_SINGLE_LINE = 5  # limite number of printed datasets infos because of the terminal width
 
 
 def _print_short_datasets_info(reprs_to_log: list[str], logger: MultiProcessAdapter, first_message: str):
@@ -382,7 +461,9 @@ def _print_short_datasets_info(reprs_to_log: list[str], logger: MultiProcessAdap
         padded_lines = [line.ljust(max_cols) for line in lines]
         padded_infos.append("\n".join(padded_lines))
 
-    ds_indexes_slices = [range(i, i + NB_DS_PRINTED_SINGLE_LINE) for i in range(0, len(reprs_to_log), 4)]
+    ds_indexes_slices = [
+        range(i, i + NB_DS_PRINTED_SINGLE_LINE) for i in range(0, len(reprs_to_log), NB_DS_PRINTED_SINGLE_LINE)
+    ]
 
     complete_str = f"{first_message}\n"
     for ds_slice in ds_indexes_slices:

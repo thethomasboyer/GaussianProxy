@@ -169,7 +169,7 @@ def main(cfg: Config) -> None:
     # ---------------------------------- Dataloaders ---------------------------------
     num_workers = cfg.dataloaders.num_workers if cfg.dataloaders.num_workers is not None else accelerator.num_processes
 
-    train_dataloaders, test_dataloaders = setup_dataloaders(cfg, num_workers, logger, cfg.debug)
+    train_dataloaders, test_dataloaders = setup_dataloaders(cfg, num_workers, logger, this_run_folder, cfg.debug)
 
     # ------------------------------------ Debug -------------------------------------
     if cfg.debug:

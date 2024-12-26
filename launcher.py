@@ -296,6 +296,8 @@ WRITABLE_FILES_OR_FOLDERS = [
     "run_id.txt",
     "saved_model",
     ".git",
+    "train_samples.json",
+    "test_samples.json",
 ]
 
 
@@ -361,12 +363,10 @@ THINGS_TO_COPY = ["GaussianProxy", "my_conf"]
 
 THINGS_TO_GITIGNORE = [
     "__pycache__",
-    "backed-up_configs",
     "checkpoints",
     "logs.log",
     "saved_model",
     "saved_artifacts",
-    ".tmp_dataloader",
     ".gitignore",
     ".hydra",
     "net_summary.txt",
@@ -375,7 +375,9 @@ THINGS_TO_GITIGNORE = [
     "*.out",
     "*.sh",
     "*.pkl",
-    "my_conf/my_inference_conf.py",  # do not git diff the user inference config
+    "my_conf/my_inference_conf.py",  # do not git diff the user inference config (for now: TODO use it!)
+    "train_samples.json",
+    "test_samples.json",
 ]
 
 

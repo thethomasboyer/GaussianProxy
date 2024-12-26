@@ -97,6 +97,7 @@ class Training:
     train_batch_size: int
     max_grad_norm: int
     nb_time_samplings: int
+    unpaired_data: bool
 
 
 @dataclass(kw_only=True)
