@@ -8,7 +8,6 @@ from pathlib import Path
 
 import hydra
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter, get_logger
 from accelerate.utils import InitProcessGroupKwargs, ProjectConfiguration
@@ -23,7 +22,7 @@ from termcolor import colored
 from torch.optim.adamw import AdamW
 from torch.optim.lr_scheduler import LinearLR, LRScheduler
 from torch.optim.optimizer import Optimizer
-from wandb.sdk.wandb_run import Run as WandBRun
+from wandb.sdk.wandb_run import Run as WandBRun  # pyright: ignore[reportAttributeAccessIssue]
 
 from GaussianProxy.conf.training_conf import Config, UNet2DConditionModelConfig, UNet2DModelConfig
 from GaussianProxy.utils.data import setup_dataloaders
@@ -219,30 +218,7 @@ def main(cfg: Config) -> None:
     nb_params_M_trainable = round(video_time_encoding.num_parameters(True) / 1e3)
     logger.info(f"VideoTimeEncoding has ~{nb_params_M}K parameters (~{nb_params_M_trainable}K trainable)")
 
-    # --------------------------------- Miscellaneous --------------------------------
-    # # Create EMA for the models # TODO
-    # ema_models = {}
-    # components_to_train_transcribed = get_HF_component_names(cfg.components_to_train)
-    # if cfg.use_ema:
-    #     for module_name, module in pipeline.components.items():
-    #         if module_name in components_to_train_transcribed:
-    #             ema_models[module_name] = EMAModel(
-    #                 module.parameters(),
-    #                 decay=cfg.ema_max_decay,
-    #                 use_ema_warmup=True,
-    #                 inv_gamma=cfg.ema_inv_gamma,
-    #                 power=cfg.ema_power,
-    #                 model_cls=module.__class__,
-    #                 model_config=module.config,
-    #             )
-    #             ema_models[module_name].to(accelerator.device)
-    #     logger.info(
-    #         f"Created EMA weights for the following models: {list(ema_models)} (corresponding to the (unordered) following cfg: {cfg.components_to_train})"
-    #     )
-    # Log models gradients
-    if accelerator.is_main_process:
-        wandb.watch(accelerator.unwrap_model(net), "gradients", log_freq=1000, idx=0)
-
+    # --------------------------------- Miscellaneous ---------------------------------
     # PyTorch mixed precision
     torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.allow_tf32 = True

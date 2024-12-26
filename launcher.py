@@ -118,7 +118,7 @@ def main(cfg: Config) -> None:
                 raise ValueError(f"Unknown constraint '{cfg.slurm.constraint}'")
 
         # get correct QOS
-        if "v100" in cfg.slurm.constraint:
+        if cfg.slurm.constraint is not None and "v100" in cfg.slurm.constraint:
             slurm_qos = f"qos_gpu-{qos}"
         else:
             slurm_qos = f"qos_gpu_{cfg.slurm.constraint}-{qos}"

@@ -90,12 +90,15 @@ class BaseDataset(Dataset[Tensor]):
 
     def __str__(self) -> str:
         head = self.__class__.__name__
-        body_lines = [f"Number of datapoints: {self.__len__()}"]
+        body_lines = [f"Number of datapoints: {len(self)}"]
         if self.expected_initial_data_range is not None:
             body_lines.append(f"Expected initial data range: {self.expected_initial_data_range}")
         # Indent each line in the body
         indented_body_lines = [" " * 4 + line for line in body_lines]
         return "\n".join([head] + indented_body_lines)
+
+    def short_str(self, name: str | int) -> str:
+        return f"{name}: {len(self)} samples"
 
 
 class NumpyDataset(BaseDataset):
@@ -169,7 +172,7 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=NumpyDataset,
             )
-        case "biotine_png":
+        case "biotine_png" | "biotine_png_hard_aug":
             ds_params = DatasetParams(
                 file_extension="png",
                 key_transform=int,
@@ -356,7 +359,7 @@ def _dataset_builder(
         all_train_files[timestamp] = train_files
         all_test_files[timestamp] = test_files
         ### Create train dataloader
-        train_ds = dataset_params.dataset_class(
+        train_ds: BaseDataset = dataset_params.dataset_class(
             samples=train_files,
             transforms=transforms,
             expected_initial_data_range=cfg.dataset.expected_initial_data_range,
@@ -364,7 +367,7 @@ def _dataset_builder(
         assert (
             train_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
-        train_reprs_to_log.append(f"train dataset on time {timestamp}:\n{train_ds}")
+        train_reprs_to_log.append(train_ds.short_str(timestamp))
         # batch_size does *NOT* correspond to the actual train batch size
         # *Time-interpolated* batches will be manually built afterwards!
         train_dataloaders_dict[timestamp] = DataLoader(
@@ -389,7 +392,7 @@ def _dataset_builder(
         assert (
             test_ds[0].shape == cfg.dataset.data_shape
         ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
-        test_reprs_to_log.append(f"test dataset on time {timestamp}:\n{test_ds}")
+        test_reprs_to_log.append(test_ds.short_str(timestamp))
         test_dataloaders_dict[timestamp] = DataLoader(
             test_ds,
             batch_size=cfg.evaluation.batch_size,
@@ -438,7 +441,7 @@ def extract_video_id(filename: str, time_key_type: type[TimeKey]) -> tuple[str, 
 
 def remove_flips_and_rotations_from_transforms(transforms: Compose):
     """Filter out `RandomHorizontalFlip`, `RandomVerticalFlip` and `RandomRotationSquareSymmetry`."""
-    is_flip_or_rotation = lambda t: isinstance(
+    is_flip_or_rotation = lambda t: isinstance(  # noqa: E731
         t, (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry)
     )
     kept_transforms = [t for t in transforms.transforms if not is_flip_or_rotation(t)]
@@ -446,7 +449,8 @@ def remove_flips_and_rotations_from_transforms(transforms: Compose):
     return Compose(kept_transforms), removed_transforms
 
 
-NB_DS_PRINTED_SINGLE_LINE = 5  # limite number of printed datasets infos because of the terminal width
+# limit number of printed datasets infos because of the terminal width: TODO: make it dynamic
+NB_DS_PRINTED_SINGLE_LINE = 14
 
 
 def _print_short_datasets_info(reprs_to_log: list[str], logger: MultiProcessAdapter, first_message: str):

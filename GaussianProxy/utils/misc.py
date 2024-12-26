@@ -20,7 +20,7 @@ from PIL import Image
 from termcolor import colored
 from torch import Tensor
 from torchvision.transforms import RandomHorizontalFlip, RandomVerticalFlip
-from wandb.sdk.wandb_run import Run as WandBRun
+from wandb.sdk.wandb_run import Run as WandBRun  # pyright: ignore[reportAttributeAccessIssue]
 
 from GaussianProxy.conf.training_conf import Config
 from GaussianProxy.utils.data import RandomRotationSquareSymmetry
@@ -270,7 +270,7 @@ def save_eval_artifacts_log_to_wandb(
             "format": "mp4",
         }
         for norm_method, normed_vids in normalized_elements_for_logging.items():
-            videos = wandb.Video(normed_vids, **kwargs)  # pyright: ignore[reportArgumentType]
+            videos = wandb.Video(normed_vids, **kwargs)  # pyright: ignore[reportArgumentType, reportAttributeAccessIssue]
             if split_name is not None:
                 artifact_path = f"{eval_strat}/Generated videos/{split_name}/{norm_method} normalized"
             else:
@@ -310,7 +310,8 @@ def save_eval_artifacts_log_to_wandb(
             accelerator.log(
                 {
                     artifact_path: [
-                        wandb.Image(image, caption=sel_captions[img_idx]) for img_idx, image in enumerate(images)
+                        wandb.Image(image, caption=sel_captions[img_idx])  # pyright: ignore[reportAttributeAccessIssue]
+                        for img_idx, image in enumerate(images)
                     ]
                 }
             )

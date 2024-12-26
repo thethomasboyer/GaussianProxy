@@ -316,8 +316,8 @@ class TimeDiffusion:
 
         batches_pbar.close(clear=True)
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
-        gantt_chart = state_logger.create_gantt_chart()
-        self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)})
+        # gantt_chart = state_logger.create_gantt_chart()
+        # self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)})
 
         if profiler is not None:
             profiler.stop()
@@ -1601,8 +1601,8 @@ class TimeDiffusion:
         elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
             nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
             assert (
-                nb_all_aug_samples % 8 == 0
-            ), f"Expected number of samples to be a multiple of 8, got {nb_all_aug_samples}"
+                self.cfg.training.unpaired_data or nb_all_aug_samples % 8 == 0
+            ), f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
             tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
             self.logger.debug(
                 f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
@@ -1675,7 +1675,7 @@ class TimeDiffusion:
         # Use the hard augmented version of the dataset if it's not the one we are already training on
         if (
             eval_strat.nb_samples_to_gen_per_time == "adapt half aug"  # pyright: ignore[reportAttributeAccessIssue]
-            and "_hard_augmented" not in base_dataset_path.parent.name
+            and "_hard_augmented" not in base_dataset_path.name
         ):
             for time_name in eval_time_names:
                 hard_aug_ds_this_time_path = (
@@ -1708,7 +1708,9 @@ class TimeDiffusion:
                 len(dataset) > 0
             ), f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
             if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-                assert len(dataset) % 8 == 0, f"Expected number of samples to be a multiple of 8, got {len(dataset)}"
+                assert (
+                    self.cfg.training.unpaired_data or len(dataset) % 8 == 0
+                ), f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
             self.logger.debug(
                 f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
             )
