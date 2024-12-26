@@ -30,7 +30,6 @@ repos:
   hooks:
   - id: pylint
     name: pylint (errors only)
-    entry: .venv/bin/pylint
+    entry: bash -c "set -x; $UV_PROJECT_ENVIRONMENT/bin/pylint -E $@"
     language: system
     types: [ python ]
-    args: [ "-E", "--generated-members", "'cv2.*'" ]

@@ -117,6 +117,12 @@ def main(cfg: Config) -> None:
             case _:
                 raise ValueError(f"Unknown constraint '{cfg.slurm.constraint}'")
 
+        # get correct QOS
+        if "v100" in cfg.slurm.constraint:
+            slurm_qos = f"qos_gpu-{qos}"
+        else:
+            slurm_qos = f"qos_gpu_{cfg.slurm.constraint}-{qos}"
+
         executor.update_parameters(
             slurm_job_name=f"{cfg.project}-{cfg.run_name}",
             slurm_constraint=cfg.slurm.constraint,
@@ -127,7 +133,7 @@ def main(cfg: Config) -> None:
             slurm_cpus_per_task=cpus_per_task,
             slurm_additional_parameters=additional_parameters,
             slurm_time=time,
-            slurm_qos=f"qos_gpu-{qos}",
+            slurm_qos=slurm_qos,
             slurm_account=cfg.slurm.account,
         )
 

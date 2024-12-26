@@ -38,6 +38,9 @@ class BaseDataset(Dataset[Tensor]):
         self.transforms = transforms
         self.expected_initial_data_range = expected_initial_data_range
         self.expected_dtype = expected_dtype
+        # check that we indeed have sample
+        # (# we use __str__ in the error message, so any attribute assigned below this line cannot be used by __str__)
+        assert len(samples) > 0, f"Got 0 samples in {self}"
         # common base path for the dataset
         # Create train dataloader
         base_path = samples[0].parents[1]
@@ -82,7 +85,7 @@ class BaseDataset(Dataset[Tensor]):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __repr__(self) -> str:
+    def __str__(self) -> str:
         head = self.__class__.__name__
         body_lines = [f"Number of datapoints: {self.__len__()}"]
         if self.expected_initial_data_range is not None:

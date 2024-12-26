@@ -72,7 +72,7 @@ def create_repo_structure(
         saved_artifacts_folder.mkdir(exist_ok=True)
 
     # Decide where to save checkpoints
-    if OmegaConf.is_missing(cfg.checkpointing, "chckpt_save_path"):
+    if OmegaConf.is_missing(cfg.checkpointing, "chckpt_base_path"):
         logger.info(
             f"No checkpointing *base* folder specified, using {this_run_folder}/checkpoints as checkpointing folder"
         )
