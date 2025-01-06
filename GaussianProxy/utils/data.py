@@ -162,6 +162,9 @@ def setup_dataloaders(
     |   |   - ...
     ```
 
+    The train/test split that was saved to disk is reused if found
+    and if `cfg.checkpointing.resume_from_checkpoint is not False`.
+
     TODO: move DatasetParams'params into the base DataSet class used in config
     """
     match cfg.dataset.name:
@@ -251,9 +254,114 @@ def _dataset_builder(
     logger: MultiProcessAdapter,
     this_run_folder: Path,
     debug: bool = False,
-    train_split_frac: float = 0.9,
+    train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
 ) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
     """Builds the train & test dataloaders."""
+
+    # Get train & test splits for each time
+    build_new_train_test_split = True
+    if cfg.checkpointing.resume_from_checkpoint is not False:
+        saved_splits_exist = (
+            Path(this_run_folder, "train_samples.json").exists() and Path(this_run_folder, "test_samples.json").exists()
+        )
+        if not saved_splits_exist:
+            logger.warning("No train/test split saved to disk found; building new one")
+        else:
+            build_new_train_test_split = False
+
+    if build_new_train_test_split:
+        all_train_files, all_test_files = _build_train_test_splits(cfg, dataset_params, logger, debug, train_split_frac)
+    else:
+        all_train_files, all_test_files = _load_train_test_splits(this_run_folder, logger)
+    assert (
+        all_train_files.keys() == all_test_files.keys()
+    ), f"Expected same timestamps between train and test split, got: {all_train_files.keys()} vs {all_test_files.keys()}"
+    timestamps = list(all_train_files.keys())
+
+    # Build train datasets & test dataloaders
+    train_dataloaders_dict = {}
+    test_dataloaders_dict = {}
+    transforms = instantiate(cfg.dataset.transforms)
+    # no flips nor rotations for consistent evaluation
+    test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
+    logger.warning(
+        f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
+    )
+    logger.warning(f"Using test transforms: {test_transforms}")
+    if debug:
+        logger.warning("Debug mode: limiting test dataloader to 2 evaluation batch")
+    # time per time
+    train_reprs_to_log: list[str] = []
+    test_reprs_to_log: list[str] = []
+    for timestamp in timestamps:
+        ### Create train dataloader
+        train_files = all_train_files[timestamp]
+        train_ds: BaseDataset = dataset_params.dataset_class(
+            samples=train_files,
+            transforms=transforms,
+            expected_initial_data_range=cfg.dataset.expected_initial_data_range,
+        )
+        assert (
+            train_ds[0].shape == cfg.dataset.data_shape
+        ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
+        train_reprs_to_log.append(train_ds.short_str(timestamp))
+        # batch_size does *NOT* correspond to the actual train batch size
+        # *Time-interpolated* batches will be manually built afterwards!
+        train_dataloaders_dict[timestamp] = DataLoader(
+            train_ds,
+            # in average we need train_batch_size/2 samples per empirical dataset to form a train batch;
+            # with this batch size, 2 empirical batches max will be needed per train batch and dataset,
+            # so with at least 1 prefetch we should get decent perf
+            # (at max 3 dataloader batch samplings per train batch)
+            batch_size=max(1, cfg.training.train_batch_size // 2),
+            shuffle=True,
+            num_workers=num_workers,
+            prefetch_factor=cfg.dataloaders.train_prefetch_factor,
+            pin_memory=cfg.dataloaders.pin_memory,
+            persistent_workers=cfg.dataloaders.persistent_workers,
+        )
+        ### Create test dataloader
+        test_files = all_test_files[timestamp]
+        test_ds = dataset_params.dataset_class(
+            samples=test_files,
+            transforms=test_transforms,
+            expected_initial_data_range=cfg.dataset.expected_initial_data_range,
+        )
+        assert (
+            test_ds[0].shape == cfg.dataset.data_shape
+        ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
+        test_reprs_to_log.append(test_ds.short_str(timestamp))
+        test_dataloaders_dict[timestamp] = DataLoader(
+            test_ds,
+            batch_size=cfg.evaluation.batch_size,
+            shuffle=False,  # keep the order for consistent logging
+        )
+
+    # Save train/test split to disk if new
+    if build_new_train_test_split:
+        serializable_train_files = {
+            time: [p.as_posix() for p in list_paths] for time, list_paths in all_train_files.items()
+        }
+        with Path(this_run_folder, "train_samples.json").open("w") as f:
+            json.dump(serializable_train_files, f)
+        serializable_test_files = {
+            time: [p.as_posix() for p in list_paths] for time, list_paths in all_test_files.items()
+        }
+        with Path(this_run_folder, "test_samples.json").open("w") as f:
+            json.dump(serializable_test_files, f)
+        logger.info("Saved new train & test samples to train_samples.json & test_samples.json")
+
+    # print some info about the datasets
+    _print_short_datasets_info(train_reprs_to_log, logger, "Train datasets:")
+    _print_short_datasets_info(test_reprs_to_log, logger, "Test datasets:")
+
+    # Return the dataloaders
+    return train_dataloaders_dict, test_dataloaders_dict
+
+
+def _build_train_test_splits(
+    cfg: Config, dataset_params: DatasetParams, logger: MultiProcessAdapter, debug: bool, train_split_frac: float
+) -> tuple[dict[TimeKey, list[Path]], dict[TimeKey, list[Path]]]:
     database_path = Path(cfg.dataset.path)
     subdirs = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=dataset_params.sorting_func)  # sort by time!
@@ -322,21 +430,6 @@ def _dataset_builder(
         )
         files_dict_per_time = unpaired_files_dict_per_time
 
-    # Build train datasets & test dataloaders
-    train_dataloaders_dict = {}
-    test_dataloaders_dict = {}
-    transforms = instantiate(cfg.dataset.transforms)
-    # no flips nor rotations for consistent evaluation
-    test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
-    logger.warning(
-        f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
-    )
-    logger.warning(f"Using test transforms: {test_transforms}")
-    if debug:
-        logger.warning("Debug mode: limiting test dataloader to 2 evaluation batch")
-    # time per time
-    train_reprs_to_log: list[str] = []
-    test_reprs_to_log: list[str] = []
     all_train_files: dict[TimeKey, list[Path]] = {}
     all_test_files: dict[TimeKey, list[Path]] = {}
     for timestamp, files in files_dict_per_time.items():
@@ -363,66 +456,27 @@ def _dataset_builder(
         ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
         all_train_files[timestamp] = train_files
         all_test_files[timestamp] = test_files
-        ### Create train dataloader
-        train_ds: BaseDataset = dataset_params.dataset_class(
-            samples=train_files,
-            transforms=transforms,
-            expected_initial_data_range=cfg.dataset.expected_initial_data_range,
-        )
-        assert (
-            train_ds[0].shape == cfg.dataset.data_shape
-        ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
-        train_reprs_to_log.append(train_ds.short_str(timestamp))
-        # batch_size does *NOT* correspond to the actual train batch size
-        # *Time-interpolated* batches will be manually built afterwards!
-        train_dataloaders_dict[timestamp] = DataLoader(
-            train_ds,
-            # in average we need train_batch_size/2 samples per empirical dataset to form a train batch;
-            # with this batch size, 2 empirical batches max will be needed per train batch and dataset,
-            # so with at least 1 prefetch we should get decent perf
-            # (at max 3 dataloader batch samplings per train batch)
-            batch_size=max(1, cfg.training.train_batch_size // 2),
-            shuffle=True,
-            num_workers=num_workers,
-            prefetch_factor=cfg.dataloaders.train_prefetch_factor,
-            pin_memory=cfg.dataloaders.pin_memory,
-            persistent_workers=cfg.dataloaders.persistent_workers,
-        )
-        ### Create test dataloader
-        test_ds = dataset_params.dataset_class(
-            samples=test_files,
-            transforms=test_transforms,
-            expected_initial_data_range=cfg.dataset.expected_initial_data_range,
-        )
-        assert (
-            test_ds[0].shape == cfg.dataset.data_shape
-        ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
-        test_reprs_to_log.append(test_ds.short_str(timestamp))
-        test_dataloaders_dict[timestamp] = DataLoader(
-            test_ds,
-            batch_size=cfg.evaluation.batch_size,
-            shuffle=False,  # keep the order for consistent logging
-        )
 
-    # Save train/test split to disk
-    serializable_train_files = {
-        time: [f"{p.parent.name}/{p.name}" for p in list_paths] for time, list_paths in all_train_files.items()
-    }
-    with Path(this_run_folder, "train_samples.json").open("w") as f:
-        json.dump(serializable_train_files, f)
-    serializable_test_files = {
-        time: [f"{p.parent.name}/{p.name}" for p in list_paths] for time, list_paths in all_test_files.items()
-    }
-    with Path(this_run_folder, "test_samples.json").open("w") as f:
-        json.dump(serializable_test_files, f)
-    logger.info("Saved train & test samples to train_samples.json & test_samples.json")
+    return all_train_files, all_test_files
 
-    # print some info about the datasets
-    _print_short_datasets_info(train_reprs_to_log, logger, "Train datasets:")
-    _print_short_datasets_info(test_reprs_to_log, logger, "Test datasets:")
 
-    # Return the dataloaders
-    return train_dataloaders_dict, test_dataloaders_dict
+def _load_train_test_splits(
+    this_run_folder: Path, logger: MultiProcessAdapter
+) -> tuple[dict[TimeKey, list[Path]], dict[TimeKey, list[Path]]]:
+    # train
+    with Path(this_run_folder, "train_samples.json").open("r") as f:
+        all_train_files = json.load(f)
+    assert isinstance(all_train_files, dict), f"Expected a dict, got {type(all_train_files)}"
+    for time, list_paths in all_train_files.items():
+        all_train_files[time] = [Path(p) for p in list_paths]
+    # test
+    with Path(this_run_folder, "test_samples.json").open("r") as f:
+        all_test_files = json.load(f)
+    for time, list_paths in all_test_files.items():
+        all_test_files[time] = [Path(p) for p in list_paths]
+    logger.info("Loaded train & test samples from train_samples.json & test_samples.json")
+
+    return all_train_files, all_test_files
 
 
 def extract_video_id(filename: str) -> tuple[str, str]:

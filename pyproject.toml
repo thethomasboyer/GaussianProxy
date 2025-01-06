@@ -65,4 +65,5 @@ exclude = [
     "**/__pycache__",
     "**/.local/share/uv/python",
     "**/.vscode-server/extensions",
+    "**/.vscode/extensions",
 ]
