@@ -26,3 +26,4 @@ pytorch_traces
 *.json
 src
 .envrc
+notebooks/tmp_downloaded_eval_values
