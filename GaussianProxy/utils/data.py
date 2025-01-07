@@ -1,4 +1,5 @@
 import json
+import pickle
 import random
 import re
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Callable, Optional, TypeVar
 import numpy as np
 import tifffile
 import torchvision.transforms.functional as tf
+from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
@@ -141,7 +143,13 @@ TimeKey = TypeVar("TimeKey", int, str)  # TODO: remove this mess and just use st
 
 
 def setup_dataloaders(
-    cfg: Config, num_workers: int, logger: MultiProcessAdapter, this_run_folder, debug: bool = False
+    cfg: Config,
+    accelerator,
+    num_workers: int,
+    logger: MultiProcessAdapter,
+    this_run_folder,
+    chckpt_save_path: Path,
+    debug: bool = False,
 ) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
@@ -244,15 +252,26 @@ def setup_dataloaders(
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
-    return _dataset_builder(cfg, ds_params, num_workers, logger, this_run_folder, debug)
+    return _dataset_builder(
+        cfg,
+        accelerator,
+        ds_params,
+        num_workers,
+        logger,
+        this_run_folder,
+        chckpt_save_path,
+        debug,
+    )
 
 
 def _dataset_builder(
     cfg: Config,
+    accelerator: Accelerator,
     dataset_params: DatasetParams,
     num_workers: int,
     logger: MultiProcessAdapter,
     this_run_folder: Path,
+    chckpt_save_path: Path,
     debug: bool = False,
     train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
 ) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
@@ -270,7 +289,15 @@ def _dataset_builder(
             build_new_train_test_split = False
 
     if build_new_train_test_split:
-        all_train_files, all_test_files = _build_train_test_splits(cfg, dataset_params, logger, debug, train_split_frac)
+        all_train_files, all_test_files = _build_train_test_splits(
+            cfg,
+            accelerator,
+            dataset_params,
+            logger,
+            debug,
+            train_split_frac,
+            chckpt_save_path,
+        )
     else:
         all_train_files, all_test_files = _load_train_test_splits(this_run_folder, logger)
     assert (
@@ -360,12 +387,20 @@ def _dataset_builder(
 
 
 def _build_train_test_splits(
-    cfg: Config, dataset_params: DatasetParams, logger: MultiProcessAdapter, debug: bool, train_split_frac: float
+    cfg: Config,
+    accelerator: Accelerator,
+    dataset_params: DatasetParams,
+    logger: MultiProcessAdapter,
+    debug: bool,
+    train_split_frac: float,
+    chckpt_save_path: Path,
 ) -> tuple[dict[TimeKey, list[Path]], dict[TimeKey, list[Path]]]:
+    # Get subdirs/timestamps and sort them
     database_path = Path(cfg.dataset.path)
     subdirs = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=dataset_params.sorting_func)  # sort by time!
 
+    # Get all files all times
     files_dict_per_time: dict[TimeKey, list[Path]] = {}
     for subdir in subdirs:
         subdir_files = sorted(subdir.glob(f"*.{dataset_params.file_extension}"))
@@ -376,7 +411,7 @@ def _build_train_test_splits(
     assert tot_nb_files_found != 0, f"No files found in {database_path} with extension {dataset_params.file_extension}"
     logger.debug(f"Found {tot_nb_files_found} files in total")
 
-    # selected files
+    # Select times
     if not OmegaConf.is_missing(cfg.dataset, "selected_dists") and cfg.dataset.selected_dists is not None:
         files_dict_per_time = {k: v for k, v in files_dict_per_time.items() if k in cfg.dataset.selected_dists}
         assert (
@@ -386,63 +421,73 @@ def _build_train_test_splits(
     else:
         logger.info(f"No timesteps selected, using all available {len(files_dict_per_time)}")
 
-    # use time-unpaired data if asked for
+    # Use time-unpaired data if asked for
     # (does not assume all videos span the same/total time range)
-    video_ids_times: dict[str, dict[TimeKey, Path]] = {}  # dict[video_id, dict[time, file]]
-    time_key_to_time_id: dict[TimeKey, set[str]] = {time_key: set() for time_key in files_dict_per_time.keys()}
+    # This runs on main process only because we want the same unpaired dataset for all processes!
+    # (random sample selection happens here)
     if cfg.training.unpaired_data:
-        logger.warning("Building time-unpaired dataset")
-        # fill dict
-        for time, files in files_dict_per_time.items():
-            for f in files:
-                video_id, time_id = extract_video_id(f.stem)
-                time_key_to_time_id[time].add(time_id)
-                if video_id not in video_ids_times:
-                    video_ids_times[video_id] = {time: f}
+        # unpaired dataset information will be saved there
+        ds_tmp_save_path = chckpt_save_path / ".unpaired_dataset_from_main.pkl"
+        # Build the unpaired dataset on main
+        if accelerator.is_main_process:
+            logger.warning("Building time-unpaired dataset on main process")
+            video_ids_times: dict[str, dict[TimeKey, Path]] = {}  # dict[video_id, dict[time, file]]
+            time_key_to_time_id: dict[TimeKey, set[str]] = {time_key: set() for time_key in files_dict_per_time.keys()}
+            # fill dict
+            for time, files in files_dict_per_time.items():
+                for f in files:
+                    video_id, time_id = extract_video_id(f.stem)
+                    time_key_to_time_id[time].add(time_id)
+                    if video_id not in video_ids_times:
+                        video_ids_times[video_id] = {time: f}
+                    else:
+                        assert (
+                            time not in video_ids_times[video_id]
+                        ), f"Found multiple files at time {time} for video {video_id}: {f} and {video_ids_times[video_id][time]}"
+                        video_ids_times[video_id][time] = f
+            # check 1-to-1 mapping between found time ids and time keys
+            assert all(
+                len(time_key_to_time_id[time_key]) == 1 for time_key in files_dict_per_time.keys()
+            ), f"Found multiple time ids for some time keys: time_key_to_time_id={time_key_to_time_id}"
+            # select one time at random for each video_id
+            unpaired_files_dict_per_time: dict[TimeKey, list[Path]] = {}
+            for video_id, times_files_d in video_ids_times.items():
+                time = random.choice(list(times_files_d.keys()))
+                selected_frame = times_files_d[time]
+                if time not in unpaired_files_dict_per_time:
+                    unpaired_files_dict_per_time[time] = [selected_frame]
                 else:
-                    assert (
-                        time not in video_ids_times[video_id]
-                    ), f"Found multiple files at time {time} for video {video_id}: {f} and {video_ids_times[video_id][time]}"
-                    video_ids_times[video_id][time] = f
-        # check 1-to-1 mapping between found time ids and time keys
-        assert all(
-            len(time_key_to_time_id[time_key]) == 1 for time_key in files_dict_per_time.keys()
-        ), f"Found multiple time ids for some time keys: time_key_to_time_id={time_key_to_time_id}"
-        # select one time at random for each video_id
-        unpaired_files_dict_per_time: dict[TimeKey, list[Path]] = {}
-        for video_id, times_files_d in video_ids_times.items():
-            time = random.choice(list(times_files_d.keys()))
-            selected_frame = times_files_d[time]
-            if time not in unpaired_files_dict_per_time:
-                unpaired_files_dict_per_time[time] = [selected_frame]
-            else:
-                unpaired_files_dict_per_time[time].append(selected_frame)
-        # checks
-        assert (
-            files_dict_per_time.keys() == unpaired_files_dict_per_time.keys()
-        ), f"Some times are missing in the unpaired dataset! original: {files_dict_per_time.keys()} vs unpaired: {unpaired_files_dict_per_time.keys()}"
-        # re-sort per time now that we know all times are present
-        unpaired_files_dict_per_time = {
-            common_key: unpaired_files_dict_per_time[common_key] for common_key in files_dict_per_time.keys()
-        }
-        logger.info(
-            f"Unpaired dataset built with {sum([len(f) for f in unpaired_files_dict_per_time.values()])} files in total"
-        )
+                    unpaired_files_dict_per_time[time].append(selected_frame)
+            # checks
+            assert (
+                files_dict_per_time.keys() == unpaired_files_dict_per_time.keys()
+            ), f"Some times are missing in the unpaired dataset! original: {files_dict_per_time.keys()} vs unpaired: {unpaired_files_dict_per_time.keys()}"
+            # re-sort per time now that we know all times are present
+            unpaired_files_dict_per_time = {
+                common_key: unpaired_files_dict_per_time[common_key] for common_key in files_dict_per_time.keys()
+            }
+            logger.info(
+                f"Unpaired dataset built with {sum([len(f) for f in unpaired_files_dict_per_time.values()])} files in total"
+            )
+            # save this dict of Paths lists to disk
+            with open(ds_tmp_save_path, "wb") as f:
+                pickle.dump(unpaired_files_dict_per_time, f)
+            logger.debug(f"Saved unpaired dataset to {ds_tmp_save_path} on main")
+        # wait for main to finish building & saving the unpaired dataset
+        accelerator.wait_for_everyone()
+        with open(ds_tmp_save_path, "rb") as f:
+            unpaired_files_dict_per_time = pickle.load(f)
         files_dict_per_time = unpaired_files_dict_per_time
 
+    # Split train/test
     all_train_files: dict[TimeKey, list[Path]] = {}
     all_test_files: dict[TimeKey, list[Path]] = {}
     for timestamp, files in files_dict_per_time.items():
         if debug:
             # test_idxes are different between processes but that's fine for debug
-            test_idxes: list[int] = (  # pyright: ignore[reportAssignmentType]
-                np.random.default_rng()
-                .choice(
-                    len(files),
-                    min(2 * cfg.evaluation.batch_size, int(0.9 * len(files))),
-                    replace=False,
-                )
-                .tolist()
+            test_idxes = random.sample(
+                range(len(files)),
+                min(2 * cfg.evaluation.batch_size, int(0.9 * len(files))),
             )
             test_files = [files[i] for i in test_idxes]
             train_files = [f for f in files if f not in test_files]
@@ -456,6 +501,29 @@ def _build_train_test_splits(
         ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
         all_train_files[timestamp] = train_files
         all_test_files[timestamp] = test_files
+
+    # use as many training samples as the hard augmented, unpaired version if asked for
+    # TODO: move checks to the config composition (should always be checked anyway)
+    if cfg.training.as_many_samples_as_unpaired:
+        assert not cfg.training.unpaired_data, "as_many_samples_as_unpaired and unpaired_data are mutually exclusive"
+        # mult_factor = 1 if using already augmented dataset, 8 otherwise
+        if "_hard_augmented" in cfg.dataset.name:
+            mult_factor = 1
+        else:
+            removed_flips_and_rotations = remove_flips_and_rotations_from_transforms(
+                instantiate(cfg.dataset.transforms)
+            )[1]
+            assert (
+                removed_flips_and_rotations == []
+            ), f"Expected no flips nor rotations in the dataset transforms if using hard augmented dataset, got {removed_flips_and_rotations}"
+            mult_factor = 8  # x8 augmentation is hard-coded here
+        logger.warning(
+            f"Using as many samples as the unpaired, x8 hard-augmented dataset: will multiply by {round(mult_factor // len(files_dict_per_time), 2)}"
+        )
+        for timestep, files in files_dict_per_time.items():
+            orig_nb_samples = len(files)
+            nb_samples_if_unpaired = orig_nb_samples * mult_factor // len(files_dict_per_time)
+            all_train_files[timestep] = random.sample(files, nb_samples_if_unpaired)
 
     return all_train_files, all_test_files
 
@@ -498,7 +566,13 @@ def extract_video_id(filename: str) -> tuple[str, str]:
 
 
 def remove_flips_and_rotations_from_transforms(transforms: Compose):
-    """Filter out `RandomHorizontalFlip`, `RandomVerticalFlip` and `RandomRotationSquareSymmetry`."""
+    """
+    Filter out `RandomHorizontalFlip`, `RandomVerticalFlip` and `RandomRotationSquareSymmetry` from `transforms`.
+
+    ### Return
+    - A new `Compose` object without the flips and rotations
+    - `list` of the types of the removed transforms
+    """
     is_flip_or_rotation = lambda t: isinstance(  # noqa: E731
         t, (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry)
     )
