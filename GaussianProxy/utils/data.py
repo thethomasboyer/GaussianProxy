@@ -507,7 +507,7 @@ def _build_train_test_splits(
     if cfg.training.as_many_samples_as_unpaired:
         assert not cfg.training.unpaired_data, "as_many_samples_as_unpaired and unpaired_data are mutually exclusive"
         # mult_factor = 1 if using already augmented dataset, 8 otherwise
-        if "_hard_augmented" in cfg.dataset.name:
+        if "_hard_augmented" in cfg.dataset.path.name:
             mult_factor = 1
         else:
             removed_flips_and_rotations = remove_flips_and_rotations_from_transforms(

@@ -98,7 +98,7 @@ class Training:
     max_grad_norm: int
     nb_time_samplings: int
     unpaired_data: bool
-    as_many_samples_as_unpaired: bool
+    as_many_samples_as_unpaired: bool = False
 
 
 @dataclass(kw_only=True)
