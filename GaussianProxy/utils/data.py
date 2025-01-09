@@ -364,7 +364,7 @@ def _dataset_builder(
             shuffle=False,  # keep the order for consistent logging
         )
 
-    # Save train/test split to disk if new
+    # Save train/test split to disk if new TODO: save root path of dataset only once!
     if build_new_train_test_split:
         serializable_train_files = {
             time: [p.as_posix() for p in list_paths] for time, list_paths in all_train_files.items()
@@ -507,7 +507,7 @@ def _build_train_test_splits(
     if cfg.training.as_many_samples_as_unpaired:
         assert not cfg.training.unpaired_data, "as_many_samples_as_unpaired and unpaired_data are mutually exclusive"
         # mult_factor = 1 if using already augmented dataset, 8 otherwise
-        if "_hard_augmented" in cfg.dataset.path.name:
+        if "_hard_augmented" in Path(cfg.dataset.path).name:
             mult_factor = 1
         else:
             removed_flips_and_rotations = remove_flips_and_rotations_from_transforms(

@@ -78,7 +78,7 @@ for exp_rep in trange(nb_repeats, desc="Building splits of experiment repeats", 
 
 nb_elems_per_class["all_classes"] = sum(nb_elems_per_class.values())
 print("Experiment repeats:")
-pprint({k: str(v) for k, v in exp_repeats.items()})
+pprint({k: {inner_k: str(inner_v)} for k, v in exp_repeats.items() for inner_k, inner_v in v.items()})
 
 
 # FID
@@ -97,9 +97,9 @@ def compute_metrics(batch_size: int, metrics_save_path: Path):
             input2=exp_repeats[exp_rep]["split2"],
             cuda=True,
             batch_size=batch_size,
-            isc=True,
+            isc=False,
             fid=True,
-            prc=True,
+            prc=False,
             verbose=True,
             samples_find_deep=True,
         )
@@ -122,9 +122,9 @@ def compute_metrics(batch_size: int, metrics_save_path: Path):
                 input2=ds2_this_cl,
                 cuda=True,
                 batch_size=batch_size,
-                isc=True,
+                isc=False,
                 fid=True,
-                prc=True,
+                prc=False,
                 verbose=True,
             )
             metrics_dict[subdir.name] = metrics_dict_cl
@@ -136,6 +136,7 @@ def compute_metrics(batch_size: int, metrics_save_path: Path):
         metrics_save_path.parent.mkdir(parents=True)
     with open(metrics_save_path, "w") as f:
         json.dump(eval_metrics, f)
+    print(f"Saved metrics to {metrics_save_path}")
 
     return eval_metrics
 
@@ -160,6 +161,7 @@ else:
     warn(f"Will not recompute but load from {metrics_save_path}")
     with open(metrics_save_path, "r") as f:
         eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
+print("Metrics computed:")
 pprint(eval_metrics)
 # Extract class names and FID scores for training data vs training data
 class_names = list(eval_metrics["exp_rep_0"].keys())
@@ -169,4 +171,5 @@ for exp_rep in eval_metrics.values():
     for class_name in class_names:
         fid_scores_by_class_train[class_name].append(exp_rep[class_name]["frechet_inception_distance"])
 
+print("FID scores by timesteps:")
 pprint(fid_scores_by_class_train)
