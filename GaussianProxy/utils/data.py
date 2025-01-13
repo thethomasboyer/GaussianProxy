@@ -309,6 +309,12 @@ def _dataset_builder(
     train_dataloaders_dict = {}
     test_dataloaders_dict = {}
     transforms = instantiate(cfg.dataset.transforms)
+    # remove flips and rotations if as_many_samples_as_unpaired and hard augmented dataset used
+    if cfg.training.as_many_samples_as_unpaired and "_hard_augmented" not in Path(cfg.dataset.path).name:
+        transforms, removed_transforms = remove_flips_and_rotations_from_transforms(transforms)
+        logger.warning(
+            f"as_many_samples_as_unpaired is True and '_hard_augmented' in dataset path ({cfg.dataset.path}): removed flips and rotations ({removed_transforms}) from transforms"
+        )
     # no flips nor rotations for consistent evaluation
     test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
     logger.warning(
@@ -510,12 +516,6 @@ def _build_train_test_splits(
         if "_hard_augmented" in Path(cfg.dataset.path).name:
             mult_factor = 1
         else:
-            removed_flips_and_rotations = remove_flips_and_rotations_from_transforms(
-                instantiate(cfg.dataset.transforms)
-            )[1]
-            assert (
-                removed_flips_and_rotations == []
-            ), f"Expected no flips nor rotations in the dataset transforms if using hard augmented dataset, got {removed_flips_and_rotations}"
             mult_factor = 8  # x8 augmentation is hard-coded here
         logger.warning(
             f"Using as many samples as the unpaired, x8 hard-augmented dataset: will multiply by {round(mult_factor // len(files_dict_per_time), 2)}"
