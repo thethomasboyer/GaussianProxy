@@ -1545,7 +1545,7 @@ class TimeDiffusion:
 
         ##### 4. Check if best model to date
         # TODO: WARNING: only "smaller is better" metrics are supported!
-        best_metric_to_date = None  # both flag and value holder for potential new best metric
+        new_best_metric_to_date: bool | float = False  # both flag and value holder for potential new best metric
         if "all_times" not in final_metrics_dict:
             self.logger.warning(
                 "No 'all_times' key in final_metrics_dict, will update best_metric_to_date with the average FID of all times"
@@ -1554,15 +1554,16 @@ class TimeDiffusion:
                 final_metrics_dict[time]["frechet_inception_distance"] for time in final_metrics_dict
             ) / len(final_metrics_dict)
             if self.cfg.debug or self.best_metric_to_date > avg_metric:
-                best_metric_to_date = avg_metric
+                new_best_metric_to_date = avg_metric
         elif self.cfg.debug or self.best_metric_to_date > final_metrics_dict["all_times"]["frechet_inception_distance"]:
-            best_metric_to_date = final_metrics_dict["all_times"]["frechet_inception_distance"]
+            new_best_metric_to_date = final_metrics_dict["all_times"]["frechet_inception_distance"]
 
-        if best_metric_to_date is not None:
-            self.best_metric_to_date = best_metric_to_date
-            self.accelerator.log({"training/best_metric_to_date": self.best_metric_to_date})
+        if new_best_metric_to_date is not False:
+            self.best_metric_to_date = new_best_metric_to_date
             self.logger.info(f"Saving best model to date with FID: {self.best_metric_to_date}")
             self._save_pipeline()
+        # log best_metric_to_date at each eval, even if not better
+        self.accelerator.log({"training/best_metric_to_date": self.best_metric_to_date})
 
         ##### 5. Clean up (important because we reuse existing generated samples!)
         # pickled metrics can be left without issue
