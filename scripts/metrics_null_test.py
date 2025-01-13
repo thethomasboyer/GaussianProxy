@@ -31,7 +31,7 @@ from GaussianProxy.utils.data import RandomRotationSquareSymmetry
 torch.set_grad_enabled(False)
 
 # Dataset
-from my_conf.dataset.chromalive6h_3ch_png_hard_aug_inference import dataset  # noqa: E402
+from my_conf.dataset.chromalive6h_3ch_png_inference import dataset  # noqa: E402
 
 assert dataset.dataset_params is not None
 database_path = Path(dataset.path)
@@ -84,6 +84,9 @@ pprint({k: {inner_k: str(inner_v)} for k, v in exp_repeats.items() for inner_k, 
 # FID
 ## Compute train vs train FIDs
 def compute_metrics(batch_size: int, metrics_save_path: Path):
+    if metrics_save_path.exists():
+        raise RuntimeError(f"File {metrics_save_path} already exists, not overwriting")
+
     eval_metrics = {}
 
     for exp_rep in tqdm(exp_repeats, unit="experiment repeat", desc="Computing metrics"):
@@ -97,9 +100,8 @@ def compute_metrics(batch_size: int, metrics_save_path: Path):
             input2=exp_repeats[exp_rep]["split2"],
             cuda=True,
             batch_size=batch_size,
-            isc=False,
             fid=True,
-            prc=False,
+            prc=True,
             verbose=True,
             samples_find_deep=True,
         )
@@ -122,16 +124,13 @@ def compute_metrics(batch_size: int, metrics_save_path: Path):
                 input2=ds2_this_cl,
                 cuda=True,
                 batch_size=batch_size,
-                isc=False,
                 fid=True,
-                prc=False,
+                prc=True,
                 verbose=True,
             )
             metrics_dict[subdir.name] = metrics_dict_cl
         eval_metrics[exp_rep] = metrics_dict  # for saving to json
 
-    if metrics_save_path.exists():
-        raise RuntimeError(f"File {metrics_save_path} already exists, not overwriting")
     if not metrics_save_path.parent.exists():
         metrics_save_path.parent.mkdir(parents=True)
     with open(metrics_save_path, "w") as f:
