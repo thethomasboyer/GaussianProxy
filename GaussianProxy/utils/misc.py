@@ -35,7 +35,7 @@ def create_repo_structure(
     """
     The repo structure is as follows:
     ```
-    exp_parent_folder
+    cfg.exp_parent_folder
     |   <experiment_name>
     |   |   <run_name>
     |   |   |   <yyyy-mm-dd>
@@ -56,6 +56,10 @@ def create_repo_structure(
 
     A run might have multiple <yyyy-mm-dd>/<hh-mm-ss> folders (launch times),
     each one containing a `.hydra` and `logs.log` file, if it is resumed or simply overwritten.
+
+    Also sets the torch hub dir to `cfg.exp_parent_folder/.cache/torch/hub`.
+
+    Must be called by all processes.
     """
     if accelerator.is_main_process:
         this_run_folder.mkdir(exist_ok=True)
@@ -92,6 +96,12 @@ def create_repo_structure(
                 "UNTIL IT REACHES THE LAST CHECKPOINTING STEP ALREADY PRESENT IN THE FOLDER.\033[0m\n"
             )
             logger.warning(msg)
+
+    # Set torch hub cache dir to reuse pre-downloaded model weights for eval
+    # (important for offline runs)
+    torch_hub_path = Path(cfg.exp_parent_folder, ".cache", "torch", "hub")
+    torch_hub_path.mkdir(parents=True, exist_ok=True)
+    torch.hub.set_dir(torch_hub_path.as_posix())
 
     return models_save_folder, saved_artifacts_folder, chckpt_save_path
 
