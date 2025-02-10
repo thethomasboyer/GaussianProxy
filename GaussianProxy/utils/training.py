@@ -1317,8 +1317,8 @@ class TimeDiffusion:
         eval_strat: MetricsComputation,
         eval_net: UNet2DModel | UNet2DConditionModel,
         inference_video_time_encoding: VideoTimeEncoding,
-        train_data_dataloaders: dict[float, DataLoader],
-        test_data_dataloaders: dict[float, DataLoader],
+        train_dataloaders: dict[float, DataLoader],
+        test_dataloaders: dict[float, DataLoader],
         # dataset_class: type[BaseDataset],
     ):
         """
@@ -1350,7 +1350,7 @@ class TimeDiffusion:
 
         # get true datasets to compare against (in [0; 255] uint8 PNG images)
         true_datasets_to_compare_with = self._get_true_datasets_for_metrics_computation(
-            eval_strat, eval_video_times, train_data_dataloaders, test_data_dataloaders
+            eval_strat, eval_video_times, train_dataloaders, test_dataloaders
         )
 
         ##### 1. Generate the samples
@@ -1647,8 +1647,8 @@ class TimeDiffusion:
         self,
         eval_strat: MetricsComputation,
         eval_video_times: list[float],
-        train_data_dataloaders: dict[float, DataLoader],
-        test_data_dataloaders: dict[float, DataLoader],
+        train_dataloaders: dict[float, DataLoader],
+        test_dataloaders: dict[float, DataLoader],
     ):
         """Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images"""
         # Misc.
@@ -1656,11 +1656,11 @@ class TimeDiffusion:
         eval_time_names = [self.timesteps_floats_to_names[eval_time] for eval_time in eval_video_times]
         true_datasets_to_compare_with: dict[str, BaseDataset] = {}
         # TODO: clean this mess when the dataset params is moved into the config (see TODO in data.py)
-        dataset_class: type[BaseDataset] = type(train_data_dataloaders[0].dataset)  # pyright: ignore[reportAssignmentType]
-        common_suffix = train_data_dataloaders[0].dataset.samples[0].suffix  # pyright: ignore[reportAttributeAccessIssue]
+        dataset_class: type[BaseDataset] = type(train_dataloaders[0].dataset)  # pyright: ignore[reportAssignmentType]
+        common_suffix = train_dataloaders[0].dataset.samples[0].suffix  # pyright: ignore[reportAttributeAccessIssue]
 
         # Use the correct image processing ([0; 255] uint8) for metrics computation
-        test_transforms: Compose = test_data_dataloaders[0].dataset.transforms  # pyright: ignore[reportAttributeAccessIssue]
+        test_transforms: Compose = test_dataloaders[0].dataset.transforms  # pyright: ignore[reportAttributeAccessIssue]
         assert any(
             isinstance(t, transforms.Normalize) for t in test_transforms.transforms
         ), f"Expected normalization to be in test transforms, got : {test_transforms}"
@@ -1695,8 +1695,8 @@ class TimeDiffusion:
             for time_name in eval_time_names:
                 time_float = self.timesteps_names_to_floats[time_name]
                 all_files = (
-                    train_data_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
-                    + test_data_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
+                    train_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
+                    + test_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
                 )
                 true_datasets_to_compare_with[time_name] = dataset_class(
                     samples=all_files,
