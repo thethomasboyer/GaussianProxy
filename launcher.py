@@ -35,19 +35,18 @@ from rich.traceback import install
 from termcolor import colored
 
 from GaussianProxy.conf.training_conf import Config
+
+# Load the config *object* from the training config file
 from my_conf.my_training_conf import config
+
+# Register the `config` *object*
+DEFAULT_CONFIG_PATH = "my_conf"
+DEFAULT_CONFIG_NAME = "experiment_conf"
+cs = ConfigStore.instance()
+cs.store(name=DEFAULT_CONFIG_NAME, node=config)
 
 # nice tracebacks
 install()
-
-# hardcoded config paths
-DEFAULT_CONFIG_PATH = "my_conf"
-DEFAULT_CONFIG_NAME = "experiment_conf"
-
-
-# Register the `config` *object* defined in <DEFAULT_CONFIG_PATH>/<DEFAULT_CONFIG_NAME>.py
-cs = ConfigStore.instance()
-cs.store(name=DEFAULT_CONFIG_NAME, node=config)
 
 # wait for this amount of seconds before automatically launching the job when debug flag is set
 CONFIRMATION_TIME_LAUNCH_DEBUG_SEC = 5
