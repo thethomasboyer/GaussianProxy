@@ -147,7 +147,7 @@ def setup_dataloaders(
     accelerator,
     num_workers: int,
     logger: MultiProcessAdapter,
-    this_run_folder,
+    this_run_folder: Path,
     chckpt_save_path: Path,
     debug: bool = False,
 ) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
@@ -299,7 +299,7 @@ def _dataset_builder(
             chckpt_save_path,
         )
     else:
-        all_train_files, all_test_files = _load_train_test_splits(this_run_folder, logger)
+        all_train_files, all_test_files = load_train_test_splits(this_run_folder, logger)
     assert (
         all_train_files.keys() == all_test_files.keys()
     ), f"Expected same timestamps between train and test split, got: {all_train_files.keys()} vs {all_test_files.keys()}"
@@ -308,7 +308,10 @@ def _dataset_builder(
     # Build train datasets & test dataloaders
     train_dataloaders_dict = {}
     test_dataloaders_dict = {}
-    transforms = instantiate(cfg.dataset.transforms)
+    if type(cfg.dataset.transforms) is not Compose:
+        transforms: Compose = instantiate(cfg.dataset.transforms)
+    else:
+        transforms = cfg.dataset.transforms
     # remove flips and rotations if as_many_samples_as_unpaired and hard augmented dataset used
     if cfg.training.as_many_samples_as_unpaired and "_hard_augmented" not in Path(cfg.dataset.path).name:
         transforms, removed_transforms = remove_flips_and_rotations_from_transforms(transforms)
@@ -528,7 +531,7 @@ def _build_train_test_splits(
     return all_train_files, all_test_files
 
 
-def _load_train_test_splits(
+def load_train_test_splits(
     this_run_folder: Path, logger: MultiProcessAdapter
 ) -> tuple[dict[TimeKey, list[Path]], dict[TimeKey, list[Path]]]:
     # train
