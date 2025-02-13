@@ -500,7 +500,7 @@ def save_images_for_metrics_compute(
     save_folder: Path,
     process_idx: Optional[int] = None,
 ):
-    """Saves to [0; 255] uint8 PNG images in the given folder."""
+    """Saves [-1;1] tensors to [0; 255] uint8 PNG images in the given folder."""
     # Checks
     assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
     save_folder.mkdir(parents=True, exist_ok=True)

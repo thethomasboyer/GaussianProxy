@@ -1436,6 +1436,7 @@ class TimeDiffusion:
 
         ##### 1.5 Augment the generated samples if applicable
         if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+            self.logger.info("Augmenting generated samples for metrics computation")
             # on main process:
             if self.accelerator.is_main_process:
                 # augment
@@ -1455,6 +1456,7 @@ class TimeDiffusion:
                     nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class
                 ), f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
 
+        # wait for data augmentation to finish before returning
         self.accelerator.wait_for_everyone()
 
         ##### 2. Compute metrics
@@ -1491,8 +1493,14 @@ class TimeDiffusion:
         metrics_dict: dict[str, dict[str, float]] = {}
         for task in tasks_for_this_process:
             gen_samples_input = metrics_computation_folder / task if task != "all_times" else metrics_computation_folder
+            nb_samples_gen = len(list(gen_samples_input.iterdir()))
+            nb_true_samples = len(true_datasets_to_compare_with[task])
+            if nb_samples_gen != nb_true_samples:
+                self.logger.warning(
+                    f"Mismatch in the number of samples for task {task}: {nb_samples_gen} generated vs {nb_true_samples} true"
+                )
             self.logger.debug(
-                f"Computing metrics on {len(list(gen_samples_input.iterdir()))} generated samples at {gen_samples_input.as_posix()} vs {len(true_datasets_to_compare_with[task])} true samples at {true_datasets_to_compare_with[task].base_path} on process {self.accelerator.process_index}",
+                f"Computing metrics on {nb_samples_gen} generated samples at {gen_samples_input.as_posix()} vs {nb_true_samples} true samples at {true_datasets_to_compare_with[task].base_path} on process {self.accelerator.process_index}",
                 main_process_only=False,
             )
             metrics = torch_fidelity.calculate_metrics(
@@ -1650,7 +1658,13 @@ class TimeDiffusion:
         train_dataloaders: dict[float, DataLoader],
         test_dataloaders: dict[float, DataLoader],
     ):
-        """Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images"""
+        """
+        Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images.
+
+        Depending on `eval_strat.nb_samples_to_gen_per_time` the true datasets returned by this function can be:
+        - the hard augmented versions if `nb_samples_to_gen_per_time == "adapt half aug"`
+        - half of the whatever is used from last step if `"half" in nb_samples_to_gen_per_time`
+        """
         # Misc.
         base_dataset_path = Path(self.cfg.dataset.path)
         eval_time_names = [self.timesteps_floats_to_names[eval_time] for eval_time in eval_video_times]
@@ -1667,13 +1681,18 @@ class TimeDiffusion:
         metrics_compute_transforms = Compose(
             [
                 test_transforms,  # test transforms *must* include the normalization to [-1, 1]
-                transforms.Normalize(mean=[-1], std=[2]),  # Convert from [-1, 1] to [0, 1]
+                transforms.Normalize(
+                    mean=[-1] * self.data_shape[0], std=[2] * self.data_shape[0]
+                ),  # Convert from [-1, 1] to [0, 1]
                 transforms.ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
             ]
         )
+        self.logger.debug(f"Using transforms for metrics computation: {metrics_compute_transforms}")
         # TODO: programmatically check consistency with true samples processing in misc/save_images_for_metrics_compute
 
-        # Use the hard augmented version of the dataset if it's not the one we are already training on
+        all_true_files_per_time = {}
+        # Use the hard augmented version of the dataset if generating augmented samples,
+        # but it's not the one we are already training on
         if (
             eval_strat.nb_samples_to_gen_per_time == "adapt half aug"  # pyright: ignore[reportAttributeAccessIssue]
             and "_hard_augmented" not in base_dataset_path.name
@@ -1683,25 +1702,30 @@ class TimeDiffusion:
                     base_dataset_path.with_name(base_dataset_path.name + "_hard_augmented") / time_name
                 )
                 self.logger.debug(f"Using hard augmented version of time {time_name}: {hard_aug_ds_this_time_path}")
-                all_files = [
+                all_true_files_per_time[time_name] = [
                     f for f in hard_aug_ds_this_time_path.iterdir() if f.is_file() and f.suffix == common_suffix
                 ]
-                true_datasets_to_compare_with[time_name] = dataset_class(
-                    samples=all_files,
-                    transforms=metrics_compute_transforms,
-                )
         # Otherwise, simply use all available data from the dataset we're using to train (and test)
         else:
             for time_name in eval_time_names:
                 time_float = self.timesteps_names_to_floats[time_name]
-                all_files = (
+                all_true_files_per_time[time_name] = (
                     train_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
                     + test_dataloaders[time_float].dataset.samples  # pyright: ignore[reportAttributeAccessIssue]
                 )
-                true_datasets_to_compare_with[time_name] = dataset_class(
-                    samples=all_files,
-                    transforms=metrics_compute_transforms,
-                )
+
+        # Then if generating half the number of samples, take half of the available true data to compare with
+        for time_name in all_true_files_per_time.keys():
+            all_true_files_per_time[time_name] = all_true_files_per_time[time_name][
+                : len(all_true_files_per_time[time_name]) // 2
+            ]
+
+        # Finally instantiate the datasets
+        for time_name, all_files in all_true_files_per_time.items():
+            true_datasets_to_compare_with[time_name] = dataset_class(
+                samples=all_files,
+                transforms=metrics_compute_transforms,
+            )
 
         # Check that datasets are well-formed
         for time_name, dataset in true_datasets_to_compare_with.items():

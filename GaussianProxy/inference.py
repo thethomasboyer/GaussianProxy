@@ -1373,7 +1373,7 @@ def metrics_computation(
     for video_time_names in list(classnames2timesteps.keys()):
         metrics_caches[video_time_names] = metrics_computation_folder / (cfg.dataset.name + "_time_" + video_time_names)
 
-    # clear the dataset caches (on first eval of a run only...)
+    # clear the dataset caches
     # because the dataset might not be exactly the same that in the previous run,
     # despite having the same cfg.dataset.name (used as ID): risk of invalid cache!
     # clear on main process
@@ -1398,7 +1398,9 @@ def metrics_computation(
         nb_samples_gen = len(list(gen_samples_input.iterdir()))
         nb_true_samples = len(true_datasets_to_compare_with[task])
         if nb_samples_gen != nb_true_samples:
-            logger.warning(f"Mismatch in the number of samples: {nb_samples_gen} generated vs {nb_true_samples} true")
+            logger.warning(
+                f"Mismatch in the number of samples for task {task}: {nb_samples_gen} generated vs {nb_true_samples} true"
+            )
         logger.debug(
             f"Computing metrics on {nb_samples_gen} generated samples at {gen_samples_input.as_posix()} vs {nb_true_samples} true samples at {true_datasets_to_compare_with[task].base_path} on process {accelerator.process_index}",
             main_process_only=False,
