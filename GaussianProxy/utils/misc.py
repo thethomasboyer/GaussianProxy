@@ -1,5 +1,5 @@
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
 from logging import Logger
@@ -693,19 +693,20 @@ def hard_augment_dataset_all_square_symmetries(dataset_path: Path, logger: Multi
     # Save augmented images
     logger.debug("Writing augmented datasets to disk")
 
-    def aug_save_img(base_img_path: Path):
-        base_img = Image.open(base_img_path)
-        augs = generate_all_augs(base_img, [RandomRotationSquareSymmetry, RandomHorizontalFlip, RandomVerticalFlip])
-        for aug_idx, aug in enumerate(augs[1:]):  # skip the original image
-            save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}{base_img_path.suffix}"
-            aug.save(save_path)
-
     futures = []
-    with ThreadPoolExecutor() as executor:  # TODO: try processes if this becomes long
+    with ProcessPoolExecutor() as executor:
         for base_img in all_base_imgs:
-            futures.append(executor.submit(aug_save_img, base_img))
+            futures.append(executor.submit(_aug_save_img, base_img))
 
         for future in as_completed(futures):
             future.result()  # raises exception if any
 
     logger.debug("Finished augmenting datasets to disk")
+
+
+def _aug_save_img(base_img_path: Path):
+    base_img = Image.open(base_img_path)
+    augs = generate_all_augs(base_img, [RandomRotationSquareSymmetry, RandomHorizontalFlip, RandomVerticalFlip])
+    for aug_idx, aug in enumerate(augs[1:]):  # skip the original image
+        save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}{base_img_path.suffix}"
+        aug.save(save_path)
