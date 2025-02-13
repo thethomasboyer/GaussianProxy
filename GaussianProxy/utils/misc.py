@@ -143,8 +143,9 @@ def modify_args_for_debug(
                 wandb_tracker.config.update({"/".join(param_name_tuple): new_param_value}, allow_val_change=True)
     # now change the evaluation strategies' configurations
     for strat in cfg.evaluation.strategies:
+        logger.warning(f"{strat}.nb_diffusion_timesteps: {strat.nb_diffusion_timesteps} -> 5")
         strat.nb_diffusion_timesteps = 5
-        if hasattr(strat, "nb_samples_to_gen_per_time"):
+        if hasattr(strat, "nb_samples_to_gen_per_time"):  # TODO move this check to the dedicated "checks" function?
             assert hasattr(strat, "batch_size"), "Expected batch_size to be present"
             # only change it if it's a hard-coded value
             if isinstance(getattr(strat, "nb_samples_to_gen_per_time"), int):

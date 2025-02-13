@@ -1338,6 +1338,13 @@ class TimeDiffusion:
             main_process_only=False,
         )
         metrics_computation_folder = tmp_save_folder / f"metrics_computation_step_{self.global_optimization_step}"
+        # metrics_computation_folder should have been cleared with the entire tmp_inference_save folder,
+        # but still clear it here to ensure clean state
+        if self.accelerator.is_main_process:
+            if metrics_computation_folder.exists():
+                shutil.rmtree(metrics_computation_folder)
+            metrics_computation_folder.mkdir()
+        self.accelerator.wait_for_everyone()
 
         # use training time encodings
         eval_video_times = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
@@ -1377,7 +1384,6 @@ class TimeDiffusion:
             this_proc_gen_batches = self._find_this_proc_this_time_batches_for_metrics_comp(
                 eval_strat,
                 true_datasets_to_compare_with[video_time_name].base_path / video_time_name,
-                gen_dir,
             )
 
             batches_pbar = pbar_manager.counter(
@@ -1460,11 +1466,14 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         ##### 2. Compute metrics
-        # consistency of cache naming with below is important
-        metrics_caches: dict[str, Path] = {"all_times": metrics_computation_folder / self.cfg.dataset.name}
+        # consistency of cache naming (the keys of the dict) with the `calculate_metrics` call is important
+        # because fidelity takes a root and a name, not a full path -> "common root + only final folder name changes" needed here
+        metrics_caches: dict[str, Path] = {
+            "all_times": self.chckpt_save_path / "fidelity_caches" / self.cfg.dataset.name
+        }
         for video_time_names in list(self.timesteps_names_to_floats.keys()):
-            metrics_caches[video_time_names] = metrics_computation_folder / (
-                self.cfg.dataset.name + "_time_" + video_time_names
+            metrics_caches[video_time_names] = (
+                self.chckpt_save_path / "fidelity_caches" / (self.cfg.dataset.name + "_time_" + video_time_names)
             )
 
         # clear the dataset caches (on first eval of a run only...)
@@ -1512,7 +1521,7 @@ class TimeDiffusion:
                 fid=True,
                 prc=False,
                 verbose=self.cfg.debug and self.accelerator.is_main_process,
-                cache_root=metrics_computation_folder.as_posix(),
+                cache_root=(self.chckpt_save_path / "fidelity_caches").as_posix(),
                 input1_cache_name=metrics_caches[task].name,
                 samples_find_deep=task == "all_times",
             )
@@ -1583,7 +1592,6 @@ class TimeDiffusion:
         self,
         eval_strat: MetricsComputation,
         true_data_class_path: Path,
-        gen_dir: Path,
     ) -> list[int]:
         """
         Return the list of batch sizes to generate, for a given `video_time_idx` and splitting between processes.
@@ -1621,13 +1629,6 @@ class TimeDiffusion:
             raise ValueError(
                 f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', 'adapt half', or 'adapt half aug', got {eval_strat.nb_samples_to_gen_per_time}"
             )
-
-        # Resume from interrupted generation
-        already_existing_samples = len(list(gen_dir.iterdir()))
-        self.logger.debug(
-            f"Found {already_existing_samples} already existing samples for time {true_data_class_path.name} at {gen_dir}"
-        )
-        tot_nb_samples -= already_existing_samples
 
         # share equally among processes & batchify
         # the code below ensures all processes have the same number of batches to generate,
