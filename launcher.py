@@ -99,7 +99,7 @@ def main(cfg: Config) -> None:
 
         # get the total number of cpus
         match cfg.slurm.constraint:
-            case "a100":
+            case "a100" | "h100":
                 cpus_per_task = int(64 * cfg.slurm.num_gpus / 8)
             case s if isinstance(s, str) and s.startswith("v100"):
                 assert (
