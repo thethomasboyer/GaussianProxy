@@ -268,7 +268,7 @@ def save_eval_artifacts_log_to_wandb(
         ), f"Expected 1, 3 or 4 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
 
     # normalize images / videos for logging
-    normalized_elements_for_logging = _normalize_elements_for_logging(sel_to_save, logging_normalization)
+    normalized_elements_for_logging = normalize_elements_for_logging(sel_to_save, logging_normalization)
 
     # videos case
     if tensors_to_save.ndim == 5:
@@ -331,9 +331,9 @@ def save_eval_artifacts_log_to_wandb(
 
 
 @torch.inference_mode()
-def _normalize_elements_for_logging(elems: Tensor, logging_normalization: list[str]) -> dict[str, ndarray]:
+def normalize_elements_for_logging(elems: Tensor, logging_normalization: list[str]) -> dict[str, ndarray]:
     """
-    Normalize images or videos for logging to W&B.
+    Normalize [-1; 1] images or videos for logging to W&B.
 
     Output range and type is *always* `[0;255]` and `np.uint8`.
     """
@@ -506,7 +506,9 @@ def save_images_for_metrics_compute(
     save_folder.mkdir(parents=True, exist_ok=True)
 
     # Normalize images to [0;255] np.uint8 range
-    normalized_imgs = _normalize_elements_for_logging(images, ["-1_1 raw"])["-1_1 raw"]
+    if not (-1 <= images.min() and images.max() <= 1):
+        print(f"Expected [-1;1] range, got {images.min()} to {images.max()}")
+    normalized_imgs = normalize_elements_for_logging(images, ["-1_1 raw"])["-1_1 raw"]
 
     def _save_image_wrapper(img: ndarray, img_idx: int):
         pil_img = Image.fromarray(img.transpose(1, 2, 0))
