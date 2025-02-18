@@ -1,4 +1,4 @@
-import importlib.util
+import ast
 import logging
 import operator
 import pickle
@@ -6,6 +6,7 @@ import random
 import shutil
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import ceil
 from pathlib import Path
 from typing import Optional
@@ -45,7 +46,6 @@ from torchvision.utils import make_grid
 
 from GaussianProxy.conf.inference_conf import InferenceConfig
 from GaussianProxy.conf.training_conf import (
-    Config,
     ForwardNoising,
     ForwardNoisingLinearScaling,
     InvertedRegeneration,
@@ -56,7 +56,6 @@ from GaussianProxy.conf.training_conf import (
 )
 from GaussianProxy.utils.data import (
     BaseDataset,
-    load_train_test_splits,
     remove_flips_and_rotations_from_transforms,
 )
 from GaussianProxy.utils.misc import (
@@ -323,21 +322,14 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
             timesteps2classnames = dict(zip(empirical_timesteps, [s.name for s in subdirs]))
             ### We need the full datasets/loaders for this method
             training_run_folder = cfg.output_dir.parent
-            assert (  # we must have `train_samples.json` & `test_samples.json` in there!
-                Path(training_run_folder, "train_samples.json").exists()
-                and Path(training_run_folder, "test_samples.json").exists()
-            )
-            # load the original training config in <training_run_folder>/my_conf to know if the training was with unpaired data
-            logger.info(f"Loading training config from {training_run_folder / 'my_conf' / 'my_training_conf.py'}")
-            spec = importlib.util.spec_from_file_location(
-                "my_training_conf", training_run_folder / "my_conf" / "my_training_conf.py"
-            )
-            assert (
-                spec is not None
-            ), f"Could not find training config at {training_run_folder / 'my_conf' / 'my_training_conf.py'}"
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)  # pyright: ignore[reportOptionalMemberAccess]
-            training_conf: Config = module.config
+            # use the original training config in <training_run_folder>/my_conf to know if the training was with unpaired data
+            try:
+                training_was_with_unpaired_data = get_training_boolean_value(
+                    training_run_folder / "my_conf" / "my_training_conf.py", "unpaired_data"
+                )
+            except AttributeError as e:
+                logger.warning(str(e))
+                training_was_with_unpaired_data = False
             metrics_computation(
                 cfg,
                 eval_strat,
@@ -349,11 +341,28 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 pbar_manager,
                 logger,
                 accelerator,
-                training_conf.training.unpaired_data,
-                subdirs,
+                training_was_with_unpaired_data,
             )
         else:
             raise ValueError(f"Unknown evaluation strategy {eval_strat}")
+
+
+def get_training_boolean_value(filepath: Path, key: str):
+    with open(filepath, "r") as f:
+        tree = ast.parse(f.read(), filename=filepath)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "training":
+                    # Check if the value is a call to Training(...)
+                    if isinstance(node.value, ast.Call) and getattr(node.value.func, "id", None) == "Training":
+                        for kw in node.value.keywords:
+                            if kw.arg == key:
+                                if isinstance(kw.value, ast.Constant):
+                                    return kw.value.value
+    # Default to False if key is not found
+    raise AttributeError(f"Could not find attribute {key} in the `training=Training(...)` assignement in {filepath}")
 
 
 def simple_gen(
@@ -1297,7 +1306,6 @@ def metrics_computation(
     logger: MultiProcessAdapter,
     accelerator: Accelerator,
     training_was_with_unpaired_data: bool,
-    subdirs: list[Path],
 ):
     """
     Compute metrics such as FID.
@@ -1330,21 +1338,17 @@ def metrics_computation(
 
     # get true datasets to compare against (in [0; 255] uint8 PNG images)
     assert cfg.dataset.dataset_params is not None
-    train_samples_per_time, test_samples_per_time = load_train_test_splits(cfg.output_dir.parent, logger)
     true_datasets_to_compare_with = get_true_datasets_for_metrics_computation(
         eval_strat,
         eval_video_times,
         cfg.dataset.dataset_params.dataset_class,
         cfg.dataset.dataset_params.file_extension,
         cfg.dataset.transforms,
-        train_samples_per_time,
-        test_samples_per_time,
         cfg,
         logger,
         timesteps2classnames,
         training_was_with_unpaired_data,
         metrics_computation_folder,
-        accelerator,
     )
 
     ##### 1. Generate the samples
@@ -1535,8 +1539,6 @@ def _generate_images_for_metrics_computation(
             for t in gen_pbar(inference_scheduler.timesteps):
                 model_output: torch.Tensor = net.forward(image, t, video_time_enc.unsqueeze(1), return_dict=False)[0]  # pyright: ignore[reportArgumentType]
                 image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
-
-            logger.debug(f"Generated image range: {image.min().item()} {image.max().item()}")
 
             # save to [0; 255] uint8 PNG images
             save_images_for_metrics_compute(
@@ -1804,14 +1806,11 @@ def get_true_datasets_for_metrics_computation(
     dataset_class: type[BaseDataset],
     data_files_common_suffix: str,
     test_transforms: Compose,
-    train_samples_per_time: dict[str, list[Path]],
-    test_samples_per_time: dict[str, list[Path]],
     cfg: InferenceConfig,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
     training_was_with_unpaired_data: bool,
     metrics_computation_folder: Path,
-    accelerator: Accelerator,
 ):
     """
     Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images.
@@ -1845,21 +1844,24 @@ def get_true_datasets_for_metrics_computation(
     # Force using the hard augmented version of the dataset if generating augmented samples
     all_files_per_time = {}
     if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-        for time_name in eval_time_names:
-            hard_aug_ds_this_time_path = (
-                base_dataset_path.with_name(base_dataset_path.name.strip("_hard_augmented") + "_hard_augmented")
-                / time_name
-            )
-            logger.debug(f"Using hard augmented version of time {time_name}: {hard_aug_ds_this_time_path}")
-            all_files_per_time[time_name] = [
-                f
-                for f in hard_aug_ds_this_time_path.iterdir()
-                if f.is_file() and f.suffix == "." + data_files_common_suffix
-            ]
+        ds_path = base_dataset_path.with_name(base_dataset_path.name.strip("_hard_augmented") + "_hard_augmented")
+        assert ds_path.exists(), f"Expected existing hard augmented dataset at {ds_path}"
+        logger.debug(f"Using hard augmented version at {ds_path}")
     # Otherwise, simply use all available data from the dataset we're using to train (and test)
     else:
-        for time_name in eval_time_names:
-            all_files_per_time[time_name] = train_samples_per_time[time_name] + test_samples_per_time[time_name]
+        ds_path = base_dataset_path
+
+    # Then retrieve all files for each time
+    def list_files(time_name: str):
+        current_path = ds_path / time_name
+        files = [f for f in current_path.iterdir() if f.is_file() and f.suffix == "." + data_files_common_suffix]
+        return time_name, files
+
+    with ThreadPoolExecutor() as executor:
+        futures = {executor.submit(list_files, t): t for t in eval_time_names}
+        for future in as_completed(futures):
+            time_name, files = future.result()
+            all_files_per_time[time_name] = files
 
     # Then if generating half the number of samples, take half of the available true data to compare with
     for time_name in all_files_per_time.keys():
@@ -1895,12 +1897,9 @@ def get_true_datasets_for_metrics_computation(
         for sample_idx, sample in enumerate(few_samples):
             pil_img = Image.fromarray(sample.permute(1, 2, 0).numpy())
             orig_filename = dataset.samples[few_samples_indexes[sample_idx]].name
-            pil_img.save(
-                metrics_computation_folder
-                / "few_true_samples_for_processing_check"
-                / time
-                / f"{orig_filename}_processed.png"
-            )
+            out_dir = metrics_computation_folder / "few_true_samples_for_processing_check" / time
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pil_img.save(out_dir / f"{orig_filename}_processed.png")
 
     return true_datasets_to_compare_with
 

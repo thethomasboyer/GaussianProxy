@@ -1,0 +1,16 @@
+name: biotine_png_hard_aug
+path:
+data_shape: [ 3, 128, 128 ]
+transforms:
+  _target_: torchvision.transforms.transforms.Compose
+  transforms:
+  - _target_: torchvision.transforms.transforms.Resize
+    size: 128
+  # ConvertImageDtype also scales to [0; 1] (from the *implicit* expected range that depends on the incoming dtype...)
+  - _target_: torchvision.transforms.ConvertImageDtype
+    dtype: ${torch_dtype:float32}
+  - _target_: torchvision.transforms.Normalize
+    mean: [ 0.5, 0.5, 0.5 ]
+    std: [ 0.5, 0.5, 0.5 ]
+selected_dists:
+expected_initial_data_range: [ 0, 255 ]
