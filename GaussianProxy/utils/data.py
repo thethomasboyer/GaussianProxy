@@ -134,7 +134,7 @@ class RandomRotationSquareSymmetry(Transform):
     def __init__(self):
         super().__init__()
 
-    def _transform(self, inpt: Tensor, params) -> Tensor:
+    def transform(self, inpt: Tensor, params) -> Tensor:
         rot = 90 * np.random.randint(4)
         return tf.rotate(inpt, rot)
 
