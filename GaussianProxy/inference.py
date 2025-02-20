@@ -1017,10 +1017,10 @@ def inverted_regeneration(
     diff_time_pbar.close()
 
     save_grid_of_images_or_videos(
-        inverted_gauss,
+        inverted_gauss.to(torch.float32),  # needed for the 5% - 95% (numpy) normalization
         base_save_path,
         "inverted_gaussians",
-        ["image min-max"],
+        ["image min-max", "image 5perc-95perc"],
         eval_strat.n_rows_displayed,
         0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
@@ -1028,7 +1028,7 @@ def inverted_regeneration(
 
     # 3. Generate the trajectory from it
     # the generation is parallelized along video time, but this
-    # usefull if small inference batch size only
+    # useful if small inference batch size only
     video = []
     nb_vid_batches = ceil(eval_strat.nb_video_timesteps / eval_strat.nb_video_times_in_parallel)
 
@@ -1095,14 +1095,25 @@ def inverted_regeneration(
     )
     assert video.shape == expected_video_shape, f"Expected video shape {expected_video_shape}, got {video.shape}"
     logger.debug(f"Saving video tensor of shape {video.shape}")
+    # 2 separate calls here to only save the individual frames of the -1_1 raw version
     save_grid_of_images_or_videos(
         video,
         base_save_path,
         "trajectories",
-        ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
+        ["image min-max", "video min-max", "-1_1 clipped"],
         eval_strat.n_rows_displayed,
         0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
+    )
+    save_grid_of_images_or_videos(
+        video,
+        base_save_path,
+        "trajectories",
+        ["-1_1 raw"],
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
+        logger,
+        also_save_individual_frames=True,
     )
 
 
@@ -1570,6 +1581,7 @@ def save_grid_of_images_or_videos(
     nrows: int,
     padding: int,
     logger: MultiProcessAdapter,
+    also_save_individual_frames: bool = False,
 ):
     """Save a `tensor` of images or videos to disk in a grid of `nrows`×`nrows`."""
     # Save some raw images / trajectories to disk
@@ -1584,7 +1596,7 @@ def save_grid_of_images_or_videos(
             for norm_method, normed_vids in normalized_elements.items():
                 # torch.save the videos in a grid
                 save_path = base_save_path / f"{artifact_name}_{norm_method}.mp4"
-                _save_grid_of_videos(normed_vids, save_path, nrows, padding, logger)
+                _save_grid_of_videos(normed_vids, save_path, nrows, padding, logger, also_save_individual_frames)
                 logger.debug(f"Saved {norm_method} normalized {artifact_name} to {save_path.name}")
         case 4:  # images
             for norm_method, normed_imgs in normalized_elements.items():
@@ -1599,7 +1611,12 @@ def save_grid_of_images_or_videos(
 
 
 def _save_grid_of_videos(
-    videos_tensor: ndarray, save_path: Path, nrows: int, padding: int, logger: MultiProcessAdapter
+    videos_tensor: ndarray,
+    save_path: Path,
+    nrows: int,
+    padding: int,
+    logger: MultiProcessAdapter,
+    also_save_individual_frames: bool = False,
 ):
     # Checks
     assert videos_tensor.ndim == 5, f"Expected 5D tensor, got {videos_tensor.shape}"
@@ -1618,11 +1635,18 @@ def _save_grid_of_videos(
     logger.debug(f"Using fps {fps}")
     writer = imageio.get_writer(save_path, mode="I", fps=fps)
 
+    if also_save_individual_frames:
+        (save_path.parent / save_path.stem).mkdir(exist_ok=True)
+
     for frame_idx, frame in enumerate(videos_tensor):
         grid_img = make_grid(torch.from_numpy(frame), nrow=nrows, padding=padding)
         pil_img = grid_img.numpy().transpose(1, 2, 0)
         logger.debug(f"Adding frame {frame_idx + 1}/{len(videos_tensor)} | shape: {pil_img.shape}")
         writer.append_data(pil_img)
+        if also_save_individual_frames:
+            frame_path = save_path.parent / save_path.stem / f"frame_{frame_idx}.tiff"
+            Image.fromarray(pil_img).save(frame_path)
+            logger.debug(f"Saved frame {frame_idx + 1}/{len(videos_tensor)} at {frame_path}")
 
     writer.close()
 
