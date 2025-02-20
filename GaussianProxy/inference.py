@@ -1,6 +1,7 @@
 import ast
 import logging
 import operator
+import os
 import pickle
 import random
 import shutil
@@ -127,7 +128,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     #                                            Logger
     ###############################################################################################
     logger.info("#\n" + "#" * 120 + "\n#" + " " * 47 + "Starting inference script" + " " * 46 + "#\n" + "#" * 120)
-    logger.info(f"Using device {cfg.device}")
 
     ###############################################################################################
     #                                          Check paths
@@ -149,6 +149,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
         device = cfg.device
     else:
         device = accelerator.device
+    logger.info(f"Using device {device}")
 
     # denoiser
     net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # pyright: ignore[reportAssignmentType]
@@ -201,44 +202,13 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     logger.info(f"Built dataset from {subdirs[0]}:\n{starting_ds}")
     logger.info(f"Using transforms:\n{kept_transforms}")
 
-    # select starting samples to generate from
-    if cfg.plate_name_to_simulate is not None:
-        assert cfg.dataset.name in (
-            "biotine_image",
-            "biotine_image_red_channel",
-        ), f"Only biotine datasets supports plate_name_to_simulate, got {cfg.dataset.name}"
-
-        # if a plate was given, select nb_generated_samples from it, in order
-        glob_pattern = f"{cfg.plate_name_to_simulate}_time_1_patch_*_*.npy"
-        # assuming they are sorted in (x,y) dictionary order
-        all_matching_sample_names = list(Path(cfg.dataset.path, "1").glob(glob_pattern))
-        assert len(all_matching_sample_names) > 0, f"No samples found with glob pattern {glob_pattern}"
-        logger.info(f"Found {len(all_matching_sample_names)} patches from plate {cfg.plate_name_to_simulate}")
-
-        sample_names = all_matching_sample_names[: cfg.nb_generated_samples]
-        assert (
-            len(sample_names) == cfg.nb_generated_samples
-        ), f"Expected to get at least {cfg.nb_generated_samples} samples, got {len(sample_names)}"
-        logger.info(f"Selected {len(sample_names)} samples to run inference from.")
-        tensors: list[Tensor] = starting_ds.get_items_by_name(sample_names)
-    else:
-        # if not, select nb_generated_samples samples randomly
-        sample_idxes: list[int] = (  # pyright: ignore[reportAssignmentType]
-            np.random.default_rng().choice(len(starting_ds), cfg.nb_generated_samples, replace=False).tolist()
-        )
-        tensors = starting_ds.__getitems__(sample_idxes)
-        logger.info(f"Selected {len(sample_idxes)} samples to run inference from at random if applicable")
-
-    starting_batch = torch.stack(tensors).to(cfg.device, cfg.dtype)
-    logger.debug(f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype}")
-
     ###############################################################################################
     #                                       Inference passes
     ###############################################################################################
     pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
 
     for eval_strat_idx, eval_strat in enumerate(cfg.evaluation_strategies):
-        logger.info(f"Running evaluation strategy {eval_strat_idx+1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
+        logger.info(f"Running evaluation strategy {eval_strat_idx + 1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
         logger.logger.name = eval_strat.name
         # check for correct distributed environment
         is_distributed_strategy = isinstance(eval_strat, MetricsComputation)
@@ -252,7 +222,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 net,
                 video_time_encoder,
                 dynamic,
-                starting_batch,
                 pbar_manager,
                 logger,
             )
@@ -263,7 +232,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 net,
                 video_time_encoder,
                 dynamic,
-                starting_batch,
                 pbar_manager,
                 logger,
             )
@@ -274,7 +242,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 net,
                 video_time_encoder,
                 dynamic,
-                starting_batch,
                 pbar_manager,
                 logger,
             )
@@ -285,7 +252,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 net,
                 video_time_encoder,
                 dynamic,
-                starting_batch,
                 pbar_manager,
                 logger,
             )
@@ -296,7 +262,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 net,
                 video_time_encoder,
                 dynamic,
-                starting_batch,
                 pbar_manager,
                 logger,
             )
@@ -307,10 +272,10 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 net,
                 video_time_encoder,
                 dynamic,
-                starting_batch,
                 pbar_manager,
                 subdirs,
                 logger,
+                cfg.dataset.data_shape,  # pyright: ignore[reportArgumentType]
             )
         elif type(eval_strat) is MetricsComputation:
             ### Evenly-spaced timesteps are assumed to be the actual empirical timesteps; must change this if it changes in training code
@@ -371,7 +336,6 @@ def simple_gen(
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
-    batch: torch.Tensor,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
 ):
@@ -394,6 +358,9 @@ def simple_gen(
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+    # 1. Get the starting batch
+    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
 
     # 2. Generate the time encodings
     eval_video_times = torch.rand(len(batch), device=cfg.device, dtype=cfg.dtype)
@@ -428,8 +395,8 @@ def simple_gen(
         base_save_path,
         "simple_generations",
         ["image min-max", "-1_1 raw", "-1_1 clipped"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -440,10 +407,10 @@ def similarity_with_train_data(
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
-    batch: torch.Tensor,
     pbar_manager: Manager,
     subdirs: list[Path],
     logger: MultiProcessAdapter,
+    sample_shape: tuple[int, int, int],
 ):
     """
     Test model memorization by:
@@ -472,6 +439,7 @@ def similarity_with_train_data(
             logger.info("Refusing to overwrite; exiting.")
     base_save_path.mkdir(parents=True)
     logger.debug(f"Saving outputs to {base_save_path}")
+
     if cfg.dtype != torch.float32:
         logger.warning(
             "Switching to fp32 for this evaluation strategy as we need high numerical precision to avoid discretization artifacts in the histograms."
@@ -496,11 +464,11 @@ def similarity_with_train_data(
     # TODO: 2. Compute the average image of the dataset (to remove it afterwards)
 
     # 3. Generate samples and compute closest similarities
-    num_full_batches, remaining = divmod(eval_strat.nb_samples_generated, eval_strat.batch_size)
+    num_full_batches, remaining = divmod(eval_strat.nb_generated_samples, eval_strat.batch_size)
     actual_bses = [eval_strat.batch_size] * num_full_batches + ([remaining] if remaining != 0 else [])
 
     batches_pbar = pbar_manager.counter(
-        total=eval_strat.nb_samples_generated,
+        total=eval_strat.nb_generated_samples,
         position=1,
         desc=f"Generating samples (batch size: {eval_strat.batch_size})",
         leave=False,
@@ -520,12 +488,12 @@ def similarity_with_train_data(
             raise ValueError(f"Unsupported metric {metric}; expected 'cosine' or 'L2'")
 
     # get augmentation factor
-    augmented_imgs = generate_all_augs(batch[0], removed_transforms)
+    augmented_imgs = generate_all_augs(torch.randn((128, 128, 3)), removed_transforms)
     aug_factor = len(augmented_imgs)
     logger.debug(f"Augmentation factor: {aug_factor}")
     all_sims = {
         metric_name: torch.full(
-            (eval_strat.nb_samples_generated, len(all_times_ds), aug_factor),
+            (eval_strat.nb_generated_samples, len(all_times_ds), aug_factor),
             float("NaN"),
             device=cfg.device,
             dtype=torch.float32,
@@ -544,7 +512,7 @@ def similarity_with_train_data(
     }
     worst_values = {
         metric_name: torch.full(
-            (eval_strat.nb_samples_generated,),
+            (eval_strat.nb_generated_samples,),
             BEST_VAL[metric_name],
             device=cfg.device,
             dtype=torch.float32,
@@ -554,7 +522,7 @@ def similarity_with_train_data(
     # closest_ds_idx_aug_idx[metric_name][i] = (closest_ds_idx, closest_aug_idx)
     closest_ds_idx_aug_idx = {
         metric_name: torch.full(
-            (eval_strat.nb_samples_generated, 2),
+            (eval_strat.nb_generated_samples, 2),
             -1,
             device=cfg.device,
             dtype=torch.int64,
@@ -578,7 +546,7 @@ def similarity_with_train_data(
         )
         gen_pbar.refresh()
 
-        generated_images = torch.randn((bs, *batch.shape[1:]), dtype=torch.float32, device=cfg.device)
+        generated_images = torch.randn((bs, *sample_shape), dtype=torch.float32, device=cfg.device)
 
         for t in gen_pbar(inference_scheduler.timesteps):
             model_output: torch.Tensor = net.forward(
@@ -662,7 +630,7 @@ def similarity_with_train_data(
                     "closest_true_images",
                     metric_name,
                     ["-1_1 raw"],
-                    cfg.n_rows_displayed,
+                    eval_strat.n_rows_displayed,
                     logger,
                 )
     batches_pbar.close()
@@ -686,7 +654,7 @@ def similarity_with_train_data(
         plt.figure(figsize=(10, 6))
         plt.hist(this_metric_all_sims.flatten().numpy(), bins=300)
         plt.title(
-            f"nb_samples_generated × nb_train_samples × augment_factor = {eval_strat.nb_samples_generated} × {len(all_times_ds)} × {aug_factor} = {this_metric_all_sims.numel():,}"
+            f"nb_samples_generated × nb_train_samples × augment_factor = {eval_strat.nb_generated_samples} × {len(all_times_ds)} × {aug_factor} = {this_metric_all_sims.numel():,}"
         )
         plt.suptitle(f"Distribution of all {metric_name} similarities")
         plt.grid()
@@ -697,7 +665,7 @@ def similarity_with_train_data(
     for metric_name in metrics.keys():
         plt.figure(figsize=(10, 6))
         plt.hist(worst_values[metric_name].flatten().cpu().numpy(), bins=300)
-        plt.title(f"nb_samples_generated = {eval_strat.nb_samples_generated} = {worst_values[metric_name].numel():,}")
+        plt.title(f"nb_samples_generated = {eval_strat.nb_generated_samples} = {worst_values[metric_name].numel():,}")
         plt.suptitle(f"Distribution of all {metric_name} *worst* similarities")
         plt.grid()
         plt.tight_layout()
@@ -710,7 +678,6 @@ def forward_noising(
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
-    batch: torch.Tensor,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
 ):
@@ -725,14 +692,17 @@ def forward_noising(
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
+    # 0.5. Get the starting batch
+    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
         batch,
         base_save_path,
         "starting_samples",
         ["-1_1 raw", "image min-max"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -757,8 +727,8 @@ def forward_noising(
         base_save_path,
         "noised_samples",
         ["image min-max", "-1_1 raw", "-1_1 clipped"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -766,7 +736,7 @@ def forward_noising(
     # the generation is parallelized along video time, but this
     # usefull if small inference batch size only
     video = []
-    nb_vid_batches = ceil(cfg.nb_video_timesteps / cfg.nb_video_times_in_parallel)
+    nb_vid_batches = ceil(eval_strat.nb_video_timesteps / eval_strat.nb_video_times_in_parallel)
 
     video_time_pbar = pbar_manager.counter(
         total=nb_vid_batches,
@@ -776,7 +746,7 @@ def forward_noising(
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
+    video_times = torch.linspace(0, 1, eval_strat.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
 
     for vid_batch_idx in range(nb_vid_batches):
         diff_time_pbar = pbar_manager.counter(
@@ -788,18 +758,18 @@ def forward_noising(
         )
         diff_time_pbar.refresh()
 
-        start = vid_batch_idx * cfg.nb_video_times_in_parallel
-        end = (vid_batch_idx + 1) * cfg.nb_video_times_in_parallel
+        start = vid_batch_idx * eval_strat.nb_video_times_in_parallel
+        end = (vid_batch_idx + 1) * eval_strat.nb_video_times_in_parallel
         video_time_batch = video_times[start:end]
         logger.debug(f"Processing video times from {start} to {start + len(video_time_batch)}")
-        # at this point video_time_batch is at most cfg.nb_video_times_in_parallel long;
+        # at this point video_time_batch is at most eval_strat.nb_video_times_in_parallel long;
         # we need to duplicate the video_time_encoding to match the actual batch size!
         video_time_enc = video_time_encoder.forward(video_time_batch)
-        video_time_enc = video_time_enc.repeat_interleave(cfg.nb_generated_samples, dim=0)
+        video_time_enc = video_time_enc.repeat_interleave(eval_strat.nb_generated_samples, dim=0)
 
         image = torch.cat([slightly_noised_sample.clone() for _ in range(len(video_time_batch))])
         # shape: (len(video_time_batch)*batch_size, channels, height, width),
-        # torch.where len(video_time_batch) = cfg.nb_video_times_in_parallel for at least all but the last batch
+        # torch.where len(video_time_batch) = eval_strat.nb_video_times_in_parallel for at least all but the last batch
 
         for t in inference_scheduler.timesteps[noise_timestep_idx:]:
             model_output: torch.Tensor = net.forward(
@@ -820,12 +790,12 @@ def forward_noising(
     # video is a list of ceil(nb_video_timesteps / nb_video_times_in_parallel) elements, each of shape
     # (len(video_time_batch) * batch_size, channels, hight, width)
     video = torch.cat(video)  # (nb_video_timesteps * nb_generated_samples, channels, height, width)
-    video = video.split(cfg.nb_generated_samples)
+    video = video.split(eval_strat.nb_generated_samples)
     video = torch.stack(video)
     # save_images_or_videos expects (video_time, batch_size, channels, height, width)
     expected_video_shape = (
-        cfg.nb_video_timesteps,
-        cfg.nb_generated_samples,
+        eval_strat.nb_video_timesteps,
+        eval_strat.nb_generated_samples,
         net.config["out_channels"],
         net.config["sample_size"],
         net.config["sample_size"],
@@ -837,8 +807,8 @@ def forward_noising(
         base_save_path,
         "trajectories",
         ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -849,14 +819,13 @@ def forward_noising_linear_scaling(
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
-    batch: torch.Tensor,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
 ):
     # -2. Checks
-    if cfg.nb_video_times_in_parallel != 1:
+    if eval_strat.nb_video_times_in_parallel != 1:
         logger.warning(
-            f"nb_video_times_in_parallel was set to {cfg.nb_video_times_in_parallel}, but is ignored in this evaluation strategy"
+            f"nb_video_times_in_parallel was set to {eval_strat.nb_video_times_in_parallel}, but is ignored in this evaluation strategy"
         )
 
     # -1. Prepare output directory
@@ -870,14 +839,17 @@ def forward_noising_linear_scaling(
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
+    # 0.5. Get the starting batch
+    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
         batch,
         base_save_path,
         "starting_samples",
         ["-1_1 raw", "image min-max"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -887,7 +859,7 @@ def forward_noising_linear_scaling(
     # 2.5 Misc preparations
     video = []
     video_time_pbar = pbar_manager.counter(
-        total=cfg.nb_video_timesteps,
+        total=eval_strat.nb_video_timesteps,
         position=1,
         desc="Video timesteps batches",
         leave=False,
@@ -895,19 +867,19 @@ def forward_noising_linear_scaling(
     video_time_pbar.refresh()
 
     # video times between 0 and 1
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
+    video_times = torch.linspace(0, 1, eval_strat.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
     # linearly interpolate between the start and end forward_noising_fracs
     forward_noising_fracs = torch.linspace(
         eval_strat.forward_noising_frac_start,
         eval_strat.forward_noising_frac_end,
-        cfg.nb_video_timesteps,
+        eval_strat.nb_video_timesteps,
         device=cfg.device,
         dtype=cfg.dtype,
     )
     logger.debug(f"Forward noising fracs: {list(forward_noising_fracs)}")
 
     # 3. Generate the trajectory time-per-time
-    for vid_batch_idx in range(cfg.nb_video_timesteps):
+    for vid_batch_idx in range(eval_strat.nb_video_timesteps):
         # noise until this timestep's index
         noise_timestep_idx = min(  # prevent potential OOB if forward_noising_frac_start is zero
             int((1 - forward_noising_fracs[vid_batch_idx]) * len(inference_scheduler.timesteps)),
@@ -961,8 +933,8 @@ def forward_noising_linear_scaling(
     video = torch.stack(video)  # (nb_video_timesteps, batch_size, channels, height, width)
     # save_images_or_videos expects (video_time, batch_size, channels, height, width)
     expected_video_shape = (
-        cfg.nb_video_timesteps,
-        cfg.nb_generated_samples,
+        eval_strat.nb_video_timesteps,
+        eval_strat.nb_generated_samples,
         net.config["out_channels"],
         net.config["sample_size"],
         net.config["sample_size"],
@@ -974,8 +946,8 @@ def forward_noising_linear_scaling(
         base_save_path,
         "trajectories",
         ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -986,14 +958,17 @@ def inverted_regeneration(
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
-    batch: torch.Tensor,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
     if base_save_path.exists():
-        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
+        if inpt.lower() == "y":
+            shutil.rmtree(base_save_path)
+        else:
+            logger.info("Refusing to overwrite; exiting.")
     base_save_path.mkdir(parents=True)
     logger.debug(f"Saving outputs to {base_save_path}")
 
@@ -1003,14 +978,17 @@ def inverted_regeneration(
     inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
+    # 0.5. Get the starting batch
+    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
         batch,
         base_save_path,
         "starting_samples",
         ["-1_1 raw", "image min-max"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -1043,8 +1021,8 @@ def inverted_regeneration(
         base_save_path,
         "inverted_gaussians",
         ["image min-max"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -1052,7 +1030,7 @@ def inverted_regeneration(
     # the generation is parallelized along video time, but this
     # usefull if small inference batch size only
     video = []
-    nb_vid_batches = ceil(cfg.nb_video_timesteps / cfg.nb_video_times_in_parallel)
+    nb_vid_batches = ceil(eval_strat.nb_video_timesteps / eval_strat.nb_video_times_in_parallel)
 
     video_time_pbar = pbar_manager.counter(
         total=nb_vid_batches,
@@ -1062,7 +1040,7 @@ def inverted_regeneration(
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
+    video_times = torch.linspace(0, 1, eval_strat.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
 
     for vid_batch_idx in range(nb_vid_batches):
         diff_time_pbar = pbar_manager.counter(
@@ -1073,14 +1051,14 @@ def inverted_regeneration(
         )
         diff_time_pbar.refresh()
 
-        start = vid_batch_idx * cfg.nb_video_times_in_parallel
-        end = (vid_batch_idx + 1) * cfg.nb_video_times_in_parallel
+        start = vid_batch_idx * eval_strat.nb_video_times_in_parallel
+        end = (vid_batch_idx + 1) * eval_strat.nb_video_times_in_parallel
         video_time_batch = video_times[start:end]
         logger.debug(f"Processing video times from {start} to {start + len(video_time_batch)}")
         # at this point video_time_batch is at most cfg.nb_video_times_in_parallel long;
         # we need to duplicate the video_time_encoding to match the actual batch size!
         video_time_enc = video_time_encoder.forward(video_time_batch)
-        video_time_enc = video_time_enc.repeat_interleave(cfg.nb_generated_samples, dim=0)
+        video_time_enc = video_time_enc.repeat_interleave(eval_strat.nb_generated_samples, dim=0)
 
         image = torch.cat([inverted_gauss.clone() for _ in range(len(video_time_batch))])
         # shape: (len(video_time_batch)*batch_size, channels, height, width),
@@ -1105,12 +1083,12 @@ def inverted_regeneration(
     # video is a list of ceil(nb_video_timesteps / nb_video_times_in_parallel) elements, each of shape
     # (len(video_time_batch) * batch_size, channels, hight, width)
     video = torch.cat(video)  # (nb_video_timesteps * nb_generated_samples, channels, height, width)
-    video = video.split(cfg.nb_generated_samples)
+    video = video.split(eval_strat.nb_generated_samples)
     video = torch.stack(video)
     # save_images_or_videos expects (video_time, batch_size, channels, height, width)
     expected_video_shape = (
-        cfg.nb_video_timesteps,
-        cfg.nb_generated_samples,
+        eval_strat.nb_video_timesteps,
+        eval_strat.nb_generated_samples,
         net.config["out_channels"],
         net.config["sample_size"],
         net.config["sample_size"],
@@ -1122,8 +1100,8 @@ def inverted_regeneration(
         base_save_path,
         "trajectories",
         ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -1134,7 +1112,6 @@ def iterative_inverted_regeneration(
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
     dynamic: DDIMScheduler,
-    batch: torch.Tensor,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
 ):
@@ -1149,7 +1126,11 @@ def iterative_inverted_regeneration(
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
     if base_save_path.exists():
-        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
+        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
+        if inpt.lower() == "y":
+            shutil.rmtree(base_save_path)
+        else:
+            logger.info("Refusing to overwrite; exiting.")
     base_save_path.mkdir(parents=True)
     logger.debug(f"Saving outputs to {base_save_path}")
 
@@ -1165,14 +1146,17 @@ def iterative_inverted_regeneration(
     inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
     logger.debug(f"Using inverted scheduler config: {inverted_scheduler.config}")
 
+    # 0.5. Get the starting batch
+    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
         batch,
         base_save_path,
         "starting_samples",
         ["-1_1 raw", "image min-max"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
     save_histogram(batch, base_save_path / "starting_samples_histogram.png", (-1, 1), 50)
@@ -1181,19 +1165,19 @@ def iterative_inverted_regeneration(
     video = []
 
     video_time_pbar = pbar_manager.counter(
-        total=cfg.nb_video_timesteps,
+        total=eval_strat.nb_video_timesteps,
         position=1,
         desc="Video timesteps",
         leave=False,
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, cfg.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
+    video_times = torch.linspace(0, 1, eval_strat.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
 
     prev_video_time = 0
     image = batch
     for video_t_idx, video_time in enumerate(video_times):
-        logger.debug(f"Video timestep index {video_t_idx + 1} / {cfg.nb_video_timesteps}")
+        logger.debug(f"Video timestep index {video_t_idx + 1} / {eval_strat.nb_video_timesteps}")
 
         # 2.A Generate the inverted Gaussians
         inverted_gauss = image
@@ -1224,8 +1208,8 @@ def iterative_inverted_regeneration(
             base_save_path,
             f"inverted_gaussians_time{video_t_idx}",
             ["image min-max"],
-            cfg.n_rows_displayed,
-            0 if cfg.plate_name_to_simulate is not None else 2,
+            eval_strat.n_rows_displayed,
+            0 if eval_strat.plate_name_to_simulate is not None else 2,
             logger,
         )
         save_histogram(
@@ -1275,8 +1259,8 @@ def iterative_inverted_regeneration(
     video = torch.stack(video)  # (nb_video_timesteps, batch_size, channels, height, width)
     # save_images_or_videos expects (video_time, batch_size, channels, height, width)
     expected_video_shape = (
-        cfg.nb_video_timesteps,
-        cfg.nb_generated_samples,
+        eval_strat.nb_video_timesteps,
+        eval_strat.nb_generated_samples,
         net.config["out_channels"],
         net.config["sample_size"],
         net.config["sample_size"],
@@ -1288,8 +1272,8 @@ def iterative_inverted_regeneration(
         base_save_path,
         "trajectories",
         ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
-        cfg.n_rows_displayed,
-        0 if cfg.plate_name_to_simulate is not None else 2,
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
     )
 
@@ -1328,9 +1312,9 @@ def metrics_computation(
     metrics_computation_folder = cfg.output_dir / eval_strat.name
 
     # use training time encodings
-    assert (
-        list(timesteps2classnames.keys()) == timesteps
-    ), f"Expected timesteps to be the same as keys in timesteps2classnames, got {timesteps} and {timesteps2classnames.keys()}"
+    assert list(timesteps2classnames.keys()) == timesteps, (
+        f"Expected timesteps to be the same as keys in timesteps2classnames, got {timesteps} and {timesteps2classnames.keys()}"
+    )
     classnames2timesteps = {v: k for k, v in timesteps2classnames.items()}
     eval_video_times = [classnames2timesteps[str(eval_time)] for eval_time in eval_strat.selected_times]
     logger.info(f"Selected video times for metrics computation: {eval_video_times} from {eval_strat.selected_times}")
@@ -1560,24 +1544,19 @@ def _generate_images_for_metrics_computation(
     ##### 1.5 Augment the generated samples if applicable
     if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
         logger.info("Augmenting generated samples for metrics computation")
-        # on main process:
-        if accelerator.is_main_process:
+        # Partition subdirectories among processes
+        subdirs = sorted([d for d in metrics_computation_folder.iterdir() if d.is_dir()])
+        assigned_subdirs = subdirs[accelerator.process_index :: accelerator.num_processes]
+        n_workers_per_process = os.cpu_count() // accelerator.num_processes
+        for subdir in assigned_subdirs:
+            logger.debug(f"Process {accelerator.process_index} augmenting folder {subdir}", main_process_only=False)
             # augment
             extension = "png"  # TODO: remove this hardcoded extension (by moving DatasetParams'params into the base DataSet class used in config, another TODO)
-            hard_augment_dataset_all_square_symmetries(
-                metrics_computation_folder,
-                logger,
-                extension,
-            )
+            hard_augment_dataset_all_square_symmetries(subdir, logger, extension, n_workers_per_process)
             # check result
-            subdirs = [d for d in metrics_computation_folder.iterdir() if d.is_dir()]
-            nb_elems_per_class = {
-                class_path.name: len(list((metrics_computation_folder / class_path.name).glob(f"*.{extension}")))
-                for class_path in subdirs
-            }
-            assert all(
-                nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class
-            ), f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
+            assert (nb_elems := len(list((subdir).glob(f"*.{extension}"))) % 8 == 0), (
+                f"Expected number of elements to be a multiple of 8, got:\n{nb_elems} in {subdir}"
+            )
 
     # wait for data augmentation to finish before returning
     accelerator.wait_for_everyone()
@@ -1625,9 +1604,9 @@ def _save_grid_of_videos(
     # Checks
     assert videos_tensor.ndim == 5, f"Expected 5D tensor, got {videos_tensor.shape}"
     assert videos_tensor.dtype == np.uint8, f"Expected dtype uint8, got {videos_tensor.dtype}"
-    assert (
-        videos_tensor.min() >= 0 and videos_tensor.max() <= 255
-    ), f"Expected [0;255] range, got [{videos_tensor.min()}, {videos_tensor.max()}]"
+    assert videos_tensor.min() >= 0 and videos_tensor.max() <= 255, (
+        f"Expected [0;255] range, got [{videos_tensor.min()}, {videos_tensor.max()}]"
+    )
     if videos_tensor.shape[1] != nrows**2:
         logger.warning(
             f"Expected nrows²={nrows**2} videos at dim index 1, got shape: {videos_tensor.shape}. Selecting first {nrows**2} videos."
@@ -1642,7 +1621,7 @@ def _save_grid_of_videos(
     for frame_idx, frame in enumerate(videos_tensor):
         grid_img = make_grid(torch.from_numpy(frame), nrow=nrows, padding=padding)
         pil_img = grid_img.numpy().transpose(1, 2, 0)
-        logger.debug(f"Adding frame {frame_idx+1}/{len(videos_tensor)} | shape: {pil_img.shape}")
+        logger.debug(f"Adding frame {frame_idx + 1}/{len(videos_tensor)} | shape: {pil_img.shape}")
         writer.append_data(pil_img)
 
     writer.close()
@@ -1654,9 +1633,9 @@ def _save_grid_of_images(
     # Checks
     assert images_tensor.ndim == 4, f"Expected 4D tensor, got {images_tensor.shape}"
     assert images_tensor.dtype == np.uint8, f"Expected dtype uint8, got {images_tensor.dtype}"
-    assert (
-        images_tensor.min() >= 0 and images_tensor.max() <= 255
-    ), f"Expected [0;255] range, got [{images_tensor.min()}, {images_tensor.max()}]"
+    assert images_tensor.min() >= 0 and images_tensor.max() <= 255, (
+        f"Expected [0;255] range, got [{images_tensor.min()}, {images_tensor.max()}]"
+    )
     if images_tensor.shape[0] != nrows**2:
         logger.warning(
             f"Expected nrows²={nrows**2} images, got {images_tensor.shape[0]}. Selecting first {nrows**2} images."
@@ -1827,9 +1806,9 @@ def get_true_datasets_for_metrics_computation(
     true_datasets_to_compare_with: dict[str, BaseDataset] = {}
 
     # Use the correct image processing ([0; 255] uint8) for metrics computation
-    assert any(
-        isinstance(t, Normalize) for t in test_transforms.transforms
-    ), f"Expected normalization to be in test transforms, got : {test_transforms}"
+    assert any(isinstance(t, Normalize) for t in test_transforms.transforms), (
+        f"Expected normalization to be in test transforms, got : {test_transforms}"
+    )
     nb_channels = cfg.dataset.data_shape[0]
     metrics_compute_transforms = Compose(
         [
@@ -1876,13 +1855,13 @@ def get_true_datasets_for_metrics_computation(
 
     # Check that datasets are well-formed
     for time_name, dataset in true_datasets_to_compare_with.items():
-        assert (
-            len(dataset) > 0
-        ), f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
+        assert len(dataset) > 0, (
+            f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
+        )
         if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-            assert (
-                training_was_with_unpaired_data or len(dataset) % 8 == 0
-            ), f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
+            assert training_was_with_unpaired_data or len(dataset) % 8 == 0, (
+                f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
+            )
         logger.debug(
             f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
         )
@@ -1932,9 +1911,9 @@ def find_this_proc_this_time_batches_for_metrics_comp(
         tot_nb_samples = len(list(true_data_class_path.iterdir())) // 2
     elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
         nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
-        assert (
-            training_was_with_unpaired_data or nb_all_aug_samples % 8 == 0
-        ), f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+        assert training_was_with_unpaired_data or nb_all_aug_samples % 8 == 0, (
+            f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+        )
         tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
         logger.debug("Will augment samples 8⨉ after generation")
     else:
@@ -1972,6 +1951,65 @@ def find_this_proc_this_time_batches_for_metrics_comp(
         main_process_only=False,
     )
     return this_proc_gen_batches
+
+
+def get_starting_batch(
+    cfg: InferenceConfig,
+    eval_strat: InvertedRegeneration | SimpleGeneration | ForwardNoising,
+    logger: MultiProcessAdapter,
+    dataset_path: Path | str,
+    device: torch.device | str,
+    dtype: torch.dtype | str,
+):
+    # build the starting dataset
+    assert cfg.dataset.dataset_params is not None
+
+    database_path = Path(cfg.dataset.path)
+    logger.info(f"Using dataset {cfg.dataset.name} from {database_path}")
+    subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
+    subdirs.sort(key=cfg.dataset.dataset_params.sorting_func)
+    logger.info(f"Will be using subdir '{subdirs[0].name}' as starting point if applicable")
+    # ensure no transforms here
+    starting_samples = list(subdirs[0].glob(f"*.{cfg.dataset.dataset_params.file_extension}"))
+    kept_transforms = remove_flips_and_rotations_from_transforms(cfg.dataset.transforms)[0]
+    starting_ds = cfg.dataset.dataset_params.dataset_class(
+        starting_samples,
+        kept_transforms,
+        cfg.dataset.expected_initial_data_range,
+    )
+    logger.info(f"Built starting dataset from {subdirs[0]}:\n{starting_ds}")
+    logger.info(f"Using transforms:\n{kept_transforms}")
+
+    # select starting samples to generate from
+    if eval_strat.plate_name_to_simulate is not None:
+        # if a plate was given, select nb_generated_samples from it, in order
+        glob_pattern = (
+            f"{eval_strat.plate_name_to_simulate}_time_1_patch_*_*.{cfg.dataset.dataset_params.file_extension}"
+        )
+        # assuming they are sorted in (x,y) dictionary order
+        all_matching_sample_names = list(Path(dataset_path, "1").glob(glob_pattern))
+        assert len(all_matching_sample_names) > 0, f"No samples found with glob pattern {glob_pattern}"
+        logger.info(f"Found {len(all_matching_sample_names)} patches from plate {eval_strat.plate_name_to_simulate}")
+        # select the first nb_generated_samples
+        sample_names = all_matching_sample_names[: eval_strat.nb_generated_samples]
+        if len(sample_names) != len(all_matching_sample_names):
+            logger.warning(f"Selected {len(sample_names)} patches out of {len(all_matching_sample_names)}")
+        assert len(sample_names) == eval_strat.nb_generated_samples, (
+            f"Expected to get at least {eval_strat.nb_generated_samples} samples, got {len(sample_names)}"
+        )
+        logger.info(f"Selected {len(sample_names)} samples to run inference from.")
+        tensors: list[Tensor] = starting_ds.get_items_by_name(sample_names)
+    else:
+        # if not, select nb_generated_samples samples randomly
+        sample_idxes: list[int] = (  # pyright: ignore[reportAssignmentType]
+            np.random.default_rng().choice(len(starting_ds), eval_strat.nb_generated_samples, replace=False).tolist()
+        )
+        tensors = starting_ds.__getitems__(sample_idxes)
+        logger.info(f"Selected {len(sample_idxes)} samples to run inference from at random")
+
+    starting_batch: Tensor = torch.stack(tensors).to(device, dtype)  # pyright: ignore[reportCallIssue, reportArgumentType]
+    logger.debug(f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype}")
+    return starting_batch
 
 
 if __name__ == "__main__":

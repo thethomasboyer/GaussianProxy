@@ -265,18 +265,18 @@ def save_eval_artifacts_log_to_wandb(
         logger.debug("WARNING: the 4th channel is discarded")
         sel_to_save = sel_to_save[:, :3]  # TODO: actually compose from 4 channels
     else:
-        assert (
-            sel_to_save.shape[tensors_to_save.ndim - 3] == 3
-        ), f"Expected 1, 3 or 4 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
+        assert sel_to_save.shape[tensors_to_save.ndim - 3] == 3, (
+            f"Expected 1, 3 or 4 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
+        )
 
     # normalize images / videos for logging
     normalized_elements_for_logging = normalize_elements_for_logging(sel_to_save, logging_normalization)
 
     # videos case
     if tensors_to_save.ndim == 5:
-        assert (
-            artifact_name == "trajectories"
-        ), f"Expected name to be 'trajectories' for 5D tensors, got {artifact_name}"
+        assert artifact_name == "trajectories", (
+            f"Expected name to be 'trajectories' for 5D tensors, got {artifact_name}"
+        )
         kwargs = {
             "fps": max(int(tensors_to_save.shape[1] / 20), 1),  # ~ 20s
             "format": "mp4",
@@ -674,7 +674,9 @@ def _generate_all_augs_pil(img: Image.Image, transforms: list[type] | list[str])
     return aug_imgs
 
 
-def hard_augment_dataset_all_square_symmetries(dataset_path: Path, logger: MultiProcessAdapter, files_ext: str):
+def hard_augment_dataset_all_square_symmetries(
+    dataset_path: Path, logger: MultiProcessAdapter, files_ext: str, max_workers: Optional[int] = None
+):
     """
     Save ("in-place") the 8 augmented versions of each image in the given `dataset_path`.
 
@@ -695,7 +697,7 @@ def hard_augment_dataset_all_square_symmetries(dataset_path: Path, logger: Multi
     logger.debug("Writing augmented datasets to disk")
 
     futures = []
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers) as executor:
         for base_img in all_base_imgs:
             futures.append(executor.submit(_aug_save_img, base_img))
 

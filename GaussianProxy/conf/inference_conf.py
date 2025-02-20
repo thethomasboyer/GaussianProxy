@@ -2,8 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from torch import dtype
-
-from .training_conf import DataSet, EvaluationStrategy
+from training_conf import DataSet, EvaluationStrategy
 
 
 @dataclass(kw_only=True)
@@ -26,7 +25,7 @@ class InferenceConfig:
     # Output directory (where to put the generated images / tensors)
     output_dir: Path
 
-    # Device
+    # Device (ignored if launched with accelerate)
     device: str
 
     # Optimizations
@@ -37,12 +36,7 @@ class InferenceConfig:
     dataset: DataSet
 
     # Evaluations
-    nb_generated_samples: int
-    plate_name_to_simulate: str | None = None
-    nb_video_times_in_parallel: int
-    nb_video_timesteps: int
     evaluation_strategies: list[EvaluationStrategy]
-    n_rows_displayed: int
 
     # Profiling
     profiling: ProfileConfig

@@ -51,7 +51,7 @@ class AccelerateLaunchArgs:
 @dataclass
 class Accelerate:
     launch_args: AccelerateLaunchArgs
-    offline: bool
+    offline: bool  # TODO: move this arg that does not belong here (make it general like debug)
 
 
 @dataclass
@@ -108,38 +108,52 @@ class EvaluationStrategy:
     name: str = field(default=MISSING)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class InvertedRegeneration(EvaluationStrategy):
     name: str = field(default="InvertedRegeneration")
+    nb_generated_samples: int
+    plate_name_to_simulate: str | None = None
+    nb_video_times_in_parallel: int
+    nb_video_timesteps: int
+    n_rows_displayed: int
 
 
-@dataclass
-class IterativeInvertedRegeneration(EvaluationStrategy):
+@dataclass(kw_only=True)
+class IterativeInvertedRegeneration(InvertedRegeneration):
     name: str = field(default="IterativeInvertedRegeneration")
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SimpleGeneration(EvaluationStrategy):
     name: str = field(default="SimpleGeneration")
+    plate_name_to_simulate: str | None = None
+    n_rows_displayed: int
+    nb_generated_samples: int
 
 
 @dataclass(kw_only=True)
 class SimilarityWithTrainData(EvaluationStrategy):
-    nb_samples_generated: int
+    nb_generated_samples: int
     batch_size: int
     nb_batches_shown: int
     metrics: str | list[str] = "cosine"
     name: str = field(default="CosineSimilarityWithTrainData")
+    n_rows_displayed: int
 
 
 @dataclass(kw_only=True)
 class ForwardNoising(EvaluationStrategy):
     forward_noising_frac: float
     name: str = field(default="ForwardNoising")
+    nb_generated_samples: int
+    plate_name_to_simulate: str | None = None
+    nb_video_times_in_parallel: int
+    nb_video_timesteps: int
+    n_rows_displayed: int
 
 
 @dataclass(kw_only=True)
-class ForwardNoisingLinearScaling(EvaluationStrategy):
+class ForwardNoisingLinearScaling(ForwardNoising):
     forward_noising_frac_start: float
     forward_noising_frac_end: float
     name: str = field(default="ForwardNoisingLinearScaling")

@@ -49,9 +49,11 @@ class BaseDataset(Dataset[Tensor]):
         # common base path for the dataset
         # Create train dataloader
         base_path = samples[0].parents[1]
-        assert all(
+        assert all(  # TODO: this check might take a while...
             (this_sample_base_path := f.parents[1]) == base_path for f in samples
-        ), f"All files should be under the same directory, got base_path={base_path} and sample_base_path={this_sample_base_path}"
+        ), (
+            f"All files should be under the same directory, got base_path={base_path} and sample_base_path={this_sample_base_path}"
+        )
         self.base_path = base_path
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
@@ -300,9 +302,9 @@ def _dataset_builder(
         )
     else:
         all_train_files, all_test_files = load_train_test_splits(this_run_folder, logger)
-    assert (
-        all_train_files.keys() == all_test_files.keys()
-    ), f"Expected same timestamps between train and test split, got: {all_train_files.keys()} vs {all_test_files.keys()}"
+    assert all_train_files.keys() == all_test_files.keys(), (
+        f"Expected same timestamps between train and test split, got: {all_train_files.keys()} vs {all_test_files.keys()}"
+    )
     timestamps = list(all_train_files.keys())
 
     # Build train datasets & test dataloaders
@@ -337,9 +339,9 @@ def _dataset_builder(
             transforms=transforms,
             expected_initial_data_range=cfg.dataset.expected_initial_data_range,
         )
-        assert (
-            train_ds[0].shape == cfg.dataset.data_shape
-        ), f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
+        assert train_ds[0].shape == cfg.dataset.data_shape, (
+            f"Expected data shape of {cfg.dataset.data_shape} but got {train_ds[0].shape}"
+        )
         train_reprs_to_log.append(train_ds.short_str(timestamp))
         # batch_size does *NOT* correspond to the actual train batch size
         # *Time-interpolated* batches will be manually built afterwards!
@@ -363,9 +365,9 @@ def _dataset_builder(
             transforms=test_transforms,
             expected_initial_data_range=cfg.dataset.expected_initial_data_range,
         )
-        assert (
-            test_ds[0].shape == cfg.dataset.data_shape
-        ), f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
+        assert test_ds[0].shape == cfg.dataset.data_shape, (
+            f"Expected data shape of {cfg.dataset.data_shape} but got {test_ds[0].shape}"
+        )
         test_reprs_to_log.append(test_ds.short_str(timestamp))
         test_dataloaders_dict[timestamp] = DataLoader(
             test_ds,
@@ -423,9 +425,9 @@ def _build_train_test_splits(
     # Select times
     if not OmegaConf.is_missing(cfg.dataset, "selected_dists") and cfg.dataset.selected_dists is not None:
         files_dict_per_time = {k: v for k, v in files_dict_per_time.items() if k in cfg.dataset.selected_dists}
-        assert (
-            files_dict_per_time is not None and len(files_dict_per_time) >= 2
-        ), f"No or less than 2 times selected: cfg.dataset.selected_dists is {cfg.dataset.selected_dists} resulting in selected timesteps {list(files_dict_per_time.keys())}"
+        assert files_dict_per_time is not None and len(files_dict_per_time) >= 2, (
+            f"No or less than 2 times selected: cfg.dataset.selected_dists is {cfg.dataset.selected_dists} resulting in selected timesteps {list(files_dict_per_time.keys())}"
+        )
         logger.info(f"Selected {len(files_dict_per_time)} timesteps")
     else:
         logger.info(f"No timesteps selected, using all available {len(files_dict_per_time)}")
@@ -450,14 +452,14 @@ def _build_train_test_splits(
                     if video_id not in video_ids_times:
                         video_ids_times[video_id] = {time: f}
                     else:
-                        assert (
-                            time not in video_ids_times[video_id]
-                        ), f"Found multiple files at time {time} for video {video_id}: {f} and {video_ids_times[video_id][time]}"
+                        assert time not in video_ids_times[video_id], (
+                            f"Found multiple files at time {time} for video {video_id}: {f} and {video_ids_times[video_id][time]}"
+                        )
                         video_ids_times[video_id][time] = f
             # check 1-to-1 mapping between found time ids and time keys
-            assert all(
-                len(time_key_to_time_id[time_key]) == 1 for time_key in files_dict_per_time.keys()
-            ), f"Found multiple time ids for some time keys: time_key_to_time_id={time_key_to_time_id}"
+            assert all(len(time_key_to_time_id[time_key]) == 1 for time_key in files_dict_per_time.keys()), (
+                f"Found multiple time ids for some time keys: time_key_to_time_id={time_key_to_time_id}"
+            )
             # select one time at random for each video_id
             unpaired_files_dict_per_time: dict[TimeKey, list[Path]] = {}
             for video_id, times_files_d in video_ids_times.items():
@@ -468,9 +470,9 @@ def _build_train_test_splits(
                 else:
                     unpaired_files_dict_per_time[time].append(selected_frame)
             # checks
-            assert (
-                files_dict_per_time.keys() == unpaired_files_dict_per_time.keys()
-            ), f"Some times are missing in the unpaired dataset! original: {files_dict_per_time.keys()} vs unpaired: {unpaired_files_dict_per_time.keys()}"
+            assert files_dict_per_time.keys() == unpaired_files_dict_per_time.keys(), (
+                f"Some times are missing in the unpaired dataset! original: {files_dict_per_time.keys()} vs unpaired: {unpaired_files_dict_per_time.keys()}"
+            )
             # re-sort per time now that we know all times are present
             unpaired_files_dict_per_time = {
                 common_key: unpaired_files_dict_per_time[common_key] for common_key in files_dict_per_time.keys()
@@ -505,9 +507,9 @@ def _build_train_test_splits(
             split_idx = int(train_split_frac * len(files))
             train_files = files[:split_idx]
             test_files = files[split_idx:]
-        assert (
-            set(train_files) | (set(test_files)) == set(files)
-        ), f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
+        assert set(train_files) | (set(test_files)) == set(files), (
+            f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
+        )
         all_train_files[timestamp] = train_files
         all_test_files[timestamp] = test_files
 
