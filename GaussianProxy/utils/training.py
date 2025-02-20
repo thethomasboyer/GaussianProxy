@@ -209,6 +209,7 @@ class TimeDiffusion:
         model_save_folder: Path,
         saved_artifacts_folder: Path,
         chckpt_save_path: Path,
+        this_run_folder: Path,
         resuming_args: Optional[ResumingArgs] = None,
         profile: bool = False,
     ):
@@ -233,6 +234,7 @@ class TimeDiffusion:
             model_save_folder,
             saved_artifacts_folder,
             resuming_args,
+            this_run_folder,
         )
 
         # Modify dataloaders dicts to use the empirical distribution timesteps as keys
@@ -332,6 +334,7 @@ class TimeDiffusion:
         model_save_folder: Path,
         saved_artifacts_folder: Path,
         resuming_args: Optional[ResumingArgs],
+        this_run_folder: Path,
     ):
         """
         Fit some remaining attributes before fitting.
@@ -348,6 +351,7 @@ class TimeDiffusion:
         }
         self._timesteps_floats_to_names = {v: k for k, v in self.timesteps_names_to_floats.items()}
         self.chckpt_save_path = chckpt_save_path
+        self.this_run_folder = this_run_folder
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.logger = logger
@@ -1469,11 +1473,11 @@ class TimeDiffusion:
         # consistency of cache naming (the keys of the dict) with the `calculate_metrics` call is important
         # because fidelity takes a root and a name, not a full path -> "common root + only final folder name changes" needed here
         metrics_caches: dict[str, Path] = {
-            "all_times": self.chckpt_save_path / "fidelity_caches" / self.cfg.dataset.name
+            "all_times": self.chckpt_save_path / ".fidelity_caches" / self.cfg.dataset.name
         }
         for video_time_names in list(self.timesteps_names_to_floats.keys()):
             metrics_caches[video_time_names] = (
-                self.chckpt_save_path / "fidelity_caches" / (self.cfg.dataset.name + "_time_" + video_time_names)
+                self.chckpt_save_path / ".fidelity_caches" / (self.cfg.dataset.name + "_time_" + video_time_names)
             )
 
         # clear the dataset caches (on first eval of a run only...)
@@ -1521,7 +1525,7 @@ class TimeDiffusion:
                 fid=True,
                 prc=False,
                 verbose=self.cfg.debug and self.accelerator.is_main_process,
-                cache_root=(self.chckpt_save_path / "fidelity_caches").as_posix(),
+                cache_root=(self.chckpt_save_path / ".fidelity_caches").as_posix(),
                 input1_cache_name=metrics_caches[task].name,
                 samples_find_deep=task == "all_times",
             )
@@ -1787,6 +1791,8 @@ class TimeDiffusion:
         Should be called by all processes as `accelerator.save_state` handles checkpointing
         in DDP setting internally, and distributed barriers are used here.
 
+        Names of checkpoint subfolders should be `step_<global_optimization_step>`.
+
         Used to resume training.
         """
         # First, wait for all processes to reach this point
@@ -1825,7 +1831,7 @@ class TimeDiffusion:
             checkpoints_list = [d for d in self.chckpt_save_path.iterdir() if not d.name.startswith(".")]
             nb_checkpoints = len(checkpoints_list)
             if nb_checkpoints > self.cfg.checkpointing.checkpoints_total_limit:
-                sorted_chkpt_subfolders = sorted(checkpoints_list, key=lambda x: int(x.name.split("_")[1]))
+                sorted_chkpt_subfolders = sorted(checkpoints_list, key=lambda d: int(d.name.split("_")[1]))
                 to_del = sorted_chkpt_subfolders[: -self.cfg.checkpointing.checkpoints_total_limit]
                 if len(to_del) > 1:
                     self.logger.error(f"\033[1;33mMORE THAN 1 CHECKPOINT TO DELETE:\033[0m\n {to_del}")
@@ -1862,6 +1868,8 @@ def load_resuming_args(
     Handles the location of the correct checkpoint folder to resume training from,
     and loads ResumingArgs from it (if applicable).
 
+    Names of checkpoint subfolders should be `step_<global_optimization_step>`.
+
     Must be called by all processes.
     """
     resume_arg = cfg.checkpointing.resume_from_checkpoint
@@ -1878,7 +1886,7 @@ def load_resuming_args(
             logger.warning("No 'checkpoints' directory found in run folder; creating one.")
             chckpt_save_path.mkdir()
         accelerator.wait_for_everyone()
-        dirs = [d for d in chckpt_save_path.iterdir() if not d.name.startswith(".")]
+        dirs = [d for d in chckpt_save_path.iterdir() if d.name.startswith("step_")]
         dirs = sorted(dirs, key=lambda d: int(d.name.split("_")[1]))
         resuming_path = Path(chckpt_save_path, dirs[-1]) if len(dirs) > 0 else None
     elif resume_arg == "model_save":

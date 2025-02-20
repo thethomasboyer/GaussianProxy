@@ -299,6 +299,7 @@ def main(cfg: Config) -> None:
         models_save_folder,
         saved_artifacts_folder,
         chckpt_save_path,
+        this_run_folder,
         resuming_args,
         cfg.profile,
     )

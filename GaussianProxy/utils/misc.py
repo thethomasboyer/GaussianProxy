@@ -47,7 +47,8 @@ def create_repo_structure(
     |   |   |   |   step_<y>
     |   |   |   saved_model
     |   |   |   .tmp_image_generation_folder
-    |   .fidelity_cache
+    |   .fidelity_caches
+    |   .tmp_inference_save
     |   .torch_hub_cache
     ```
     The <experiment_name>/<run_name> structure mimics that of Weight&Biases.
