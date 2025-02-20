@@ -134,17 +134,23 @@ def main(cfg: Config) -> None:
         }
     }
     if cfg.checkpointing.resume_from_checkpoint is not False and prev_run_id is not None:
+        # find start step
         if resuming_args is None:
             logger.warning("No resuming state found, will rewind run from zero!")
             start_step = 0
         else:
-            start_step = max(resuming_args.start_global_optimization_step, 0)
-        if cfg.fork_run:
-            logger.info(f"Forking run {prev_run_id} from step {start_step}")
-            init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"
+            start_step = resuming_args.start_global_optimization_step
+        # fork, rewind, or start a new run
+        if cfg.accelerate.offline:
+            # wandb offline run resume *simply* does not work...
+            logger.info("Offline mode: (ignoring potential previous messages and) force starting a new run")
         else:
-            logger.info(f"Rewinding run {prev_run_id} from step {start_step}")
-            init_kwargs["wandb"]["resume_from"] = f"{prev_run_id}?_step={start_step}"
+            if cfg.fork_run:
+                logger.info(f"Forking run {prev_run_id} from step {start_step}")
+                init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"
+            else:
+                logger.info(f"Rewinding run {prev_run_id} from step {start_step}")
+                init_kwargs["wandb"]["resume_from"] = f"{prev_run_id}?_step={start_step}"
 
     accelerator.init_trackers(
         project_name=cfg.project,
