@@ -26,11 +26,12 @@ from torchvision.transforms import (
 )
 
 from GaussianProxy.conf.training_conf import DataSet
+from GaussianProxy.utils.data import BaseDataset
 
 sys.path.insert(0, "..")
 sys.path.insert(0, ".")
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any
 
 from GaussianProxy.utils.data import RandomRotationSquareSymmetry
 
@@ -83,7 +84,7 @@ n_processes: int = 3
 def process_subdirs(
     subdir: Path,
     dataset: DataSet,
-    nb_elems_per_class: Dict[str, int],
+    nb_elems_per_class: dict[str, int],
 ):
     assert dataset.dataset_params is not None
     this_class_elems = list(subdir.glob(f"*.{dataset.dataset_params.file_extension}"))
@@ -94,7 +95,7 @@ def process_subdirs(
     return ds1_elems, ds2_elems
 
 
-def process_one_exp_rep(dataset: DataSet, subdirs: list[Path], nb_elems_per_class: Dict[str, int]):
+def process_one_exp_rep(dataset: DataSet, subdirs: list[Path], nb_elems_per_class: dict[str, int]):
     assert dataset.dataset_params is not None
     ds1_elems = []
     ds2_elems = []
@@ -110,12 +111,12 @@ def process_one_exp_rep(dataset: DataSet, subdirs: list[Path], nb_elems_per_clas
 
     assert abs(len(ds1_elems) - len(ds2_elems)) <= len(subdirs)
     print("Instantiating datasets for one experiment repeat...")
-    ds1 = dataset.dataset_params.dataset_class(
+    ds1: BaseDataset = dataset.dataset_params.dataset_class(
         ds1_elems,
         transforms,
         dataset.expected_initial_data_range,
     )
-    ds2 = dataset.dataset_params.dataset_class(
+    ds2: BaseDataset = dataset.dataset_params.dataset_class(
         ds2_elems,
         transforms,
         dataset.expected_initial_data_range,
@@ -130,8 +131,8 @@ def compute_splits(dataset: DataSet):
     subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=dataset.dataset_params.sorting_func)
 
-    exp_repeats = {}
-    nb_elems_per_class = {}
+    exp_repeats: dict[str, dict[str, BaseDataset]] = {}
+    nb_elems_per_class: dict[str, int] = {}
     print("Processing splits...")
 
     with ProcessPoolExecutor() as executor:
@@ -154,7 +155,7 @@ def compute_splits(dataset: DataSet):
 # FID
 ## Compute train vs train FIDs
 def process_task_group_on_one_device(
-    task_group: List[Dict[str, Any]], cuda_device: int, temp_output_path: Path
+    task_group: list[dict[str, Any]], cuda_device: int, temp_output_path: Path
 ) -> Path:
     """
     Worker function: set CUDA device, process each task and write results to a temporary JSON.
@@ -167,14 +168,15 @@ def process_task_group_on_one_device(
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
     print(f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} on  process {os.getpid()}")
-    results: Dict[str, Dict[str, Any]] = defaultdict(dict)
+    results: dict[str, dict[str, Any]] = defaultdict(dict)
     for task in task_group:
         exp_rep: str = task["exp_rep"]
         key: str = task["key"]
-        split1 = task["split1"]
-        split2 = task["split2"]
+        split1: BaseDataset = task["split1"]
+        split2: BaseDataset = task["split2"]
         batch_size: int = task["batch_size"]
         if key == "all_classes":
+            print(f"Computing metrics {exp_rep} {key}: {len(split1)} vs {len(split2)} samples on device {cuda_device}")
             metrics = torch_fidelity.calculate_metrics(
                 input1=split1,
                 input2=split2,
@@ -218,15 +220,15 @@ def process_task_group_on_one_device(
 def compute_metrics(
     batch_size: int,
     metrics_save_path: Path,
-    exp_repeats: Dict[str, Dict[str, Any]],
-    subdirs: List[Path],
+    exp_repeats: dict[str, dict[str, BaseDataset]],
+    subdirs: list[Path],
     n_processes: int,
-) -> Dict[str, Any]:
+):
     if metrics_save_path.exists():
         raise RuntimeError(f"File {metrics_save_path} already exists, not overwriting")
 
     # Build tasks: each task computes metrics for one key ("all_classes" or a specific class) in an experiment repeat.
-    tasks: List[Dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
     for exp_rep, splits in exp_repeats.items():
         tasks.append(
             {
@@ -252,15 +254,15 @@ def compute_metrics(
     print(f"Will process {len(tasks)} tasks in total")
 
     # Group tasks by cuda device (round-robin assignment)
-    task_groups: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(n_processes)}
+    task_groups: dict[int, list[dict[str, Any]]] = {i: [] for i in range(n_processes)}
     for idx, task in enumerate(tasks):
         device_id = idx % n_processes
         task["cuda_device"] = device_id
         task_groups[device_id].append(task)
 
-    tmp_files: Dict[int, Path] = {}
+    tmp_files: dict[int, Path] = {}
     with ProcessPoolExecutor(max_workers=n_processes) as executor:
-        future_to_device: Dict[Any, int] = {}
+        future_to_device: dict[Any, int] = {}
         for device_id, group in task_groups.items():
             tmp_file = metrics_save_path.parent / f"tmp_metrics_{device_id}.json"
             tmp_files[device_id] = tmp_file
@@ -271,7 +273,7 @@ def compute_metrics(
             future.result()  # Ensure completion
 
     # Merge temporary JSON files
-    eval_metrics: Dict[str, Any] = {}
+    eval_metrics: dict[str, Any] = {}
     for tmp_file in tmp_files.values():
         with open(tmp_file, "r") as f:
             partial = json.load(f)
@@ -310,14 +312,14 @@ if __name__ == "__main__":
         if inpt != "y":
             warn(f"Will not recompute but load from {metrics_save_path}")
             with open(metrics_save_path, "r") as f:
-                eval_metrics: Dict[str, Dict[str, Dict[str, float]]] = json.load(f)
+                eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
         else:
             warn("Will recompute using parallel metrics computation")
             eval_metrics = compute_metrics(batch_size, metrics_save_path, exp_repeats, subdirs, n_processes)
     else:
         warn(f"Will not recompute but load from {metrics_save_path}")
         with open(metrics_save_path, "r") as f:
-            eval_metrics: Dict[str, Dict[str, Dict[str, float]]] = json.load(f)
+            eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
 
     print("Metrics computed:")
     pprint(eval_metrics)
