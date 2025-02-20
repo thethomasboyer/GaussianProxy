@@ -2,7 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from torch import dtype
-from training_conf import DataSet, EvaluationStrategy
+
+from GaussianProxy.conf.training_conf import DataSet, EvaluationStrategy
 
 
 @dataclass(kw_only=True)
