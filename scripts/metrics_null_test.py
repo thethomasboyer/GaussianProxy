@@ -66,17 +66,16 @@ def sorting_func(subdir: Path) -> int:
 
 dataset.dataset_params.sorting_func = sorting_func
 
-print(f"Using transforms:\n{transforms}")
 nb_repeats = 10
 
-batch_size = 512
+batch_size = 512 + 256
 
 metrics_save_path = Path(f"notebooks/evaluations/{dataset.name}/eval_metrics.json")
-print(f"Will save metrics to {metrics_save_path}")
 metrics_save_path.parent.mkdir(parents=True, exist_ok=True)
+
 recompute = True
+
 n_processes: int = 3
-print(f"Using {n_processes} processes for parallel execution (must map 1-to-1 with CUDA devices)")
 
 ############################################## Utils ##############################################
 
@@ -183,7 +182,7 @@ def process_task_group_on_one_device(
                 batch_size=batch_size,
                 fid=True,
                 prc=True,
-                verbose=True,
+                verbose=cuda_device == 0,
                 samples_find_deep=True,
                 cache=False,
             )
@@ -207,7 +206,7 @@ def process_task_group_on_one_device(
                 batch_size=batch_size,
                 fid=True,
                 prc=True,
-                verbose=True,
+                verbose=cuda_device == 0,
                 cache=False,
             )
         results[exp_rep][key] = metrics
@@ -297,6 +296,10 @@ def compute_metrics(
 
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn")  # for starting processes with CUDA
+
+    print(f"Using transforms:\n{transforms}")
+    print(f"Will save metrics to {metrics_save_path}")
+    print(f"Using {n_processes} processes for parallel execution (must map 1-to-1 with CUDA devices)")
 
     ### Compute splits
     exp_repeats, nb_elems_per_class, subdirs = compute_splits(dataset)
