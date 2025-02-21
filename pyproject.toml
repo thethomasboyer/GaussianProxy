@@ -42,6 +42,7 @@ dependencies = [
     "wandb>=0.17.1",
     "tifffile>=2024.12.12",
     "joblib>=1.4.2",
+    "pip>=25.0.1",
 ]
 
 [tool.uv.sources]
