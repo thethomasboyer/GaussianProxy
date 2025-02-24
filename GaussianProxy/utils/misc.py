@@ -287,7 +287,7 @@ def save_eval_artifacts_log_to_wandb(
                 artifact_path = f"{eval_strat}/Generated videos/{split_name}/{norm_method} normalized"
             else:
                 artifact_path = f"{eval_strat}/Generated videos/{norm_method} normalized"
-            accelerator.log({artifact_path: videos})
+            accelerator.log({artifact_path: videos}, step=global_optimization_step)
             logger.debug(
                 f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B at step {global_optimization_step}",
             )
@@ -325,7 +325,8 @@ def save_eval_artifacts_log_to_wandb(
                         wandb.Image(image, caption=sel_captions[img_idx])  # pyright: ignore[reportAttributeAccessIssue]
                         for img_idx, image in enumerate(images)
                     ]
-                }
+                },
+                step=global_optimization_step,
             )
         logger.info(
             f"Logged {len(sel_to_save)} {wandb_title[0].lower() + wandb_title[1:]} to W&B at step {global_optimization_step}",

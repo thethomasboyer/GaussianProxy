@@ -245,12 +245,12 @@ class TimeDiffusion:
             timestep_dataloaders = train_timestep_dataloaders if split == "train" else test_timestep_dataloaders
             for dataloader_idx, dl in enumerate(dls.values()):
                 timestep_dataloaders[self.empirical_dists_timesteps[dataloader_idx]] = dl
-            assert (
-                len(timestep_dataloaders) == self.nb_empirical_dists == len(dls)
-            ), f"Got {len(timestep_dataloaders)} dataloaders, nb_empirical_dists={self.nb_empirical_dists} and len(dls)={len(dls)}; they should be equal"
-            assert np.all(
-                np.diff(list(timestep_dataloaders.keys())) > 0
-            ), "Expecting newly key-ed dataloaders to be numbered in increasing order."
+            assert len(timestep_dataloaders) == self.nb_empirical_dists == len(dls), (
+                f"Got {len(timestep_dataloaders)} dataloaders, nb_empirical_dists={self.nb_empirical_dists} and len(dls)={len(dls)}; they should be equal"
+            )
+            assert np.all(np.diff(list(timestep_dataloaders.keys())) > 0), (
+                "Expecting newly key-ed dataloaders to be numbered in increasing order."
+            )
 
         pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
 
@@ -319,7 +319,7 @@ class TimeDiffusion:
         batches_pbar.close(clear=True)
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
         # gantt_chart = state_logger.create_gantt_chart()
-        # self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)})
+        # self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)}, step=self.global_optimization_step)
 
         if profiler is not None:
             profiler.stop()
@@ -410,10 +410,11 @@ class TimeDiffusion:
         then each batch will always have samples from one empirical distribution only: quite bad for training along
         continuous time... Along many samplings the theoretical end result will of course be the same.
         """
-        assert (
-            list(dataloaders.keys()) == self.empirical_dists_timesteps
-            and list(dataloaders.keys()) == sorted(dataloaders.keys())
-        ), f"Expecting dataloaders to be ordered by timestep, got list(dataloaders.keys())={list(dataloaders.keys())} vs self.empirical_dists_timesteps={self.empirical_dists_timesteps}"
+        assert list(dataloaders.keys()) == self.empirical_dists_timesteps and list(dataloaders.keys()) == sorted(
+            dataloaders.keys()
+        ), (
+            f"Expecting dataloaders to be ordered by timestep, got list(dataloaders.keys())={list(dataloaders.keys())} vs self.empirical_dists_timesteps={self.empirical_dists_timesteps}"
+        )
 
         dataloaders_iterators = {t: iter(dl) for t, dl in dataloaders.items()}
 
@@ -428,9 +429,9 @@ class TimeDiffusion:
                     t_minus = self.empirical_dists_timesteps[i]
                     t_plus = self.empirical_dists_timesteps[i + 1]
                     break
-            assert (
-                t_minus is not None and t_plus is not None
-            ), f"Could not find the two closest empirical distributions for time {t}"
+            assert t_minus is not None and t_plus is not None, (
+                f"Could not find the two closest empirical distributions for time {t}"
+            )
 
             # get distance from each time (x such that t = x * t- + (1-x) * t+)
             x = (t_plus - t) / (t_plus - t_minus)
@@ -498,9 +499,9 @@ class TimeDiffusion:
             self.cfg.training.train_batch_size,
             *self.data_shape,
         ), f"Expecting batch shape {(self.cfg.training.train_batch_size, *self.data_shape)}, got {batch.shape}"
-        assert (
-            batch.min() >= -1 and batch.max() <= 1
-        ), f"Expecting batch to be in [-1;1] range, got {batch.min()} and {batch.max()}"
+        assert batch.min() >= -1 and batch.max() <= 1, (
+            f"Expecting batch to be in [-1;1] range, got {batch.min()} and {batch.max()}"
+        )
 
         # Sample Gaussian noise
         noise = torch.randn_like(batch)
@@ -585,7 +586,8 @@ class TimeDiffusion:
                 "training/step": self.global_optimization_step,
                 "training/time": time,
                 "training/L2 gradient norm": grad_norm,
-            }
+            },
+            step=self.global_optimization_step,
         )
 
     def _unet2d_pred(
@@ -978,9 +980,9 @@ class TimeDiffusion:
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
             )
-            assert (
-                expected_video_shape == video.shape
-            ), f"Expected video shape {expected_video_shape}, got {video.shape}"
+            assert expected_video_shape == video.shape, (
+                f"Expected video shape {expected_video_shape}, got {video.shape}"
+            )
             save_eval_artifacts_log_to_wandb(
                 video,
                 self.saved_artifacts_folder,
@@ -1024,9 +1026,9 @@ class TimeDiffusion:
         Note that any other dataloader than the first one is actually not used for evaluation.
         """
         # Checks
-        assert (
-            list(dataloaders.keys())[0] == 0
-        ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
+        assert list(dataloaders.keys())[0] == 0, (
+            f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
+        )
 
         # Setup schedulers
         inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -1133,9 +1135,9 @@ class TimeDiffusion:
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
             )
-            assert (
-                video.shape == expected_video_shape
-            ), f"Expected video shape {expected_video_shape}, got {video.shape}"
+            assert video.shape == expected_video_shape, (
+                f"Expected video shape {expected_video_shape}, got {video.shape}"
+            )
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
                     video,
@@ -1175,9 +1177,9 @@ class TimeDiffusion:
         Note that any other dataloader than the first one is actually not used for evaluation.
         """
         # Checks
-        assert (
-            list(dataloaders.keys())[0] == 0
-        ), f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
+        assert list(dataloaders.keys())[0] == 0, (
+            f"Expecting the first dataloader to be at time 0, got {list(dataloaders.keys())[0]}"
+        )
 
         # Setup schedulers: duplicate the scheduler to not mess with the training one
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -1288,9 +1290,9 @@ class TimeDiffusion:
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
                 self.accelerator.unwrap_model(self.net).config["sample_size"],
             )
-            assert (
-                video.shape == expected_video_shape
-            ), f"Expected video shape {expected_video_shape}, got {video.shape}"
+            assert video.shape == expected_video_shape, (
+                f"Expected video shape {expected_video_shape}, got {video.shape}"
+            )
             if batch_idx == 0:
                 save_eval_artifacts_log_to_wandb(
                     video,
@@ -1462,9 +1464,9 @@ class TimeDiffusion:
                     class_path.name: len(list((metrics_computation_folder / class_path.name).glob(f"*.{extension}")))
                     for class_path in subdirs
                 }
-                assert all(
-                    nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class
-                ), f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
+                assert all(nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class), (
+                    f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
+                )
 
         # wait for data augmentation to finish before returning
         self.accelerator.wait_for_everyone()
@@ -1499,7 +1501,8 @@ class TimeDiffusion:
         tasks = [self.timesteps_floats_to_names[eval_time] for eval_time in eval_video_times]  # eval time names
         tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
         self.logger.debug(
-            f"Tasks for process {self.accelerator.process_index}: {tasks_for_this_process}", main_process_only=False
+            f"Tasks for process {self.accelerator.process_index}: {tasks_for_this_process}",
+            main_process_only=False,
         )
 
         self.logger.info("Computing metrics...")
@@ -1558,7 +1561,8 @@ class TimeDiffusion:
             {
                 f"evaluation/{time_name}/": this_time_metrics
                 for time_name, this_time_metrics in final_metrics_dict.items()
-            }
+            },
+            step=self.global_optimization_step,
         )
         self.logger.info(
             f"Logged metrics {final_metrics_dict}",
@@ -1584,7 +1588,10 @@ class TimeDiffusion:
             self.logger.info(f"Saving best model to date with FID: {self.best_metric_to_date}")
             self._save_pipeline()
         # log best_metric_to_date at each eval, even if not better
-        self.accelerator.log({"training/best_metric_to_date": self.best_metric_to_date})
+        self.accelerator.log(
+            {"training/best_metric_to_date": self.best_metric_to_date},
+            step=self.global_optimization_step,
+        )
 
         ##### 5. Clean up (important because we reuse existing generated samples!)
         # pickled metrics can be left without issue
@@ -1621,9 +1628,9 @@ class TimeDiffusion:
             )
         elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
             nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
-            assert (
-                self.cfg.training.unpaired_data or nb_all_aug_samples % 8 == 0
-            ), f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+            assert self.cfg.training.unpaired_data or nb_all_aug_samples % 8 == 0, (
+                f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+            )
             tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
             self.logger.debug(
                 f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
@@ -1680,9 +1687,9 @@ class TimeDiffusion:
 
         # Use the correct image processing ([0; 255] uint8) for metrics computation
         test_transforms: Compose = test_dataloaders[0].dataset.transforms  # pyright: ignore[reportAttributeAccessIssue]
-        assert any(
-            isinstance(t, transforms.Normalize) for t in test_transforms.transforms
-        ), f"Expected normalization to be in test transforms, got : {test_transforms}"
+        assert any(isinstance(t, transforms.Normalize) for t in test_transforms.transforms), (
+            f"Expected normalization to be in test transforms, got : {test_transforms}"
+        )
         metrics_compute_transforms = Compose(
             [
                 test_transforms,  # test transforms *must* include the normalization to [-1, 1]
@@ -1734,13 +1741,13 @@ class TimeDiffusion:
 
         # Check that datasets are well-formed
         for time_name, dataset in true_datasets_to_compare_with.items():
-            assert (
-                len(dataset) > 0
-            ), f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
+            assert len(dataset) > 0, (
+                f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
+            )
             if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-                assert (
-                    self.cfg.training.unpaired_data or len(dataset) % 8 == 0
-                ), f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
+                assert self.cfg.training.unpaired_data or len(dataset) % 8 == 0, (
+                    f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
+                )
             self.logger.debug(
                 f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
             )
@@ -1821,9 +1828,9 @@ class TimeDiffusion:
             "r",
             encoding="utf-8",
         ) as f:
-            assert (
-                training_info_for_resume == (reloaded_json := json.load(f))
-            ), f"Expected consistency of resuming args between process {self.accelerator.process_index} and main process; got {training_info_for_resume} != {reloaded_json}"
+            assert training_info_for_resume == (reloaded_json := json.load(f)), (
+                f"Expected consistency of resuming args between process {self.accelerator.process_index} and main process; got {training_info_for_resume} != {reloaded_json}"
+            )
         self.accelerator.wait_for_everyone()  # must wait here as we *could* delete the just-saved checkpoint (see warning msg in misc/create_repo_structure)
 
         # Delete old checkpoints if needed
@@ -1848,9 +1855,9 @@ class TimeDiffusion:
 
         `accelerator.prepare` must have been called before.
         """
-        assert (
-            self.cfg.checkpointing.resume_from_checkpoint != "model_save"
-        ), "Cannot load a 'model save' checkpoint here"
+        assert self.cfg.checkpointing.resume_from_checkpoint != "model_save", (
+            "Cannot load a 'model save' checkpoint here"
+        )
         # no self.logger here as fit_init has not yet been called!
         logger.info(f"Loading checkpoint and training state from {resuming_path}")
         # "automatic" resuming from some save_state checkpoint
