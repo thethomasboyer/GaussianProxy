@@ -34,7 +34,6 @@ dependencies = [
     "seaborn>=0.13.2",
     "submitit>=1.5.2",
     "termcolor>=2.5.0",
-    "torch-fidelity",
     "torch>=2.5.1",
     "torchinfo>=1.8.0",
     "torchvision>=0.20.1",
@@ -43,10 +42,8 @@ dependencies = [
     "tifffile>=2024.12.12",
     "joblib>=1.4.2",
     "pip>=25.0.1",
+    "torch-fidelity",
 ]
-
-[tool.uv.sources]
-torch-fidelity = { git = "https://github.com/thethomasboyer/torch-fidelity-symlinks.git", rev = "master" }
 
 [tool.ruff]
 line-length = 120
@@ -68,3 +65,6 @@ exclude = [
     "**/.vscode-server/extensions",
     "**/.vscode/extensions",
 ]
+
+[tool.uv.sources]
+torch-fidelity = { git = "https://github.com/thethomasboyer/torch-fidelity-symlinks" }

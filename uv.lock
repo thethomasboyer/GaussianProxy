@@ -781,7 +781,7 @@ requires-dist = [
     { name = "termcolor", specifier = ">=2.5.0" },
     { name = "tifffile", specifier = ">=2024.12.12" },
     { name = "torch", specifier = ">=2.5.1" },
-    { name = "torch-fidelity", git = "https://github.com/thethomasboyer/torch-fidelity-symlinks.git?rev=master" },
+    { name = "torch-fidelity", git = "https://github.com/thethomasboyer/torch-fidelity-symlinks" },
     { name = "torchinfo", specifier = ">=1.8.0" },
     { name = "torchvision", specifier = ">=0.20.1" },
     { name = "tqdm", specifier = ">=4.67.0" },
@@ -3230,7 +3230,7 @@ wheels = [
 [[package]]
 name = "torch-fidelity"
 version = "0.4.0b0"
-source = { git = "https://github.com/thethomasboyer/torch-fidelity-symlinks.git?rev=master#c65fa3b3b635f047ca7704164e888281d9b97b7a" }
+source = { git = "https://github.com/thethomasboyer/torch-fidelity-symlinks#ba5d8ddff0ced27a073ac84ce4e2dd52bc61e4b2" }
 dependencies = [
     { name = "numpy" },
     { name = "pillow" },
