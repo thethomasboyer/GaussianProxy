@@ -29,9 +29,6 @@ from numpy import ndarray
 from PIL import Image
 from rich.traceback import install
 from torch import Tensor
-from torch import (
-    any as torch_any,
-)
 from torch.nn import CosineSimilarity, PairwiseDistance
 from torch.profiler import (
     ProfilerActivity,
@@ -49,6 +46,7 @@ from GaussianProxy.conf.inference_conf import InferenceConfig
 from GaussianProxy.conf.training_conf import (
     ForwardNoising,
     ForwardNoisingLinearScaling,
+    InversionRegenerationOnly,
     InvertedRegeneration,
     IterativeInvertedRegeneration,
     MetricsComputation,
@@ -174,8 +172,29 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     video_time_encoder.to(device, cfg.dtype)  # pyright: ignore[reportArgumentType]
 
     # dynamic
-    dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(run_path / "saved_model" / "dynamic")
-    logger.info(f"Loaded dynamic from {run_path / 'saved_model' / 'dynamic'}:\n{dynamic}")
+    orig_dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(run_path / "saved_model" / "dynamic")
+
+    if cfg.scheduler_config is not None:
+        logger.info(f"Loading scheduler from {cfg.scheduler_config}")
+        dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(cfg.scheduler_config)
+        # show the diff between the two configs
+        all_attrs = set(orig_dynamic.config.keys()) | set(dynamic.config.keys())
+        msg = ""
+        for attr in all_attrs:
+            orig_val = getattr(orig_dynamic.config, attr, None)
+            chosen_val = getattr(dynamic.config, attr, None)
+            if orig_val != chosen_val and not attr.startswith("_"):
+                msg += f"'{attr}': {orig_val} -> {chosen_val}\n"
+        if len(msg) != 0:
+            logger.info("Diff between original -and> chosen dynamic:\n" + msg)
+        else:
+            logger.info("No config difference between original and loaded dynamic")
+
+    else:
+        logger.info(f"Loading dynamic from {run_path / 'saved_model' / 'dynamic'}")
+        dynamic = orig_dynamic
+
+    logger.info(f"Loaded dynamic:\n{dynamic}")
 
     ###############################################################################################
     #                                     Load Starting Images
@@ -206,6 +225,9 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     #                                       Inference passes
     ###############################################################################################
     pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
+
+    eval_strats_msg = "\n".join([str(eval_strat) for eval_strat in cfg.evaluation_strategies])
+    logger.info(f"Running {len(cfg.evaluation_strategies)} evaluation strategies:\n{eval_strats_msg}")
 
     for eval_strat_idx, eval_strat in enumerate(cfg.evaluation_strategies):
         logger.info(f"Running evaluation strategy {eval_strat_idx + 1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
@@ -308,6 +330,8 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 accelerator,
                 training_was_with_unpaired_data,
             )
+        elif type(eval_strat) is InversionRegenerationOnly:
+            inversion_and_regeneration_only(cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger)
         else:
             raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -648,7 +672,7 @@ def similarity_with_train_data(
     # torch.save all metrics and plot their histogram
     for metric_name in metrics.keys():
         this_metric_all_sims = all_sims[metric_name].cpu()
-        if torch_any(torch.isnan(this_metric_all_sims)):
+        if torch.any(torch.isnan(this_metric_all_sims)):
             logger.warning("Found NaNs in {metric_name} similarities")
         torch.save(this_metric_all_sims, base_save_path / f"all_{metric_name}.pt")
         plt.figure(figsize=(10, 6))
@@ -946,6 +970,115 @@ def forward_noising_linear_scaling(
         base_save_path,
         "trajectories",
         ["image min-max", "video min-max", "-1_1 raw", "-1_1 clipped"],
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
+        logger,
+    )
+
+
+def inversion_and_regeneration_only(
+    cfg: InferenceConfig,
+    eval_strat: InversionRegenerationOnly,
+    net: UNet2DConditionModel,
+    video_time_encoder: VideoTimeEncoding,
+    dynamic: DDIMScheduler,
+    pbar_manager: Manager,
+    logger: MultiProcessAdapter,
+):
+    # -1. Prepare output directory
+    base_save_path = cfg.output_dir / eval_strat.name
+    if base_save_path.exists():
+        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
+        if inpt.lower() == "y":
+            shutil.rmtree(base_save_path)
+        else:
+            logger.info("Refusing to overwrite; exiting.")
+    base_save_path.mkdir(parents=True)
+    logger.debug(f"Saving outputs to {base_save_path}")
+
+    # 0. Setup schedulers
+    inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
+    inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+    inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
+    inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+    # 0.5. Get the starting batch
+    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+
+    # 1. Save the to-be noised images
+    save_grid_of_images_or_videos(
+        batch,
+        base_save_path,
+        "starting_samples",
+        ["-1_1 raw", "image min-max"],
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
+        logger,
+    )
+
+    # 2. Generate the inverted Gaussians
+    inverted_gauss = batch.clone()
+    inversion_video_time_enc = video_time_encoder.forward(0, batch.shape[0])
+
+    diff_time_pbar = pbar_manager.counter(
+        total=len(inverted_scheduler.timesteps),
+        position=1,
+        desc="Diffusion timesteps" + " " * 4,
+        leave=False,
+    )
+    diff_time_pbar.refresh()
+
+    for t in inverted_scheduler.timesteps:
+        model_output = net.forward(
+            inverted_gauss,
+            t,
+            encoder_hidden_states=inversion_video_time_enc.unsqueeze(1),
+            return_dict=False,
+        )[0]
+        inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
+        diff_time_pbar.update()
+
+    diff_time_pbar.close()
+
+    save_grid_of_images_or_videos(
+        inverted_gauss.to(torch.float32),  # needed for the 5% - 95% (numpy) normalization
+        base_save_path,
+        "inverted_gaussians",
+        ["image min-max", "image 5perc-95perc"],
+        eval_strat.n_rows_displayed,
+        0 if eval_strat.plate_name_to_simulate is not None else 2,
+        logger,
+    )
+
+    # 3. Regenerate the original starting images from it
+    diff_time_pbar = pbar_manager.counter(
+        total=len(inference_scheduler.timesteps),
+        position=1,
+        desc="Diffusion timesteps" + " " * 4,
+        leave=False,
+    )
+    diff_time_pbar.refresh()
+
+    video_time_enc = inversion_video_time_enc  # same time!
+    image = inverted_gauss.clone()
+
+    for t in inference_scheduler.timesteps:
+        model_output: torch.Tensor = net.forward(
+            image,
+            t,
+            encoder_hidden_states=video_time_enc.unsqueeze(1),
+            return_dict=False,
+        )[0]
+        image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+        diff_time_pbar.update()
+
+    diff_time_pbar.close()
+
+    save_grid_of_images_or_videos(
+        image,
+        base_save_path,
+        "regeneration",
+        ["-1_1 raw", "image min-max"],
         eval_strat.n_rows_displayed,
         0 if eval_strat.plate_name_to_simulate is not None else 2,
         logger,
@@ -1408,7 +1541,7 @@ def metrics_computation(
             input1=true_datasets_to_compare_with[task],
             input2=gen_samples_input.as_posix(),
             cuda=True,
-            batch_size=eval_strat.batch_size * 4,  # TODO: optimize
+            batch_size=eval_strat.batch_size * 2,  # TODO: optimize
             isc=True,
             fid=True,
             prc=True,
@@ -1970,7 +2103,7 @@ def find_this_proc_this_time_batches_for_metrics_comp(
     if this_proc_gen_batches[-1] == 0:
         this_proc_gen_batches.pop()
 
-    logger.debug(
+    logger.info(
         f"Process {accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches} for time {true_data_class_path.name}",
         main_process_only=False,
     )
@@ -1979,7 +2112,7 @@ def find_this_proc_this_time_batches_for_metrics_comp(
 
 def get_starting_batch(
     cfg: InferenceConfig,
-    eval_strat: InvertedRegeneration | SimpleGeneration | ForwardNoising,
+    eval_strat: InvertedRegeneration | SimpleGeneration | ForwardNoising | InversionRegenerationOnly,
     logger: MultiProcessAdapter,
     dataset_path: Path | str,
     device: torch.device | str,

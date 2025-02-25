@@ -109,6 +109,13 @@ class EvaluationStrategy:
 
 
 @dataclass(kw_only=True)
+class InversionRegenerationOnly(EvaluationStrategy):
+    nb_generated_samples: int
+    plate_name_to_simulate: str | None = None
+    n_rows_displayed: int
+
+
+@dataclass(kw_only=True)
 class InvertedRegeneration(EvaluationStrategy):
     name: str = field(default="InvertedRegeneration")
     nb_generated_samples: int

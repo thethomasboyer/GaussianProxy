@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from torch import dtype
 
@@ -22,6 +23,9 @@ class InferenceConfig:
     root_experiments_path: Path
     project_name: str
     run_name: str
+
+    # Scheduler config
+    scheduler_config: Optional[Path]
 
     # Output directory (where to put the generated images / tensors)
     output_dir: Path
