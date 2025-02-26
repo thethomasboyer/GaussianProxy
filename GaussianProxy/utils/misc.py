@@ -678,23 +678,34 @@ def _generate_all_augs_pil(img: Image.Image, transforms: list[type] | list[str])
 
 
 def hard_augment_dataset_all_square_symmetries(
-    dataset_path: Path, logger: MultiProcessAdapter, files_ext: str, max_workers: Optional[int] = None
+    dataset_path_or_paths: Path | list[Path],
+    logger: MultiProcessAdapter,
+    files_ext: str,
+    max_workers: Optional[int] = None,
 ):
     """
     Save ("in-place") the 8 augmented versions of each image in the given `dataset_path`.
 
     ### Args:
-    - `dataset_path` (`Path`): The path to the dataset to augment.
+    - `dataset_path_or_paths` (`Path` or `list[Path]`): The path or list of paths to the dataset(s) to augment.
 
     Each image will be augmented with the 8 square symmetries (Dih4)
     and saved in the same subfolder with '_aug_<idx>' appended.
 
-    **This function should only be ran on main process!**
+    This function launches a pool of `max_workers` processes.
     """
     # Get all base images
-    all_base_imgs = list(dataset_path.rglob(f"*.{files_ext}"))
-    assert len(all_base_imgs) > 0, f"No '*.{files_ext}' images found in {dataset_path}"
-    logger.debug(f"Found {len(all_base_imgs)} base images in {dataset_path}")
+    if isinstance(dataset_path_or_paths, Path):
+        all_base_imgs = list(dataset_path_or_paths.rglob(f"*.{files_ext}"))
+    elif isinstance(dataset_path_or_paths, list):
+        all_base_imgs = []
+        for dataset_path in dataset_path_or_paths:
+            all_base_imgs += list(dataset_path.rglob(f"*.{files_ext}"))
+    else:
+        raise TypeError(f"Expected Path or list[Path], got {type(dataset_path_or_paths)}")
+
+    assert len(all_base_imgs) > 0, f"No '*.{files_ext}' images found in {dataset_path_or_paths}"
+    logger.debug(f"Found {len(all_base_imgs)} base images in {dataset_path_or_paths}")
 
     # Save augmented images
     logger.debug("Writing augmented datasets to disk")

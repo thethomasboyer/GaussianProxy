@@ -232,6 +232,13 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     for eval_strat_idx, eval_strat in enumerate(cfg.evaluation_strategies):
         logger.info(f"Running evaluation strategy {eval_strat_idx + 1}/{len(cfg.evaluation_strategies)}:\n{eval_strat}")
         logger.logger.name = eval_strat.name
+        # add strategy-specific logger handler
+        log_file_path = inference_conf.output_dir / eval_strat.name / "logs.log"
+        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file_path, mode="a")
+        file_handler.setFormatter(logging.Formatter("[%(asctime)s][%(name)s][%(levelname)s] - %(message)s"))
+        file_handler.setLevel(logging.DEBUG)
+        logger.logger.addHandler(file_handler)
         # check for correct distributed environment
         is_distributed_strategy = isinstance(eval_strat, MetricsComputation)
         if not is_distributed_strategy and accelerator.distributed_type != DistributedType.NO:
@@ -1454,6 +1461,23 @@ def metrics_computation(
         main_process_only=False,
     )
     metrics_computation_folder = cfg.output_dir / eval_strat.name
+    existing_problematic_files = [f for f in metrics_computation_folder.iterdir() if f.name != "logs.log"]
+    if accelerator.is_main_process and not len(existing_problematic_files) == 0:
+        logger.warning(
+            f"Output directory {metrics_computation_folder.name} already exists and is not empty: {[f.name for f in existing_problematic_files]}"
+        )
+        inpt = input("Overwrite these files/folders? Will exist otherwise (y/[n]) ")
+        if inpt.lower() != "y":
+            raise RuntimeError("Refusing to proceed with a non-empty folder.")
+        else:
+            accelerator.print(f"Deleting files/folders:{existing_problematic_files}")
+            for f in existing_problematic_files:
+                if f.is_dir():
+                    shutil.rmtree(f)
+                else:
+                    f.unlink()
+            accelerator.print("Recreating the folder")
+    accelerator.wait_for_everyone()
 
     # use training time encodings
     assert list(timesteps2classnames.keys()) == timesteps, (
@@ -1688,8 +1712,8 @@ def _generate_images_for_metrics_computation(
     ##### 1.5 Augment the generated samples if applicable
     if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
         logger.info("Augmenting generated samples for metrics computation")
-        # Partition subdirectories among processes
-        subdirs = sorted([d for d in metrics_computation_folder.iterdir() if d.is_dir()])
+        # Partition generated subdirectories among processes
+        subdirs = [metrics_computation_folder / video_time_name for video_time_name in timesteps2classnames.values()]
         assigned_subdirs = subdirs[accelerator.process_index :: accelerator.num_processes]
         n_workers_per_process = os.cpu_count() // accelerator.num_processes
         for subdir in assigned_subdirs:
