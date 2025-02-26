@@ -27,3 +27,7 @@ pytorch_traces
 src
 .envrc
 notebooks/tmp_downloaded_eval_values
+*.pkl
+*.mkv
+*.gif
+*.apng
