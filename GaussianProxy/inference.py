@@ -1646,7 +1646,7 @@ def _generate_images_for_metrics_computation(
     if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
         logger.info("Augmenting generated samples for metrics computation")
         # Partition generated subdirectories among processes
-        subdirs = [metrics_computation_folder / video_time_name for video_time_name in timesteps2classnames.values()]
+        subdirs = [metrics_computation_folder / str(video_time_name) for video_time_name in eval_strat.selected_times]
         assigned_subdirs = subdirs[accelerator.process_index :: accelerator.num_processes]
         n_workers_per_process = os.cpu_count() // accelerator.num_processes
         for subdir in assigned_subdirs:
