@@ -204,9 +204,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=cfg.dataset.dataset_params.sorting_func)
 
-    # some methos are only interested in the first subdir: timestep 0
-    logger.info(f"Will be using subdir '{subdirs[0].name}' as starting point if applicable")
-
     # I reuse the Dataset class from the training script to load the images consistently,
     # but without augmentations to only start on truly true data
     starting_samples = list(subdirs[0].glob(f"*.{cfg.dataset.dataset_params.file_extension}"))
@@ -218,6 +215,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     )
     logger.debug(f"Built dataset from {subdirs[0]}:\n{starting_ds}")
     logger.info(f"Using transforms:\n{kept_transforms}")
+    logger.info(f"from initial range {cfg.dataset.expected_initial_data_range}")
 
     ###############################################################################################
     #                                       Inference passes
@@ -375,13 +373,7 @@ def simple_gen(
     """
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
-        if inpt.lower() == "y":
-            shutil.rmtree(base_save_path)
-        else:
-            logger.info("Refusing to overwrite; exiting.")
-    base_save_path.mkdir(parents=True)
+    clean_inference_strategy_folder(base_save_path, logger)
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
@@ -389,10 +381,10 @@ def simple_gen(
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 1. Get the starting batch
-    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+    shape = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype).shape
 
     # 2. Generate the time encodings
-    eval_video_times = torch.rand(len(batch), device=cfg.device, dtype=cfg.dtype)
+    eval_video_times = torch.rand(shape[0], device=cfg.device, dtype=cfg.dtype)
     eval_video_times = torch.sort(eval_video_times).values  # torch.sort it for better viz
     random_video_time_enc = video_time_encoder.forward(eval_video_times)
 
@@ -405,7 +397,7 @@ def simple_gen(
     )
     gen_pbar.refresh()
 
-    image = torch.randn_like(batch)
+    image = torch.randn(shape, device=cfg.device, dtype=cfg.dtype)
 
     for t in inference_scheduler.timesteps:
         model_output: torch.Tensor = net.forward(
@@ -460,13 +452,7 @@ def similarity_with_train_data(
 
     # -1. Prepare output directory & change models to fp16
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
-        if inpt.lower() == "y":
-            shutil.rmtree(base_save_path)
-        else:
-            logger.info("Refusing to overwrite; exiting.")
-    base_save_path.mkdir(parents=True)
+    clean_inference_strategy_folder(base_save_path, logger)
     logger.debug(f"Saving outputs to {base_save_path}")
 
     if cfg.dtype != torch.float32:
@@ -712,9 +698,7 @@ def forward_noising(
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
-    base_save_path.mkdir(parents=True)
+    clean_inference_strategy_folder(base_save_path, logger)
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup scheduler
@@ -859,9 +843,7 @@ def forward_noising_linear_scaling(
 
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        raise FileExistsError(f"Output directory {base_save_path} already exists. Refusing to overwrite.")
-    base_save_path.mkdir(parents=True)
+    clean_inference_strategy_folder(base_save_path, logger)
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup scheduler
@@ -992,13 +974,7 @@ def inversion_and_regeneration_only(
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
-        if inpt.lower() == "y":
-            shutil.rmtree(base_save_path)
-        else:
-            logger.info("Refusing to overwrite; exiting.")
-    base_save_path.mkdir(parents=True)
+    clean_inference_strategy_folder(base_save_path, logger)
     logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
@@ -1101,14 +1077,8 @@ def inverted_regeneration(
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
-        if inpt.lower() == "y":
-            shutil.rmtree(base_save_path)
-        else:
-            logger.info("Refusing to overwrite; exiting.")
-    base_save_path.mkdir(parents=True)
     logger.debug(f"Saving outputs to {base_save_path}")
+    clean_inference_strategy_folder(base_save_path, logger)
 
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -1274,14 +1244,8 @@ def iterative_inverted_regeneration(
     """
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    if base_save_path.exists():
-        inpt = input(f"\nOutput directory {base_save_path} already exists.\nOverwrite? (y/[n]) ")
-        if inpt.lower() == "y":
-            shutil.rmtree(base_save_path)
-        else:
-            logger.info("Refusing to overwrite; exiting.")
-    base_save_path.mkdir(parents=True)
     logger.debug(f"Saving outputs to {base_save_path}")
+    clean_inference_strategy_folder(base_save_path, logger)
 
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -1459,22 +1423,8 @@ def metrics_computation(
         main_process_only=False,
     )
     metrics_computation_folder = cfg.output_dir / eval_strat.name
-    existing_problematic_files = [f for f in metrics_computation_folder.iterdir() if f.name != "logs.log"]
-    if accelerator.is_main_process and not len(existing_problematic_files) == 0:
-        logger.warning(
-            f"Output directory {metrics_computation_folder.name} already exists and is not empty: {[f.name for f in existing_problematic_files]}"
-        )
-        inpt = input("Overwrite these files/folders? Will exist otherwise (y/[n]) ")
-        if inpt.lower() != "y":
-            raise RuntimeError("Refusing to proceed with a non-empty folder.")
-        else:
-            accelerator.print(f"Deleting files/folders:{existing_problematic_files}")
-            for f in existing_problematic_files:
-                if f.is_dir():
-                    shutil.rmtree(f)
-                else:
-                    f.unlink()
-            accelerator.print("Recreating the folder")
+    if accelerator.is_main_process:
+        clean_inference_strategy_folder(metrics_computation_folder, logger)
     accelerator.wait_for_everyone()
 
     # use training time encodings
@@ -1981,7 +1931,7 @@ def get_true_datasets_for_metrics_computation(
             ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
         ]
     )
-    logger.info(f"Using transforms for metrics computation: {metrics_compute_transforms}")
+    logger.info(f"Using transforms for true datasets in metrics computation: {metrics_compute_transforms}")
     # TODO: programmatically check consistency with true samples processing in misc/save_images_for_metrics_compute
 
     # Force using the hard augmented version of the dataset if generating augmented samples
@@ -2124,7 +2074,7 @@ def get_starting_batch(
     dataset_path: Path | str,
     device: torch.device | str,
     dtype: torch.dtype | str,
-):
+) -> Tensor:
     # build the starting dataset
     assert cfg.dataset.dataset_params is not None
 
@@ -2132,7 +2082,7 @@ def get_starting_batch(
     logger.info(f"Using dataset {cfg.dataset.name} from {database_path}")
     subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=cfg.dataset.dataset_params.sorting_func)
-    logger.info(f"Will be using subdir '{subdirs[0].name}' as starting point if applicable")
+    logger.info(f"Using subdir '{subdirs[0].name}' as starting point")
     # ensure no transforms here
     starting_samples = list(subdirs[0].glob(f"*.{cfg.dataset.dataset_params.file_extension}"))
     kept_transforms = remove_flips_and_rotations_from_transforms(cfg.dataset.transforms)[0]
@@ -2174,6 +2124,29 @@ def get_starting_batch(
     starting_batch: Tensor = torch.stack(tensors).to(device, dtype)  # pyright: ignore[reportCallIssue, reportArgumentType]
     logger.debug(f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype}")
     return starting_batch
+
+
+def clean_inference_strategy_folder(folder: Path, logger: MultiProcessAdapter | logging.Logger):
+    """
+    Cleans the output folder for inference strategy by deleting all files and folders in it but `logs.log`.
+
+    Does not handle distribution!
+    """
+    existing_problematic_files = [f for f in folder.iterdir() if f.name != "logs.log"]
+    if len(existing_problematic_files) != 0:
+        logger.warning(
+            f"Output directory {folder.name} already exists and is not empty: {[f.name for f in existing_problematic_files]}"
+        )
+        inpt = input("Overwrite these files/folders (will exist otherwise)? (y/[n]) ")
+        if inpt.lower() != "y":
+            raise RuntimeError("Refusing to proceed with a non-cleared folder.")
+        else:
+            logger.info(f"Deleting files/folders:{[f.name for f in existing_problematic_files]}")
+            for f in existing_problematic_files:
+                if f.is_dir():
+                    shutil.rmtree(f)
+                else:
+                    f.unlink()
 
 
 if __name__ == "__main__":

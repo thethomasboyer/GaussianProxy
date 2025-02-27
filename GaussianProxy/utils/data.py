@@ -7,13 +7,14 @@ from typing import Callable, Optional, TypeVar
 
 import numpy as np
 import tifffile
+import torch
 import torchvision.transforms.functional as tf
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
-from torch import Tensor, dtype, from_numpy
+from torch import Tensor, dtype
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms.transforms import (
     Compose,
@@ -62,7 +63,7 @@ class BaseDataset(Dataset[Tensor]):
     def load_to_pt_and_transform(self, path: str | Path) -> Tensor:
         # load data
         t = self._raw_file_loader(path)
-        # checks
+        # checks # TODO: check if this takes too much time
         if self.expected_initial_data_range is not None:
             if t.min() < self.expected_initial_data_range[0] or t.max() > self.expected_initial_data_range[1]:
                 raise ValueError(
@@ -109,14 +110,14 @@ class NumpyDataset(BaseDataset):
     """Just a dataset loading NumPy arrays."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
-        return from_numpy(np.load(path))
+        return torch.from_numpy(np.load(path))
 
 
 class ImageDataset(BaseDataset):
     """Just a dataset loading images, and moving the channel dim last."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
-        return from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
+        return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
 
 
 class TIFFDataset(BaseDataset):
@@ -125,9 +126,9 @@ class TIFFDataset(BaseDataset):
     def _raw_file_loader(self, path: str | Path) -> Tensor:
         array = tifffile.imread(path)
         if array.dtype == np.uint16:
-            # from_numpy does not support uint16, so convert to int32 to not loose precision
+            # torch.from_numpy does not support uint16, so convert to int32 to not loose precision
             array = array.astype(np.int32, casting="safe")
-        return from_numpy(array).permute(2, 0, 1)
+        return torch.from_numpy(array).permute(2, 0, 1)
 
 
 class RandomRotationSquareSymmetry(Transform):
