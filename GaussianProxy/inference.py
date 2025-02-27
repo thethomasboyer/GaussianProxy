@@ -1926,8 +1926,17 @@ def get_true_datasets_for_metrics_computation(
     nb_channels = cfg.dataset.data_shape[0]
     metrics_compute_transforms = Compose(
         [
+            # 1: process images for inference (== training processing \ augmentations)
             test_transforms,  # test transforms *must* include the normalization to [-1, 1]
-            Normalize(mean=[-1] * nb_channels, std=[2] * nb_channels),  # Convert from [-1, 1] to [0, 1],
+            # 2: if the model is inferring in f16, bf16, ..., then also discretize the true samples to simulate the same processing!
+            ConvertImageDtype(
+                cfg.dtype
+            ),  # this will quantize images more if cfg.dtype is low precision, no-op if already f32
+            # 3: convert back from [-1, 1] to [0, 1]
+            Normalize(mean=[-1] * nb_channels, std=[2] * nb_channels),  #
+            # !!! bf16 -> uint8 produces overflow at 1! So convert to f32 *first* (...)
+            ConvertImageDtype(torch.float32),  # no-op if already f32
+            # 3: convert to [0; 255] uint8 for PIL png saving
             ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
         ]
     )
@@ -2086,7 +2095,7 @@ def get_starting_batch(
     # ensure no transforms here
     starting_samples = list(subdirs[0].glob(f"*.{cfg.dataset.dataset_params.file_extension}"))
     kept_transforms = remove_flips_and_rotations_from_transforms(cfg.dataset.transforms)[0]
-    starting_ds = cfg.dataset.dataset_params.dataset_class(
+    starting_ds: BaseDataset = cfg.dataset.dataset_params.dataset_class(
         starting_samples,
         kept_transforms,
         cfg.dataset.expected_initial_data_range,
@@ -2097,7 +2106,7 @@ def get_starting_batch(
     # select starting samples to generate from
     if eval_strat.plate_name_to_simulate is not None:
         # if a plate was given, select nb_generated_samples from it, in order
-        glob_pattern = (
+        glob_pattern = (  # TODO: this is hard-coded for biotine
             f"{eval_strat.plate_name_to_simulate}_time_1_patch_*_*.{cfg.dataset.dataset_params.file_extension}"
         )
         # assuming they are sorted in (x,y) dictionary order
@@ -2112,7 +2121,7 @@ def get_starting_batch(
             f"Expected to get at least {eval_strat.nb_generated_samples} samples, got {len(sample_names)}"
         )
         logger.info(f"Selected {len(sample_names)} samples to run inference from.")
-        tensors: list[Tensor] = starting_ds.get_items_by_name(sample_names)
+        tensors = starting_ds.get_items_by_name(sample_names)
     else:
         # if not, select nb_generated_samples samples randomly
         sample_idxes: list[int] = (  # pyright: ignore[reportAssignmentType]
