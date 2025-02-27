@@ -145,16 +145,16 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     ###############################################################################################
     if accelerator.distributed_type == DistributedType.NO:
         device = cfg.device
+        logger.info(f"Using device {device}")
     else:
         device = accelerator.device
-    logger.info(f"Using device {device}")
 
     # denoiser
     net: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(  # pyright: ignore[reportAssignmentType]
         run_path / "saved_model" / "net"
     )
     nb_params_M = round(net.num_parameters() / 1e6)
-    logger.info(f"Loaded denoiser from {run_path / 'saved_model' / 'net'} with ~{nb_params_M}M parameters")
+    logger.info(f"Loaded denoiser from saved_model/net with ~{nb_params_M}M parameters")
     warn_about_dtype_conv(net, cfg.dtype, logger)
     net.to(device, cfg.dtype)  # pyright: ignore[reportArgumentType]
     if cfg.compile:
@@ -165,9 +165,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
         run_path / "saved_model" / "video_time_encoder"
     )
     nb_params_K = round(video_time_encoder.num_parameters() / 1e3)
-    logger.info(
-        f"Loaded video time encoder from {run_path / 'saved_model' / 'video_time_encoder'} with ~{nb_params_K}K parameters"
-    )
+    logger.info(f"Loaded video time encoder from saved_model/video_time_encoder with ~{nb_params_K}K parameters")
     warn_about_dtype_conv(video_time_encoder, cfg.dtype, logger)
     video_time_encoder.to(device, cfg.dtype)  # pyright: ignore[reportArgumentType]
 
@@ -218,7 +216,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
         kept_transforms,
         cfg.dataset.expected_initial_data_range,
     )
-    logger.info(f"Built dataset from {subdirs[0]}:\n{starting_ds}")
+    logger.debug(f"Built dataset from {subdirs[0]}:\n{starting_ds}")
     logger.info(f"Using transforms:\n{kept_transforms}")
 
     ###############################################################################################
@@ -313,7 +311,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
             logger.info(
                 f"Empirical timesteps: {[round(ts, 3) for ts in empirical_timesteps]} from {len(subdirs)} subdirs"
             )
-            timesteps2classnames = dict(zip(empirical_timesteps, [s.name for s in subdirs]))
+            timesteps2classnames: dict[float, str] = dict(zip(empirical_timesteps, [s.name for s in subdirs]))
             ### We need the full datasets/loaders for this method
             training_run_folder = cfg.output_dir.parent
             # use the original training config in <training_run_folder>/my_conf to know if the training was with unpaired data
@@ -1524,22 +1522,6 @@ def metrics_computation(
         logger.warning("Skipping image generation for metrics computation")
 
     ##### 2. Compute metrics
-    # consistency of cache naming with below is important
-    metrics_caches: dict[str, Path] = {"all_times": metrics_computation_folder / cfg.dataset.name}
-    for video_time_names in list(classnames2timesteps.keys()):
-        metrics_caches[video_time_names] = metrics_computation_folder / (cfg.dataset.name + "_time_" + video_time_names)
-
-    # clear the dataset caches
-    # because the dataset might not be exactly the same that in the previous run,
-    # despite having the same cfg.dataset.name (used as ID): risk of invalid cache!
-    # clear on main process
-    logger.debug("Clearing dataset caches for metrics computation")
-    if accelerator.is_main_process:
-        for cache in metrics_caches.values():
-            if cache.exists():
-                shutil.rmtree(cache)
-    accelerator.wait_for_everyone()
-
     # TODO: weight tasks by number of samples
     # TODO: include "all_times" in the tasks, but ***differentiate between using seen data only and all the available dataset!***
     # tasks = ["all_times"] + list(timesteps_names_to_floats.keys())
@@ -1561,6 +1543,8 @@ def metrics_computation(
             f"Computing metrics on {nb_samples_gen} generated samples at {gen_samples_input.as_posix()} vs {nb_true_samples} true samples at {true_datasets_to_compare_with[task].base_path} on process {accelerator.process_index}",
             main_process_only=False,
         )
+        # no caching as the true dataset is fixed only in case `nb_samples_to_gen_per_time` is a number or 'adapt',
+        # so we should use caching only in that case => never cache for now
         metrics = torch_fidelity.calculate_metrics(
             input1=true_datasets_to_compare_with[task],
             input2=gen_samples_input.as_posix(),
@@ -1570,8 +1554,7 @@ def metrics_computation(
             fid=True,
             prc=True,
             verbose=accelerator.is_main_process,
-            cache_root=metrics_computation_folder.as_posix(),
-            input1_cache_name=metrics_caches[task].name,
+            cache=False,
             samples_find_deep=task == "all_times",
         )
         metrics_dict[task] = metrics

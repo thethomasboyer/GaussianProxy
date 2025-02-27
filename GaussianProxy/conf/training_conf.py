@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from omegaconf import MISSING
 
@@ -168,7 +168,7 @@ class ForwardNoisingLinearScaling(ForwardNoising):
 
 @dataclass(kw_only=True)
 class MetricsComputation(EvaluationStrategy):
-    nb_samples_to_gen_per_time: int | str
+    nb_samples_to_gen_per_time: int | Literal["adapt half aug"] | Literal["adapt half"] | Literal["adapt"]
     batch_size: int
     name: str = field(default="MetricsComputation")
     regen_images: bool = True
