@@ -1107,7 +1107,7 @@ def inverted_regeneration(
     diff_time_pbar = pbar_manager.counter(
         total=len(inverted_scheduler.timesteps),
         position=1,
-        desc="Diffusion timesteps" + " " * 4,
+        desc="Inversion diffusion timesteps" + " " * 4,
         leave=False,
     )
     diff_time_pbar.refresh()
