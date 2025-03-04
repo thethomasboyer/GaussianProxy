@@ -508,6 +508,7 @@ def save_images_for_metrics_compute(
     """Saves [-1;1] tensors to [0; 255] uint8 PNG images in the given folder."""
     # Checks
     assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
+    assert images.dtype == torch.float32, f"Expected float32 tensor, got {images.dtype}"
     save_folder.mkdir(parents=True, exist_ok=True)
 
     # Normalize images to [0;255] np.uint8 range
