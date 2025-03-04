@@ -1,9 +1,8 @@
 import json
 import pickle
+import random
 import shutil
 from dataclasses import dataclass, field, fields
-
-# from logging import INFO, FileHandler, makeLogRecord
 from pathlib import Path
 from typing import ClassVar, Generator, Optional, Type
 
@@ -18,6 +17,7 @@ from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
+from PIL import Image
 from torch import IntTensor, Tensor
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
@@ -25,7 +25,7 @@ from torch.profiler import profile as torch_profile
 from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.transforms.transforms import Compose
+from torchvision.transforms.transforms import Compose, ConvertImageDtype, Normalize
 
 from GaussianProxy.conf.training_conf import (
     Config,
@@ -48,6 +48,12 @@ from GaussianProxy.utils.models import VideoTimeEncoding
 
 # State logger to track time spent in some functions
 state_logger = StateLogger()
+
+TORCH_DTYPES = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
 
 
 @dataclass
@@ -1325,7 +1331,6 @@ class TimeDiffusion:
         inference_video_time_encoding: VideoTimeEncoding,
         train_dataloaders: dict[float, DataLoader],
         test_dataloaders: dict[float, DataLoader],
-        # dataset_class: type[BaseDataset],
     ):
         """
         Compute metrics such as FID.
@@ -1336,6 +1341,11 @@ class TimeDiffusion:
         # duplicate the scheduler to not mess with the training one
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+
+        # cast models to eval strat dtype
+        self.logger.warning(f"Casting inference models to {eval_strat.dtype}")
+        eval_net = eval_net.to(TORCH_DTYPES[eval_strat.dtype])  # pyright: ignore[reportArgumentType]
+        inference_video_time_encoding = inference_video_time_encoding.to(TORCH_DTYPES[eval_strat.dtype])  # pyright: ignore[reportArgumentType]
 
         # Misc.
         self.logger.info(f"Starting {eval_strat.name}: {eval_strat}")
@@ -1358,12 +1368,12 @@ class TimeDiffusion:
             f"Selected video times for metrics computation: {eval_video_times} from {eval_strat.selected_times}"
         )
         eval_video_time_enc = inference_video_time_encoding.forward(
-            torch.tensor(eval_video_times).to(self.accelerator.device)
+            torch.tensor(eval_video_times).to(self.accelerator.device, TORCH_DTYPES[eval_strat.dtype])
         )
 
         # get true datasets to compare against (in [0; 255] uint8 PNG images)
         true_datasets_to_compare_with = self._get_true_datasets_for_metrics_computation(
-            eval_strat, eval_video_times, train_dataloaders, test_dataloaders
+            eval_strat, eval_video_times, train_dataloaders, test_dataloaders, metrics_computation_folder
         )
 
         ##### 1. Generate the samples
@@ -1382,7 +1392,7 @@ class TimeDiffusion:
             video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
 
             # get timestep name
-            video_time_name = self.timesteps_floats_to_names[eval_video_times[video_time_idx]]
+            video_time_name = str(eval_strat.selected_times[video_time_idx])
 
             # find how many samples to generate, batchify generation and distribute along processes
             gen_dir = metrics_computation_folder / video_time_name
@@ -1421,6 +1431,7 @@ class TimeDiffusion:
                     self.accelerator.unwrap_model(self.net).config["sample_size"],
                     self.accelerator.unwrap_model(self.net).config["sample_size"],
                     device=self.accelerator.device,
+                    dtype=TORCH_DTYPES[eval_strat.dtype],
                 )
                 video_time_enc = video_time_enc[:batch_size]
 
@@ -1428,6 +1439,9 @@ class TimeDiffusion:
                 for t in gen_pbar(inference_scheduler.timesteps):
                     model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
+
+                # convert to f32 to avoid overflows
+                image = image.to(torch.float32)
 
                 # save to [0; 255] uint8 PNG images
                 save_images_for_metrics_compute(
@@ -1453,16 +1467,18 @@ class TimeDiffusion:
             if self.accelerator.is_main_process:
                 # augment
                 extension = "png"  # TODO: remove this hardcoded extension (by moving DatasetParams'params into the base DataSet class used in config, another TODO)
+                subdirs_to_augment = [
+                    metrics_computation_folder / str(video_time_name) for video_time_name in eval_strat.selected_times
+                ]
                 hard_augment_dataset_all_square_symmetries(
-                    metrics_computation_folder,
+                    subdirs_to_augment,
                     self.logger,
                     extension,
                 )
                 # check result
-                subdirs = [d for d in metrics_computation_folder.iterdir() if d.is_dir()]
                 nb_elems_per_class = {
                     class_path.name: len(list((metrics_computation_folder / class_path.name).glob(f"*.{extension}")))
-                    for class_path in subdirs
+                    for class_path in subdirs_to_augment
                 }
                 assert all(nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class), (
                     f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
@@ -1513,7 +1529,8 @@ class TimeDiffusion:
             nb_true_samples = len(true_datasets_to_compare_with[task])
             if nb_samples_gen != nb_true_samples:
                 self.logger.warning(
-                    f"Mismatch in the number of samples for task {task}: {nb_samples_gen} generated vs {nb_true_samples} true"
+                    f"Mismatch in the number of samples for task {task}: {nb_samples_gen} generated vs {nb_true_samples} true",
+                    main_process_only=False,
                 )
             self.logger.debug(
                 f"Computing metrics on {nb_samples_gen} generated samples at {gen_samples_input.as_posix()} vs {nb_true_samples} true samples at {true_datasets_to_compare_with[task].base_path} on process {self.accelerator.process_index}",
@@ -1593,7 +1610,7 @@ class TimeDiffusion:
             step=self.global_optimization_step,
         )
 
-        ##### 5. Clean up (important because we reuse existing generated samples!)
+        ##### 5. Clean up
         # pickled metrics can be left without issue
         if self.accelerator.is_main_process:
             shutil.rmtree(metrics_computation_folder)
@@ -1618,28 +1635,22 @@ class TimeDiffusion:
             tot_nb_samples = eval_strat.nb_samples_to_gen_per_time
         elif eval_strat.nb_samples_to_gen_per_time == "adapt":
             tot_nb_samples = len(list(true_data_class_path.iterdir()))
-            self.logger.debug(
-                f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
-            )
         elif eval_strat.nb_samples_to_gen_per_time == "adapt half":
             tot_nb_samples = len(list(true_data_class_path.iterdir())) // 2
-            self.logger.debug(
-                f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
-            )
         elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
             nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
             assert self.cfg.training.unpaired_data or nb_all_aug_samples % 8 == 0, (
                 f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
             )
             tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
-            self.logger.debug(
-                f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
-            )
             self.logger.debug("Will augment samples 8⨉ after generation")
         else:
             raise ValueError(
                 f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', 'adapt half', or 'adapt half aug', got {eval_strat.nb_samples_to_gen_per_time}"
             )
+        self.logger.debug(
+            f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
+        )
 
         # share equally among processes & batchify
         # the code below ensures all processes have the same number of batches to generate,
@@ -1669,6 +1680,7 @@ class TimeDiffusion:
         eval_video_times: list[float],
         train_dataloaders: dict[float, DataLoader],
         test_dataloaders: dict[float, DataLoader],
+        metrics_computation_folder: Path,
     ):
         """
         Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images.
@@ -1690,16 +1702,22 @@ class TimeDiffusion:
         assert any(isinstance(t, transforms.Normalize) for t in test_transforms.transforms), (
             f"Expected normalization to be in test transforms, got : {test_transforms}"
         )
+        nb_channels = self.cfg.dataset.data_shape[0]
         metrics_compute_transforms = Compose(
             [
+                # 1: Process images for inference (== training processing \ augmentations)
                 test_transforms,  # test transforms *must* include the normalization to [-1, 1]
-                transforms.Normalize(
-                    mean=[-1] * self.data_shape[0], std=[2] * self.data_shape[0]
-                ),  # Convert from [-1, 1] to [0, 1]
-                transforms.ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
+                # 2: If the model is *inferring* in f16, bf16, ..., then also discretize the true samples to simulate the same processing!
+                ConvertImageDtype(TORCH_DTYPES[eval_strat.dtype]),  # no-op if already f32
+                # 3: Convert back to f32 *before* scaling
+                ConvertImageDtype(torch.float32),  # no-op if already f32
+                # 4: Scale back from [-1, 1] to [0, 1]
+                Normalize(mean=[-1] * nb_channels, std=[2] * nb_channels),
+                # 5: Convert to [0; 255] uint8 for PIL png saving
+                ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
             ]
         )
-        self.logger.debug(f"Using transforms for metrics computation: {metrics_compute_transforms}")
+        self.logger.debug(f"Using transforms for true datasets in metrics computation: {metrics_compute_transforms}")
         # TODO: programmatically check consistency with true samples processing in misc/save_images_for_metrics_compute
 
         all_true_files_per_time = {}
@@ -1751,6 +1769,20 @@ class TimeDiffusion:
             self.logger.debug(
                 f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
             )
+
+        # Save a few samples to visually check the processing!
+        self.logger.info(
+            f"Saving a few true samples for processing check at {metrics_computation_folder}/few_true_samples_for_processing_check"
+        )
+        for time, dataset in true_datasets_to_compare_with.items():
+            few_samples_indexes = random.sample(range(len(dataset)), 5)
+            few_samples = dataset.__getitems__(few_samples_indexes)
+            for sample_idx, sample in enumerate(few_samples):
+                pil_img = Image.fromarray(sample.permute(1, 2, 0).numpy())
+                orig_filename = dataset.samples[few_samples_indexes[sample_idx]].name
+                out_dir = metrics_computation_folder / "few_true_samples_for_processing_check" / time
+                out_dir.mkdir(parents=True, exist_ok=True)
+                pil_img.save(out_dir / f"{orig_filename}_processed.png")
 
         return true_datasets_to_compare_with
 

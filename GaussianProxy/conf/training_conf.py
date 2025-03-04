@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Optional
 
 from omegaconf import MISSING
 
@@ -168,12 +168,13 @@ class ForwardNoisingLinearScaling(ForwardNoising):
 
 @dataclass(kw_only=True)
 class MetricsComputation(EvaluationStrategy):
-    nb_samples_to_gen_per_time: int | Literal["adapt half aug"] | Literal["adapt half"] | Literal["adapt"]
+    nb_samples_to_gen_per_time: int | str
     batch_size: int
     name: str = field(default="MetricsComputation")
     regen_images: bool = True
     nb_recompute: int = 1  # TODO: not used
     selected_times: list
+    dtype: str = "float32"
 
 
 @dataclass
