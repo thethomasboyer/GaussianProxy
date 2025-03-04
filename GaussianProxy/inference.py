@@ -1424,7 +1424,12 @@ def metrics_computation(
     )
     metrics_computation_folder = cfg.output_dir / eval_strat.name
     if accelerator.is_main_process:
-        clean_inference_strategy_folder(metrics_computation_folder, logger)
+        if not eval_strat.regen_images:
+            names_to_ignore = [str(t) for t in eval_strat.selected_times]
+            logger.warning(f"Reusing existing images from previous run: ignoring {names_to_ignore}")
+        else:
+            names_to_ignore = []
+        clean_inference_strategy_folder(metrics_computation_folder, logger, names_to_ignore)
     accelerator.wait_for_everyone()
 
     # use training time encodings
@@ -1487,7 +1492,8 @@ def metrics_computation(
         nb_true_samples = len(true_datasets_to_compare_with[task])
         if nb_samples_gen != nb_true_samples:
             logger.warning(
-                f"Mismatch in the number of samples for task {task}: {nb_samples_gen} generated vs {nb_true_samples} true"
+                f"Mismatch in the number of samples for task {task}: {nb_samples_gen} generated vs {nb_true_samples} true",
+                main_process_only=False,
             )
         logger.debug(
             f"Computing metrics on {nb_samples_gen} generated samples at {gen_samples_input.as_posix()} vs {nb_true_samples} true samples at {true_datasets_to_compare_with[task].base_path} on process {accelerator.process_index}",
@@ -1926,17 +1932,15 @@ def get_true_datasets_for_metrics_computation(
     nb_channels = cfg.dataset.data_shape[0]
     metrics_compute_transforms = Compose(
         [
-            # 1: process images for inference (== training processing \ augmentations)
+            # 1: Process images for inference (== training processing \ augmentations)
             test_transforms,  # test transforms *must* include the normalization to [-1, 1]
-            # 2: if the model is inferring in f16, bf16, ..., then also discretize the true samples to simulate the same processing!
-            ConvertImageDtype(
-                cfg.dtype
-            ),  # this will quantize images more if cfg.dtype is low precision, no-op if already f32
-            # 3: convert back from [-1, 1] to [0, 1]
-            Normalize(mean=[-1] * nb_channels, std=[2] * nb_channels),  #
-            # !!! bf16 -> uint8 produces overflow at 1! So convert to f32 *first* (...)
+            # 2: If the model is *inferring* in f16, bf16, ..., then also discretize the true samples to simulate the same processing!
+            ConvertImageDtype(cfg.dtype),  # no-op if already f32
+            # 3: Convert back to f32 *before* scaling
             ConvertImageDtype(torch.float32),  # no-op if already f32
-            # 3: convert to [0; 255] uint8 for PIL png saving
+            # 4: Scale back from [-1, 1] to [0, 1]
+            Normalize(mean=[-1] * nb_channels, std=[2] * nb_channels),
+            # 5: Convert to [0; 255] uint8 for PIL png saving
             ConvertImageDtype(torch.uint8),  # this also scales to [0, 255]
         ]
     )
@@ -2047,13 +2051,6 @@ def find_this_proc_this_time_batches_for_metrics_comp(
         f"Will generate {tot_nb_samples} samples for time {true_data_class_path.name} at {true_data_class_path.as_posix()}"
     )
 
-    # Resume from interrupted generation
-    already_existing_samples = len(list(gen_dir.iterdir()))
-    logger.debug(
-        f"Found {already_existing_samples} already existing samples for time {true_data_class_path.name} at {gen_dir}"
-    )
-    tot_nb_samples -= already_existing_samples
-
     # share equally among processes & batchify
     # the code below ensures all processes have the same number of batches to generate,
     # with the same number of samples in each batch but the last one
@@ -2135,13 +2132,15 @@ def get_starting_batch(
     return starting_batch
 
 
-def clean_inference_strategy_folder(folder: Path, logger: MultiProcessAdapter | logging.Logger):
+def clean_inference_strategy_folder(
+    folder: Path, logger: MultiProcessAdapter | logging.Logger, names_to_ignore: list[str] = []
+):
     """
     Cleans the output folder for inference strategy by deleting all files and folders in it but `logs.log`.
 
     Does not handle distribution!
     """
-    existing_problematic_files = [f for f in folder.iterdir() if f.name != "logs.log"]
+    existing_problematic_files = [f for f in folder.iterdir() if f.name != "logs.log" and f.name not in names_to_ignore]
     if len(existing_problematic_files) != 0:
         logger.warning(
             f"Output directory {folder.name} already exists and is not empty: {[f.name for f in existing_problematic_files]}"
