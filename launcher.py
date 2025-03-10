@@ -102,9 +102,9 @@ def main(cfg: Config) -> None:
             case "a100" | "h100":
                 cpus_per_task = int(64 * cfg.slurm.num_gpus / 8)
             case s if isinstance(s, str) and s.startswith("v100"):
-                assert (
-                    cfg.slurm.partition is None
-                ), f"Expected partition to not be set when constraint is set; got {cfg.slurm.partition}"
+                assert cfg.slurm.partition is None, (
+                    f"Expected partition to not be set when constraint is set; got {cfg.slurm.partition}"
+                )
                 cpus_per_task = int(40 * cfg.slurm.num_gpus / 4)
             case None:
                 assert cfg.slurm.partition is not None, "Partition must be set when constraint is None"
@@ -358,7 +358,9 @@ def _get_config_path_and_name(hydra_cfg: HydraConf) -> tuple[Path, Path]:
     return launcher_config_path, task_config_name
 
 
-THINGS_TO_COPY = ["GaussianProxy", "my_conf"]
+CODE_FOLDER_NAME = "GaussianProxy"
+CONFIG_FOLDER_NAME = "my_conf"
+THINGS_TO_COPY = [CODE_FOLDER_NAME, CONFIG_FOLDER_NAME]
 # path must be relative to the *launcher* script (this script) parent folder
 
 THINGS_TO_GITIGNORE = [
@@ -379,6 +381,83 @@ THINGS_TO_GITIGNORE = [
     "train_samples.json",
     "test_samples.json",
 ]
+
+
+def _get_specific_diffs(repo: Repo, prev_commit: str, new_commit: str, path: str | None = None) -> str:
+    """
+    Get git diff for a specific path.
+
+    Args:
+        repo: Git repo object
+        prev_commit: Previous commit hash
+        new_commit: New commit hash
+        path: List of path to include in diff (None for all)
+
+    Returns:
+        Formatted diff as string
+    """
+    args = ["--unified=0", "--color", prev_commit, new_commit]
+    if path is not None:
+        args.extend(["--", path])
+
+    return repo.git.diff(*args)
+
+
+def _get_code_changes_summary(
+    repo: Repo, prev_commit: str, new_commit: str, exclude_path: str | None = None
+) -> dict[str, int]:
+    """
+    Get summary of changed lines per file in code files.
+
+    Args:
+        repo: Git repo object
+        prev_commit: Previous commit hash
+        new_commit: New commit hash
+        exclude_path: Path to exclude (typically config path)
+
+    Returns:
+        Dict mapping filenames to number of changed lines
+    """
+    # Get the list of changed files
+    changed_files = repo.git.diff("--name-only", prev_commit, new_commit).splitlines()
+
+    # Filter out excluded paths
+    if exclude_path is not None:
+        changed_files = [f for f in changed_files if not any(f.startswith(path) for path in exclude_path)]
+
+    # Get stat for each file
+    result = {}
+    for file in changed_files:
+        try:
+            # Get number of insertions and deletions
+            stat = repo.git.diff("--numstat", prev_commit, new_commit, "--", file).split()
+            if len(stat) >= 2:
+                insertions = int(stat[0]) if stat[0] != "-" else 0
+                deletions = int(stat[1]) if stat[1] != "-" else 0
+                result[file] = insertions + deletions
+        except Exception:
+            # If we can't get stats for some reason, just mark the file as changed
+            result[file] = 1
+
+    return result
+
+
+def _format_code_changes_summary(summary: dict[str, int]) -> str:
+    """Format a summary of code changes."""
+    if not summary:
+        return "No code changes detected."
+
+    # Count total changes
+    total_changes = sum(summary.values())
+    total_files = len(summary)
+
+    lines = [
+        f"Code changes summary: {total_changes} line{'s' if total_changes != 1 else ''} changed in {total_files} file{'s' if total_files != 1 else ''}"
+    ]
+    for file, count in summary.items():
+        lines.append(f"  - {file}: {count} line{'s' if count != 1 else ''} changed")
+
+    return "\n".join(lines)
 
 
 def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger) -> tuple[Path, Path, Path]:
@@ -455,8 +534,26 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
 
     # otherwise show diff and ask for confirmation
     new_commit = repo.head.commit
-    diff = repo.git.diff("--unified=0", "--color", prev_commit, new_commit)
-    logger.info(f"Git diff with previous commit: {prev_commit.message}\n{diff}")
+
+    diff_mode = cfg.diff_mode
+
+    match diff_mode:
+        case "full":
+            # Show full diff of everything
+            full_diff = _get_specific_diffs(repo, prev_commit.hexsha, new_commit.hexsha)
+            logger.info(f"Git diff with previous commit: {prev_commit.message}\n{full_diff}")
+        case "config_only":
+            # Show only config diff + code summary
+            logger.warning("Diff mode set to 'config_only': showing only config diff and code changes summary")
+            config_diff = _get_specific_diffs(repo, prev_commit.hexsha, new_commit.hexsha, CONFIG_FOLDER_NAME)
+            code_changes = _get_code_changes_summary(repo, prev_commit.hexsha, new_commit.hexsha, CONFIG_FOLDER_NAME)
+            if config_diff == "":
+                logger.info(f"No config changes detected with previous commit: {prev_commit.message}")
+            else:
+                logger.info(f"Git diff for config files with previous commit: {prev_commit.message}:\n{config_diff}")
+            logger.info(_format_code_changes_summary(code_changes))
+        case _:
+            raise ValueError(f"Unknown diff mode: {diff_mode}")
 
     # 7. Get confirmation of launch, otherwise revert changes
     # first get confirmation
@@ -471,6 +568,13 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
             do_launch = False
     else:
         try:
+            # Add option to show full diff if not already shown
+            if diff_mode != "full":
+                confirmation = input("Show code diff additionally? (y/[n]): ")
+                if confirmation.lower() == "y":
+                    code_diff = _get_specific_diffs(repo, prev_commit.hexsha, new_commit.hexsha, CODE_FOLDER_NAME)
+                    logger.info(f"Code diff:\n{code_diff}")
+
             confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/[n]): ")
             if confirmation != "y":
                 do_launch = False
@@ -478,9 +582,10 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
                 do_launch = True
         except KeyboardInterrupt:
             do_launch = False
+
     # if not, revert changes
     if not do_launch:
-        logger.info("Launch aborted")
+        logger.warning("Launch aborted")
         if prev_commit is not None:
             logger.warning(f"Reverting changes in the experiment folder {this_experiment_folder}")
             repo.git.reset("--hard", prev_commit)

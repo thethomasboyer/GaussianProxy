@@ -277,7 +277,7 @@ class Config:
     launcher_script_parent_folder: str
     script: str
 
-    # ExperimentVariables
+    # Experiment Variables
     exp_parent_folder: str
     project: str
     run_name: str
@@ -295,6 +295,7 @@ class Config:
     debug: bool
     profile: bool
     fork_run: bool
+    diff_mode: str = "config_only"  # "config_only" or "full"
 
     # Caches
     tmpdir_location: Optional[str] = None

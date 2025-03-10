@@ -143,7 +143,7 @@ def main(cfg: Config) -> None:
         # fork, rewind, or start a new run
         if cfg.accelerate.offline:
             # wandb offline run resume *simply* does not work...
-            logger.info("Offline mode: (ignoring potential previous messages and) force starting a new run")
+            logger.warning("Offline mode: (ignoring potential previous messages and) force starting a new run")
         else:
             if cfg.fork_run:
                 logger.info(f"Forking run {prev_run_id} from step {start_step}")
