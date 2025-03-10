@@ -290,7 +290,16 @@ class TimeDiffusion:
             self.logger,
             self.cfg.training.nb_time_samplings - init_count,
         ):
-            ### first check if checkpoint or evaluation at *this* opt step (before next gradient step)
+            ### First check for checkpointing flag file (written by the launcher when timeing out)
+            if Path(chckpt_save_path, "checkpointing_flag.txt").exists():
+                if self.accelerator.is_main_process:
+                    Path(chckpt_save_path, "checkpointing_flag.txt").unlink()
+                self.accelerator.wait_for_everyone()
+                self.logger.warning("Saw the checkpointing flag file: removed it, and stopping training now")
+                self._checkpoint()
+                break
+
+            ### Then check if checkpoint or evaluation at *this* opt step (before next gradient step)
             # checkpoint
             if self.global_optimization_step % self.cfg.checkpointing.checkpoint_every_n_steps == 0 and (
                 self.global_optimization_step != 0 or self.eval_on_start
@@ -318,18 +327,9 @@ class TimeDiffusion:
             if profiler is not None:
                 profiler.step()
 
-            ### Update global opt step and pbar at very end of everything
+            ### Finally update global opt step and pbar at very end of everything
             self.global_optimization_step += 1
             batches_pbar.update()
-
-            ### Check for checkpointing flag file (written by the launcher when timeing out)
-            if Path(chckpt_save_path, "checkpointing_flag.txt").exists():
-                if self.accelerator.is_main_process:
-                    Path(chckpt_save_path, "checkpointing_flag.txt").unlink()
-                self.accelerator.wait_for_everyone()
-                self.logger.warning("Saw the checkpointing flag file: removed it, and stopping training now")
-                self._checkpoint()
-                break
 
         batches_pbar.close(clear=True)
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)

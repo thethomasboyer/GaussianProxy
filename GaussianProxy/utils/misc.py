@@ -85,6 +85,11 @@ def create_repo_structure(
     else:
         chckpt_save_path = cfg.checkpointing.chckpt_base_path / cfg.project / cfg.run_name / "checkpoints"
 
+    # remove the checkpointing flag file if it is present at run start because of some failed cleanup
+    if accelerator.is_main_process and Path(chckpt_save_path, "checkpointing_flag.txt").exists():
+        logger.warning("Checkpointing flag file exists at run start: removing it")
+        Path(chckpt_save_path, "checkpointing_flag.txt").unlink()
+
     # verify that the checkpointing folder is empty if not resuming run from a checkpoint
     # this is specific to this *run*
     if accelerator.is_main_process:

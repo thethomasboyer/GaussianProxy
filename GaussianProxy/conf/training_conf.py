@@ -5,11 +5,12 @@ from typing import Any, Callable, Optional
 from omegaconf import MISSING
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Slurm:
     enabled: bool
     monitor: bool
-    signal_time: int  # in minutes
+    total_job_time: int # in minutes
+    send_timeout_signal_n_minutes_before_end: int = 1 # in minutes
     email: str
     output_folder: str
     num_gpus: int

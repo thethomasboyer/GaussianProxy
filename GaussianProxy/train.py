@@ -311,6 +311,7 @@ def main(cfg: Config) -> None:
     )
 
     # ----------------------------------- The End  -----------------------------------
+    logger.info("Ending training")
     accelerator.end_training()
 
 

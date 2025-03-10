@@ -20,11 +20,11 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from logging import Logger, getLogger
+from logging import Logger
 from os import get_terminal_size
 from pathlib import Path
 from pprint import pformat
-
+import logging
 import hydra
 import submitit
 from git import Repo
@@ -52,6 +52,9 @@ install()
 # wait for this amount of seconds before automatically launching the job when debug flag is set
 CONFIRMATION_TIME_LAUNCH_DEBUG_SEC = 5
 
+# how much to wait before resubmitting the task at SIGUSR2 receival at timeout, in seconds
+SLEEP_TIME_AFTER_SIGNAL_RECEIVED_SEC = 45
+
 
 @hydra.main(
     version_base=None,
@@ -63,7 +66,13 @@ def main(cfg: Config) -> None:
     hydra_cfg = HydraConfig.get()
 
     # Logging
-    logger: Logger = getLogger(Path(__file__).stem)
+    logger: Logger = logging.getLogger(Path(__file__).stem)
+    log_file_path = Path(hydra_cfg.run.dir) / "logs.log"
+    log_file_path.parent.mkdir(exist_ok=True, parents=True)
+    file_handler = logging.FileHandler(log_file_path, mode="a")
+    file_handler.setFormatter(logging.Formatter("[%(asctime)s][%(name)s][%(levelname)s] - %(message)s"))
+    file_handler.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
 
     try:
         terminal_width = get_terminal_size().columns
@@ -82,21 +91,14 @@ def main(cfg: Config) -> None:
 
         if cfg.debug is True:
             qos = "dev"
-            time = min(cfg.slurm.signal_time, 30)  # minutes
         else:
             qos = cfg.slurm.qos
-            time = cfg.slurm.signal_time
 
         additional_parameters = {
             "hint": "nomultithread",
             "mail_user": cfg.slurm.email,
             "mail_type": "FAIL",
         }
-        if cfg.debug:
-            pass  # TODO: find how to use pty with submitit
-        else:
-            additional_parameters["output"] = f"{cfg.slurm.output_folder}/jobid-%j.out"
-            additional_parameters["error"] = f"{cfg.slurm.output_folder}/jobid-%j.err"
 
         # get the total number of cpus
         match cfg.slurm.constraint:
@@ -132,7 +134,8 @@ def main(cfg: Config) -> None:
             slurm_gres=f"gpu:{cfg.slurm.num_gpus}",
             slurm_cpus_per_task=cpus_per_task,
             slurm_additional_parameters=additional_parameters,
-            slurm_time=time,
+            slurm_signal_delay_s=cfg.slurm.send_timeout_signal_n_minutes_before_end * 60,
+            slurm_time=cfg.slurm.total_job_time,
             slurm_qos=slurm_qos,
             slurm_account=cfg.slurm.account,
         )
@@ -270,9 +273,10 @@ class Task:
         """
         Method called by submitit when the Task times out and `cfg.slurm.max_num_requeue` is not reached.
 
-        It performs 2 actions:
+        It performs 3 actions:
         1. write a flag file indicating the training job to checkpoint and stop training to the specified checkpoint folder
-        2. resubmit the job with the same config, but with `resume_from_checkpoint` set to True.
+        2. wait a bit
+        3. resubmit the job with the same config, but with `resume_from_checkpoint` set to True.
         """
         # 1. Write the flag file
         # get the checkpointing folder like in GaussianProxy/utils/misc.py:create_repo_structure
@@ -288,8 +292,12 @@ class Task:
         chckpt_save_path.mkdir(parents=True, exist_ok=True)
         chckpt_flag_file = Path(chckpt_save_path, "checkpointing_flag.txt")
         chckpt_flag_file.touch(exist_ok=True)
+        self.logger.info(f"Touched checkpointing flag file; sleeping for {SLEEP_TIME_AFTER_SIGNAL_RECEIVED_SEC}")
 
-        # 2. Resubmit the job
+        # 2. Wait a bit
+        time.sleep(SLEEP_TIME_AFTER_SIGNAL_RECEIVED_SEC)
+
+        # 3. Resubmit the job
         # If the run was not set to resume from the latest checkpoint,
         # (ie resume_from_checkpoint=True), then change that argument
         cfg_copy = self.cfg.copy()  # pyright: ignore[reportAttributeAccessIssue]
@@ -306,7 +314,7 @@ class Task:
             self.task_config_name,
             self.code_and_config_parent_folder,
             self.script_name,
-            getLogger(__name__),
+            logging.getLogger(__name__),
         )
         return submitit.helpers.DelayedSubmission(callable_method)
 
