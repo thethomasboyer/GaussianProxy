@@ -378,19 +378,23 @@ def _dataset_builder(
 
     # Save train/test split to disk if new TODO: save root path of dataset only once!
     if build_new_train_test_split:
-        serializable_train_files = {
-            time: [p.as_posix() for p in list_paths] for time, list_paths in all_train_files.items()
+        # train
+        serializable_train_files: dict[TimeKey | str, str | list[str]] = {
+            time: [p.name for p in list_paths] for time, list_paths in all_train_files.items()
         }
+        serializable_train_files["root_dir"] = Path(cfg.dataset.path).as_posix()
         with Path(this_run_folder, "train_samples.json").open("w") as f:
             json.dump(serializable_train_files, f)
-        serializable_test_files = {
-            time: [p.as_posix() for p in list_paths] for time, list_paths in all_test_files.items()
+        # test
+        serializable_test_files: dict[TimeKey | str, str | list[str]] = {
+            time: [p.name for p in list_paths] for time, list_paths in all_test_files.items()
         }
+        serializable_test_files["root_dir"] = Path(cfg.dataset.path).as_posix()
         with Path(this_run_folder, "test_samples.json").open("w") as f:
             json.dump(serializable_test_files, f)
         logger.info("Saved new train & test samples to train_samples.json & test_samples.json")
 
-    # print some info about the datasets
+    # Print some info about the datasets
     _print_short_datasets_info(train_reprs_to_log, logger, "Train datasets:")
     _print_short_datasets_info(test_reprs_to_log, logger, "Test datasets:")
 
@@ -541,13 +545,26 @@ def load_train_test_splits(
     with Path(this_run_folder, "train_samples.json").open("r") as f:
         all_train_files = json.load(f)
     assert isinstance(all_train_files, dict), f"Expected a dict, got {type(all_train_files)}"
-    for time, list_paths in all_train_files.items():
-        all_train_files[time] = [Path(p) for p in list_paths]
+    if "root_dir" in all_train_files:
+        root_dir = Path(all_train_files.pop("root_dir"))
+        for time, list_names in all_train_files.items():
+            all_train_files[time] = [root_dir / time / name for name in list_names]
+    else:
+        for time, list_paths in all_train_files.items():
+            all_train_files[time] = [Path(path) for path in list_paths]
+
     # test
     with Path(this_run_folder, "test_samples.json").open("r") as f:
         all_test_files = json.load(f)
-    for time, list_paths in all_test_files.items():
-        all_test_files[time] = [Path(p) for p in list_paths]
+    assert isinstance(all_test_files, dict), f"Expected a dict, got {type(all_test_files)}"
+    if "root_dir" in all_test_files:
+        root_dir = Path(all_test_files.pop("root_dir"))
+        for time, list_names in all_test_files.items():
+            all_test_files[time] = [root_dir / time / name for name in list_names]
+    else:
+        for time, list_paths in all_test_files.items():
+            all_test_files[time] = [Path(path) for path in list_paths]
+
     logger.info("Loaded train & test samples from train_samples.json & test_samples.json")
 
     return all_train_files, all_test_files
