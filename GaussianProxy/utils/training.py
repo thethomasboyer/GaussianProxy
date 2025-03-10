@@ -322,6 +322,15 @@ class TimeDiffusion:
             self.global_optimization_step += 1
             batches_pbar.update()
 
+            ### Check for checkpointing flag file (written by the launcher when timeing out)
+            if Path(chckpt_save_path, "checkpointing_flag.txt").exists():
+                if self.accelerator.is_main_process:
+                    Path(chckpt_save_path, "checkpointing_flag.txt").unlink()
+                self.accelerator.wait_for_everyone()
+                self.logger.warning("Saw the checkpointing flag file: removed it, and stopping training now")
+                self._checkpoint()
+                break
+
         batches_pbar.close(clear=True)
         # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
         # gantt_chart = state_logger.create_gantt_chart()
@@ -1832,7 +1841,7 @@ class TimeDiffusion:
 
         Names of checkpoint subfolders should be `step_<global_optimization_step>`.
 
-        Used to resume training.
+        Used to resume training later.
         """
         # First, wait for all processes to reach this point
         self.accelerator.wait_for_everyone()

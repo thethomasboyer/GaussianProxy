@@ -31,6 +31,7 @@ from git import Repo
 from hydra.conf import HydraConf
 from hydra.core.config_store import ConfigStore
 from hydra.core.hydra_config import HydraConfig
+from omegaconf import OmegaConf
 from rich.traceback import install
 from termcolor import colored
 
@@ -266,7 +267,29 @@ class Task:
         subprocess.run(final_cmd, shell=True, check=True, env=env_vars)
 
     def checkpoint(self):
-        """Method called by submitit when the Task times out."""
+        """
+        Method called by submitit when the Task times out and `cfg.slurm.max_num_requeue` is not reached.
+
+        It performs 2 actions:
+        1. write a flag file indicating the training job to checkpoint and stop training to the specified checkpoint folder
+        2. resubmit the job with the same config, but with `resume_from_checkpoint` set to True.
+        """
+        # 1. Write the flag file
+        # get the checkpointing folder like in GaussianProxy/utils/misc.py:create_repo_structure
+        this_run_folder = Path(self.cfg.exp_parent_folder, self.cfg.project, self.cfg.run_name)
+        if OmegaConf.is_missing(self.cfg.checkpointing, "chckpt_base_path"):
+            self.logger.warning(
+                f"No checkpointing *base* folder was specified: writing run resume flag file under {this_run_folder}/checkpoints"
+            )
+            chckpt_save_path = Path(this_run_folder, "checkpoints")
+        else:
+            chckpt_save_path = Path(self.cfg.checkpointing.chckpt_base_path)
+        # write the flag file
+        chckpt_save_path.mkdir(parents=True, exist_ok=True)
+        chckpt_flag_file = Path(chckpt_save_path, "checkpointing_flag.txt")
+        chckpt_flag_file.touch(exist_ok=True)
+
+        # 2. Resubmit the job
         # If the run was not set to resume from the latest checkpoint,
         # (ie resume_from_checkpoint=True), then change that argument
         cfg_copy = self.cfg.copy()  # pyright: ignore[reportAttributeAccessIssue]
