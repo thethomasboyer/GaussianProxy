@@ -14,6 +14,7 @@
 # - submit the task (or run it directly)
 
 
+import logging
 import os
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from logging import Logger
 from os import get_terminal_size
 from pathlib import Path
 from pprint import pformat
-import logging
+
 import hydra
 import submitit
 from git import Repo
@@ -135,10 +136,11 @@ def main(cfg: Config) -> None:
             slurm_cpus_per_task=cpus_per_task,
             slurm_additional_parameters=additional_parameters,
             slurm_signal_delay_s=cfg.slurm.send_timeout_signal_n_minutes_before_end * 60,
-            slurm_time=cfg.slurm.total_job_time,
             slurm_qos=slurm_qos,
             slurm_account=cfg.slurm.account,
         )
+        if cfg.slurm.total_job_time is not None:
+            executor.update_parameters(slurm_time=cfg.slurm.total_job_time)
 
     # CL overrides
     overrides = hydra_cfg.overrides.task
