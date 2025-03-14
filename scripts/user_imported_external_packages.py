@@ -17,7 +17,7 @@ def get_python_files(repo_path: str) -> set[str]:
 def get_imports_from_python_file(file_path: str) -> set[str]:
     """Parse .py file to get imported modules."""
     imports = set()
-    with open(file_path, "r", encoding="utf-8") as file:
+    with open(file_path, encoding="utf-8") as file:
         root = ast.parse(file.read(), filename=file_path)
         for node in ast.walk(root):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -30,7 +30,7 @@ def get_imports_from_python_file(file_path: str) -> set[str]:
 def get_imports_from_notebook(file_path: str) -> set[str]:
     """Extract imports from Jupyter notebooks, skipping magic and shell commands."""
     imports = set()
-    with open(file_path, "r", encoding="utf-8") as file:
+    with open(file_path, encoding="utf-8") as file:
         notebook = json.load(file)
         for cell in notebook.get("cells", []):
             if cell.get("cell_type") == "code":

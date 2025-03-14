@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from omegaconf import MISSING
 
@@ -9,17 +10,17 @@ from omegaconf import MISSING
 class Slurm:
     enabled: bool
     monitor: bool
-    total_job_time: Optional[int] = None  # in minutes
+    total_job_time: int | None = None  # in minutes
     send_timeout_signal_n_minutes_before_end: int = 5  # in minutes
     email: str
     output_folder: str
     num_gpus: int
     qos: str
-    constraint: Optional[str]
+    constraint: str | None
     nodes: int
     account: str
     max_num_requeue: int
-    partition: Optional[str]
+    partition: str | None
 
     def __post_init__(self):
         valid_qos_values = ["dev", "t3", "t4"]
@@ -34,7 +35,7 @@ class AccelerateLaunchArgs:
     rdzv_backend: str
     same_network: str
     mixed_precision: str
-    num_processes: Optional[int]
+    num_processes: int | None
     main_process_port: int
     dynamo_backend: str = "no"
     gpu_ids: str = "all"
@@ -80,13 +81,13 @@ class DataSet:
     name: str
     expected_initial_data_range: tuple[float, float] | None
     # same goes for selected_dists: should be list[int] | list[str]...
-    selected_dists: Optional[list] = None
-    dataset_params: Optional[DatasetParams] = None
+    selected_dists: list | None = None
+    dataset_params: DatasetParams | None = None
 
 
 @dataclass
 class DataLoader:
-    num_workers: Optional[int]
+    num_workers: int | None
     train_prefetch_factor: int
     pin_memory: bool
     persistent_workers: bool
@@ -225,7 +226,7 @@ class UNet2DModelConfig:
     block_out_channels: tuple[int, ...]
     layers_per_block: int
     act_fn: str
-    class_embed_type: Optional[str]
+    class_embed_type: str | None
     center_input_sample: bool = False
     time_embedding_type: str = "positional"
     freq_shift: int = 0
@@ -299,7 +300,7 @@ class Config:
     diff_mode: str = "config_only"  # "config_only" or "full"
 
     # Caches
-    tmpdir_location: Optional[str] = None
+    tmpdir_location: str | None = None
 
     # Experiment tracker
     logger: str

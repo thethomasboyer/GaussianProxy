@@ -275,7 +275,7 @@ def compute_metrics(
     # Merge temporary JSON files
     eval_metrics: dict[str, Any] = {}
     for tmp_file in tmp_files.values():
-        with open(tmp_file, "r") as f:
+        with open(tmp_file) as f:
             partial = json.load(f)
         for exp_rep, metrics_dict in partial.items():
             if exp_rep not in eval_metrics:
@@ -311,14 +311,14 @@ if __name__ == "__main__":
         inpt = input("Confirm recompute (y/[n]):")
         if inpt != "y":
             warn(f"Will not recompute but load from {metrics_save_path}")
-            with open(metrics_save_path, "r") as f:
+            with open(metrics_save_path) as f:
                 eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
         else:
             warn("Will recompute using parallel metrics computation")
             eval_metrics = compute_metrics(batch_size, metrics_save_path, exp_repeats, subdirs, n_processes)
     else:
         warn(f"Will not recompute but load from {metrics_save_path}")
-        with open(metrics_save_path, "r") as f:
+        with open(metrics_save_path) as f:
             eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
 
     print("Metrics computed:")

@@ -8,9 +8,9 @@ versus the similarity between generated and true training (/validation/test) sam
 # Imports
 import logging
 import sys
+from collections.abc import Callable
 from operator import gt, lt
 from pathlib import Path
-from typing import Callable
 
 import colorlog
 import matplotlib.pyplot as plt
@@ -111,7 +111,7 @@ all_sims = {
         device=DEVICE,
         dtype=torch.float32,
     )
-    for metric_name in metrics.keys()
+    for metric_name in metrics
 }
 
 BEST_VAL = {"cosine": 0, "L2": float("inf")}
@@ -130,7 +130,7 @@ worst_values = {
         device=DEVICE,
         dtype=torch.float32,
     )
-    for metric_name in metrics.keys()
+    for metric_name in metrics
 }
 # closest_ds_idx_aug_idx[metric_name][i] = (closest_ds_idx, closest_aug_idx)
 closest_ds_idx_aug_idx = {
@@ -140,7 +140,7 @@ closest_ds_idx_aug_idx = {
         device=DEVICE,
         dtype=torch.int64,
     )
-    for metric_name in metrics.keys()
+    for metric_name in metrics
 }
 
 num_full_batches, remaining = divmod(tot_nb_samples, BATCH_SIZE)
@@ -211,7 +211,7 @@ for batch_idx, bs in enumerate(actual_bses):
 
 outer_pbar.close()
 # report the largest similarities
-for metric_name in metrics.keys():
+for metric_name in metrics:
     logger.info(
         f"Worst found {metric_name} similarities: {[round(val, 3) for val in worst_values[metric_name].tolist()]}"
     )
@@ -221,7 +221,7 @@ for metric_name in metrics.keys():
     logger.debug(f"Closest found images: {closest_true_imgs_names}")
 
 # save all metrics and plot their histogram
-for metric_name in metrics.keys():
+for metric_name in metrics:
     this_metric_all_sims = all_sims[metric_name].cpu()
     torch.save(this_metric_all_sims, BASE_SAVE_PATH / f"all_{metric_name}.pt")
     plt.figure(figsize=(10, 6))

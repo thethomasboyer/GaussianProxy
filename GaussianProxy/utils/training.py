@@ -2,9 +2,10 @@ import json
 import pickle
 import random
 import shutil
+from collections.abc import Generator
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import ClassVar, Generator, Optional, Type
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -111,7 +112,7 @@ class TimeDiffusion:
     cfg: Config
     dynamic: DDIMScheduler
     net: UNet2DModel | UNet2DConditionModel
-    net_type: Type[UNet2DModel | UNet2DConditionModel]
+    net_type: type[UNet2DModel | UNet2DConditionModel]
     video_time_encoding: VideoTimeEncoding
     accelerator: Accelerator
     # populated arguments when calling .fit
@@ -216,7 +217,7 @@ class TimeDiffusion:
         saved_artifacts_folder: Path,
         chckpt_save_path: Path,
         this_run_folder: Path,
-        resuming_args: Optional[ResumingArgs] = None,
+        resuming_args: ResumingArgs | None = None,
         profile: bool = False,
     ):
         """
@@ -350,7 +351,7 @@ class TimeDiffusion:
         logger: MultiProcessAdapter,
         model_save_folder: Path,
         saved_artifacts_folder: Path,
-        resuming_args: Optional[ResumingArgs],
+        resuming_args: ResumingArgs | None,
         this_run_folder: Path,
     ):
         """
@@ -612,7 +613,7 @@ class TimeDiffusion:
         noisy_batch: Tensor,
         diff_timesteps: Tensor,
         video_time_codes: Tensor,
-        net: Optional[UNet2DModel] = None,
+        net: UNet2DModel | None = None,
     ):
         # allow providing evaluation net
         _net: UNet2DModel = self.net if net is None else net  # pyright: ignore[reportAssignmentType]
@@ -628,7 +629,7 @@ class TimeDiffusion:
         noisy_batch: Tensor,
         diff_timesteps: Tensor,
         video_time_codes: Tensor,
-        net: Optional[UNet2DConditionModel] = None,
+        net: UNet2DConditionModel | None = None,
     ):
         # allow providing evaluation net
         _net: UNet2DConditionModel = self.net if net is None else net  # pyright: ignore[reportAssignmentType]
@@ -1107,7 +1108,7 @@ class TimeDiffusion:
 
             prev_video_time = 0
             image = batch
-            for video_t_idx, video_time in enumerate(video_times):
+            for video_time in video_times:
                 # 2. Generate the inverted Gaussians
                 inverted_gauss = image
                 inversion_video_time = inference_video_time_encoding.forward(prev_video_time, batch.shape[0])
@@ -1279,7 +1280,7 @@ class TimeDiffusion:
             if self.accelerator.is_main_process:
                 video_time_pbar.refresh()
 
-            for video_t_idx, video_time in enumerate(torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps)):
+            for video_time in torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps):
                 image = slightly_noised_sample.clone()
                 video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
 
@@ -1289,11 +1290,6 @@ class TimeDiffusion:
 
                 video.append(image)
                 video_time_pbar.update()
-                # _log_to_file_only(
-                #     self.logger,
-                #     f"Video time {video_timestep}/{self.cfg.training.eval_nb_video_timesteps}",
-                #     INFO,
-                # )
 
             video_time_pbar.close(clear=True)
 
@@ -1756,7 +1752,7 @@ class TimeDiffusion:
                 )
 
         # Then if generating half the number of samples, take half of the available true data to compare with
-        for time_name in all_true_files_per_time.keys():
+        for time_name in all_true_files_per_time:
             all_true_files_per_time[time_name] = all_true_files_per_time[time_name][
                 : len(all_true_files_per_time[time_name]) // 2
             ]
@@ -1869,7 +1865,6 @@ class TimeDiffusion:
         # check consistency between processes
         with open(
             this_chkpt_subfolder / ResumingArgs.json_state_filename,
-            "r",
             encoding="utf-8",
         ) as f:
             assert training_info_for_resume == (reloaded_json := json.load(f)), (

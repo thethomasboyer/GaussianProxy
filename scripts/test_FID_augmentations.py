@@ -56,9 +56,9 @@ for subdir in subdirs:
     new_ds2_elems = this_class_elems[len(this_class_elems) // 2 :]
     ds1_elems += new_ds1_elems
     ds2_elems += new_ds2_elems
-    assert len(new_ds1_elems) + len(new_ds2_elems) == len(
-        this_class_elems
-    ), f"{len(new_ds1_elems)} + {len(new_ds2_elems)} != {len(this_class_elems)}"
+    assert len(new_ds1_elems) + len(new_ds2_elems) == len(this_class_elems), (
+        f"{len(new_ds1_elems)} + {len(new_ds2_elems)} != {len(this_class_elems)}"
+    )
 assert abs(len(ds1_elems) - len(ds2_elems)) <= len(subdirs)
 ds1 = dataset.dataset_params.dataset_class(
     ds1_elems,
@@ -102,9 +102,9 @@ def compute_metrics(batch_size: int, metrics_save_path: Path):
             ds1_this_cl = Subset(ds1, this_class_ds1_idxes)
             ds2_this_cl = Subset(ds2, this_class_ds2_idxes)
             assert abs(len(ds1_this_cl) - len(ds2_this_cl)) <= 1
-            assert (
-                len(ds1_this_cl) + len(ds2_this_cl) == nb_elems_per_class[subdir.name]
-            ), f"{len(ds1_this_cl)} + {len(ds2_this_cl)} != {nb_elems_per_class[subdir.name]}"
+            assert len(ds1_this_cl) + len(ds2_this_cl) == nb_elems_per_class[subdir.name], (
+                f"{len(ds1_this_cl)} + {len(ds2_this_cl)} != {nb_elems_per_class[subdir.name]}"
+            )
             metrics_dict_cl = torch_fidelity.calculate_metrics(
                 input1=ds1_this_cl,
                 input2=ds2_this_cl,
@@ -137,7 +137,7 @@ if recompute:
     inpt = input("Confirm recompute (y/[n]):")
     if inpt != "y":
         warn(f"Will not recompute but load from {metrics_save_path}")
-        with open(metrics_save_path, "r") as f:
+        with open(metrics_save_path) as f:
             eval_metrics = json.load(f)
     else:
         warn("Will recompute")
@@ -145,7 +145,7 @@ if recompute:
         eval_metrics = compute_metrics(batch_size, metrics_save_path)
 else:
     warn(f"Will not recompute but load from {metrics_save_path}")
-    with open(metrics_save_path, "r") as f:
+    with open(metrics_save_path) as f:
         eval_metrics = json.load(f)
 
 pprint(eval_metrics)

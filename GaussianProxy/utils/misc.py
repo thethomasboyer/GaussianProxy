@@ -4,7 +4,7 @@ from datetime import datetime
 from functools import wraps
 from logging import Logger
 from pathlib import Path
-from typing import Literal, Optional, overload
+from typing import Literal, overload
 
 import numpy as np
 import plotly.express as px
@@ -154,8 +154,8 @@ def modify_args_for_debug(
         if hasattr(strat, "nb_samples_to_gen_per_time"):  # TODO move this check to the dedicated "checks" function?
             assert hasattr(strat, "batch_size"), "Expected batch_size to be present"
             # only change it if it's a hard-coded value
-            if isinstance(getattr(strat, "nb_samples_to_gen_per_time"), int):
-                setattr(strat, "nb_samples_to_gen_per_time", 2 * getattr(strat, "batch_size"))
+            if isinstance(strat.nb_samples_to_gen_per_time, int):
+                strat.nb_samples_to_gen_per_time = 2 * strat.batch_size
     # TODO: update registered wandb config
 
 
@@ -314,12 +314,9 @@ def save_eval_artifacts_log_to_wandb(
                 raise ValueError(
                     f"Unknown name: {artifact_name}; expected one of 'inversions' or 'starting_samples' for 4D tensors"
                 )
-        for norm_method, normed_vids in normalized_elements_for_logging.items():
+        for norm_method, normed_imgs in normalized_elements_for_logging.items():
             # PIL RGB mode expects 3x8-bit pixels in (H, W, C) format
-            images = [
-                Image.fromarray(image.transpose(1, 2, 0), mode="RGB")
-                for image in normalized_elements_for_logging[norm_method]
-            ]
+            images = [Image.fromarray(image.transpose(1, 2, 0), mode="RGB") for image in normed_imgs]
             if split_name is not None:
                 artifact_path = f"{eval_strat}/{wandb_title}/{split_name}/{norm_method} normalized"
             else:
@@ -508,7 +505,7 @@ def warn_about_dtype_conv(
 def save_images_for_metrics_compute(
     images: Tensor,
     save_folder: Path,
-    process_idx: Optional[int] = None,
+    process_idx: int | None = None,
 ):
     """Saves [-1;1] tensors to [0; 255] uint8 PNG images in the given folder."""
     # Checks
@@ -517,7 +514,7 @@ def save_images_for_metrics_compute(
     save_folder.mkdir(parents=True, exist_ok=True)
 
     # Normalize images to [0;255] np.uint8 range
-    if not (-1 <= images.min() and images.max() <= 1):
+    if not (images.min() >= -1 and images.max() <= 1):
         print(f"Expected [-1;1] range, got {images.min()} to {images.max()}")
     normalized_imgs = normalize_elements_for_logging(images, ["-1_1 raw"])["-1_1 raw"]
 
@@ -687,7 +684,7 @@ def hard_augment_dataset_all_square_symmetries(
     dataset_path_or_paths: Path | list[Path],
     logger: MultiProcessAdapter,
     files_ext: str,
-    max_workers: Optional[int] = None,
+    max_workers: int | None = None,
 ):
     """
     Save ("in-place") the 8 augmented versions of each image in the given `dataset_path`.

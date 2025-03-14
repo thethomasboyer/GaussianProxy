@@ -10,7 +10,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import ceil
 from pathlib import Path
-from typing import Optional
 
 import colorlog
 import imageio
@@ -309,7 +308,9 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
             logger.info(
                 f"Empirical timesteps: {[round(ts, 3) for ts in empirical_timesteps]} from {len(subdirs)} subdirs"
             )
-            timesteps2classnames: dict[float, str] = dict(zip(empirical_timesteps, [s.name for s in subdirs]))
+            timesteps2classnames: dict[float, str] = dict(
+                zip(empirical_timesteps, [s.name for s in subdirs], strict=True)
+            )
             ### We need the full datasets/loaders for this method
             training_run_folder = cfg.output_dir.parent
             # use the original training config in <training_run_folder>/my_conf to know if the training was with unpaired data
@@ -340,19 +341,22 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
 
 
 def get_training_boolean_value(filepath: Path, key: str):
-    with open(filepath, "r") as f:
+    with open(filepath) as f:
         tree = ast.parse(f.read(), filename=filepath)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "training":
-                    # Check if the value is a call to Training(...)
-                    if isinstance(node.value, ast.Call) and getattr(node.value.func, "id", None) == "Training":
-                        for kw in node.value.keywords:
-                            if kw.arg == key:
-                                if isinstance(kw.value, ast.Constant):
-                                    return kw.value.value
+                # Check if the value is a call to Training(...)
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id == "training"
+                    and isinstance(node.value, ast.Call)
+                    and getattr(node.value.func, "id", None) == "Training"
+                ):
+                    for kw in node.value.keywords:
+                        if kw.arg == key and isinstance(kw.value, ast.Constant):
+                            return kw.value.value
     # Default to False if key is not found
     raise AttributeError(f"Could not find attribute {key} in the `training=Training(...)` assignement in {filepath}")
 
@@ -513,7 +517,7 @@ def similarity_with_train_data(
             device=cfg.device,
             dtype=torch.float32,
         )
-        for metric_name in metrics.keys()
+        for metric_name in metrics
     }
 
     BEST_VAL = {"cosine": 0, "L2": float("inf")}
@@ -532,7 +536,7 @@ def similarity_with_train_data(
             device=cfg.device,
             dtype=torch.float32,
         )
-        for metric_name in metrics.keys()
+        for metric_name in metrics
     }
     # closest_ds_idx_aug_idx[metric_name][i] = (closest_ds_idx, closest_aug_idx)
     closest_ds_idx_aug_idx = {
@@ -542,7 +546,7 @@ def similarity_with_train_data(
             device=cfg.device,
             dtype=torch.int64,
         )
-        for metric_name in metrics.keys()
+        for metric_name in metrics
     }
 
     for batch_idx, bs in enumerate(actual_bses):
@@ -627,7 +631,7 @@ def similarity_with_train_data(
 
         # plot closest pairs side-by-side
         if batch_idx < eval_strat.nb_batches_shown:
-            for metric_name in metrics.keys():
+            for metric_name in metrics:
                 closest_true_imgs_idxes = closest_ds_idx_aug_idx[metric_name][start:end, 0].tolist()
                 aug_idxes = closest_ds_idx_aug_idx[metric_name][start:end, 1]
                 closest_true_imgs = all_times_ds.__getitems__(closest_true_imgs_idxes)
@@ -651,7 +655,7 @@ def similarity_with_train_data(
     batches_pbar.close()
 
     # report the largest similarities
-    for metric_name in metrics.keys():
+    for metric_name in metrics:
         logger.info(
             f"Worst found {metric_name} similarities: {[round(val, 3) for val in worst_values[metric_name].tolist()]}"
         )
@@ -661,7 +665,7 @@ def similarity_with_train_data(
         logger.debug(f"Closest found images: {closest_true_imgs_names}")
 
     # torch.save all metrics and plot their histogram
-    for metric_name in metrics.keys():
+    for metric_name in metrics:
         this_metric_all_sims = all_sims[metric_name].cpu()
         if torch.any(torch.isnan(this_metric_all_sims)):
             logger.warning("Found NaNs in {metric_name} similarities")
@@ -677,7 +681,7 @@ def similarity_with_train_data(
         plt.savefig(base_save_path / f"worst_{metric_name}_hist.png")
 
     # plot the histogram of each per-generated-image worst similarity, for each metric
-    for metric_name in metrics.keys():
+    for metric_name in metrics:
         plt.figure(figsize=(10, 6))
         plt.hist(worst_values[metric_name].flatten().cpu().numpy(), bins=300)
         plt.title(f"nb_samples_generated = {eval_strat.nb_generated_samples} = {worst_values[metric_name].numel():,}")
@@ -1773,8 +1777,8 @@ def _save_grid_of_images(
 def save_histogram(
     images_tensor: torch.Tensor,
     save_path: Path,
-    xlims: Optional[tuple[float, float]] = None,
-    ymax: Optional[float] = None,
+    xlims: tuple[float, float] | None = None,
+    ymax: float | None = None,
 ):
     # Checks
     assert images_tensor.ndim == 4, f"Expected 4D tensor, got {images_tensor.shape}"
@@ -1854,7 +1858,7 @@ def plot_side_by_side_comparison(
         case 5:  # videos
             raise NotImplementedError("TODO if needed")
         case 4:  # images
-            for norm_method in normalized_t1.keys():
+            for norm_method in normalized_t1:
                 t1, t2 = normalized_t1[norm_method], normalized_t2[norm_method]
                 # torch.save the images in a grid
                 save_path = base_save_path / f"{metric_name}_{artifact1_name}_vs_{artifact2_name}_{norm_method}.png"
@@ -1950,7 +1954,9 @@ def get_true_datasets_for_metrics_computation(
     # Force using the hard augmented version of the dataset if generating augmented samples
     all_files_per_time = {}
     if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-        ds_path = base_dataset_path.with_name(base_dataset_path.name.strip("_hard_augmented") + "_hard_augmented")
+        ds_path = base_dataset_path.with_name(
+            base_dataset_path.name.removesuffix("_hard_augmented") + "_hard_augmented"
+        )
         assert ds_path.exists(), f"Expected existing hard augmented dataset at {ds_path}"
         logger.debug(f"Using hard augmented version at {ds_path}")
     # Otherwise, simply use all available data from the dataset we're using to train (and test)
@@ -1970,7 +1976,7 @@ def get_true_datasets_for_metrics_computation(
             all_files_per_time[time_name] = files
 
     # Then if generating half the number of samples, take half of the available true data to compare with
-    for time_name in all_files_per_time.keys():
+    for time_name in all_files_per_time:
         all_files_per_time[time_name] = all_files_per_time[time_name][: len(all_files_per_time[time_name]) // 2]
 
     # Finally instantiate the datasets
@@ -2133,13 +2139,16 @@ def get_starting_batch(
 
 
 def clean_inference_strategy_folder(
-    folder: Path, logger: MultiProcessAdapter | logging.Logger, names_to_ignore: list[str] = []
+    folder: Path, logger: MultiProcessAdapter | logging.Logger, names_to_ignore: list[str] | None = None
 ):
     """
     Cleans the output folder for inference strategy by deleting all files and folders in it but `logs.log`.
 
     Does not handle distribution!
     """
+    if names_to_ignore is None:
+        names_to_ignore = []
+
     existing_problematic_files = [f for f in folder.iterdir() if f.name != "logs.log" and f.name not in names_to_ignore]
     if len(existing_problematic_files) != 0:
         logger.warning(

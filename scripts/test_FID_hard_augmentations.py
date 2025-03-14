@@ -64,9 +64,9 @@ def augment_images(repeat_number: int):
         new_ds2_elems = this_class_elems[len(this_class_elems) // 2 :]
         ds1_elems += new_ds1_elems
         ds2_elems += new_ds2_elems
-        assert len(new_ds1_elems) + len(new_ds2_elems) == len(
-            this_class_elems
-        ), f"{len(new_ds1_elems)} + {len(new_ds2_elems)} != {len(this_class_elems)}"
+        assert len(new_ds1_elems) + len(new_ds2_elems) == len(this_class_elems), (
+            f"{len(new_ds1_elems)} + {len(new_ds2_elems)} != {len(this_class_elems)}"
+        )
     assert abs(len(ds1_elems) - len(ds2_elems)) <= len(subdirs)
     ds1: BaseDataset = dataset.dataset_params.dataset_class(
         ds1_elems,
@@ -93,9 +93,9 @@ def augment_images(repeat_number: int):
             elem, [RandomRotationSquareSymmetry, RandomHorizontalFlip, RandomVerticalFlip]
         )
         assert all(aug_tensor.dtype == torch.uint8 for aug_tensor in list_augs_tensors), "Expected uint8 tensors"
-        assert all(
-            0 <= aug_tensor.min() and aug_tensor.max() <= 255 for aug_tensor in list_augs_tensors
-        ), "Expected [0, 255] range"
+        assert all(aug_tensor.min() >= 0 and aug_tensor.max() <= 255 for aug_tensor in list_augs_tensors), (
+            "Expected [0, 255] range"
+        )
         list_augs_imgs = [Image.fromarray(aug_tensor.numpy().transpose(1, 2, 0)) for aug_tensor in list_augs_tensors]
         return list_augs_imgs
 
@@ -145,14 +145,16 @@ def check_augmented_datasets(nb_repeats: int):
         }
         assert all(nb_elems_split1_per_class.values()), "Expected non-zero number of elements"
         for class_path in subdirs:
-            assert (
-                nb_elems_split1_per_class[class_path.name] - nb_elems_split2_per_class[class_path.name] <= 8
-            ), f"Expected same number of elements in both splits, got:{nb_elems_split1_per_class[class_path.name]} vs {nb_elems_split2_per_class[class_path.name]} for class {class_path.name}"
+            assert nb_elems_split1_per_class[class_path.name] - nb_elems_split2_per_class[class_path.name] <= 8, (
+                f"Expected same number of elements in both splits, got:{nb_elems_split1_per_class[class_path.name]} vs {nb_elems_split2_per_class[class_path.name]} for class {class_path.name}"
+            )
         assert all(
             nb_elems_this_split_per_class[cl_path.name] % 8 == 0
             for cl_path in subdirs
             for nb_elems_this_split_per_class in (nb_elems_split1_per_class, nb_elems_split2_per_class)
-        ), f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_split1_per_class}\nand:\n{nb_elems_split2_per_class}"
+        ), (
+            f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_split1_per_class}\nand:\n{nb_elems_split2_per_class}"
+        )
 
 
 # FID
@@ -235,7 +237,7 @@ if __name__ == "__main__":
         inpt = input("Confirm recompute (y/[n]):")
         if inpt != "y":
             warn(f"Will not recompute but load from {metrics_save_path}")
-            with open(metrics_save_path, "r") as f:
+            with open(metrics_save_path) as f:
                 eval_metrics = json.load(f)
         else:
             warn("Will recompute")
@@ -243,7 +245,7 @@ if __name__ == "__main__":
             eval_metrics = compute_metrics(batch_size, metrics_save_path)
     else:
         warn(f"Will not recompute but load from {metrics_save_path}")
-        with open(metrics_save_path, "r") as f:
+        with open(metrics_save_path) as f:
             eval_metrics = json.load(f)
 
     pprint(eval_metrics)

@@ -117,7 +117,7 @@ def main(cfg: Config) -> None:
                 "Found a 'run_id.txt' file but 'resume_from_checkpoint' is False: ignoring this file and not resuming W&B run."
             )
         else:
-            with open(prev_run_id_file, "r", encoding="utf-8") as f:
+            with open(prev_run_id_file, encoding="utf-8") as f:
                 prev_run_id = f.readline().strip()
             logger.info(
                 f"Found a 'run_id.txt' file and 'resume_from_checkpoint' is True; imposing wandb to resume the run with id {prev_run_id}"

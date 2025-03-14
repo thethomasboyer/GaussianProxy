@@ -2,8 +2,9 @@ import json
 import pickle
 import random
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional, TypeVar
+from typing import TypeVar
 
 import numpy as np
 import tifffile
@@ -33,8 +34,8 @@ class BaseDataset(Dataset[Tensor]):
         self,
         samples: list[Path],
         transforms: Callable,
-        expected_initial_data_range: Optional[tuple[float, float]] = None,
-        expected_dtype: Optional[dtype] = None,  # TODO: this is never set?!?
+        expected_initial_data_range: tuple[float, float] | None = None,
+        expected_dtype: dtype | None = None,  # TODO: this is never set?!?
     ) -> None:
         """
         - base_path (`Path`): the path to the dataset directory
@@ -64,14 +65,14 @@ class BaseDataset(Dataset[Tensor]):
         # load data
         t = self._raw_file_loader(path)
         # checks # TODO: check if this takes too much time
-        if self.expected_initial_data_range is not None:
-            if t.min() < self.expected_initial_data_range[0] or t.max() > self.expected_initial_data_range[1]:
-                raise ValueError(
-                    f"Expected initial data range {self.expected_initial_data_range} but got [{t.min()}, {t.max()}] at {path}"
-                )
-        if self.expected_dtype is not None:
-            if t.dtype != self.expected_dtype:
-                raise ValueError(f"Expected dtype {self.expected_dtype} but got {t.dtype} at {path}")
+        if self.expected_initial_data_range is not None and (
+            t.min() < self.expected_initial_data_range[0] or t.max() > self.expected_initial_data_range[1]
+        ):
+            raise ValueError(
+                f"Expected initial data range {self.expected_initial_data_range} but got [{t.min()}, {t.max()}] at {path}"
+            )
+        if self.expected_dtype is not None and t.dtype != self.expected_dtype:
+            raise ValueError(f"Expected dtype {self.expected_dtype} but got {t.dtype} at {path}")
         # transform
         t = self.transforms(t)
         return t
@@ -448,7 +449,7 @@ def _build_train_test_splits(
         if accelerator.is_main_process:
             logger.warning("Building time-unpaired dataset on main process")
             video_ids_times: dict[str, dict[TimeKey, Path]] = {}  # dict[video_id, dict[time, file]]
-            time_key_to_time_id: dict[TimeKey, set[str]] = {time_key: set() for time_key in files_dict_per_time.keys()}
+            time_key_to_time_id: dict[TimeKey, set[str]] = {time_key: set() for time_key in files_dict_per_time}
             # fill dict
             for time, files in files_dict_per_time.items():
                 for f in files:
@@ -462,12 +463,12 @@ def _build_train_test_splits(
                         )
                         video_ids_times[video_id][time] = f
             # check 1-to-1 mapping between found time ids and time keys
-            assert all(len(time_key_to_time_id[time_key]) == 1 for time_key in files_dict_per_time.keys()), (
+            assert all(len(time_key_to_time_id[time_key]) == 1 for time_key in files_dict_per_time), (
                 f"Found multiple time ids for some time keys: time_key_to_time_id={time_key_to_time_id}"
             )
             # select one time at random for each video_id
             unpaired_files_dict_per_time: dict[TimeKey, list[Path]] = {}
-            for video_id, times_files_d in video_ids_times.items():
+            for times_files_d in video_ids_times.values():
                 time = random.choice(list(times_files_d.keys()))
                 selected_frame = times_files_d[time]
                 if time not in unpaired_files_dict_per_time:
@@ -480,7 +481,7 @@ def _build_train_test_splits(
             )
             # re-sort per time now that we know all times are present
             unpaired_files_dict_per_time = {
-                common_key: unpaired_files_dict_per_time[common_key] for common_key in files_dict_per_time.keys()
+                common_key: unpaired_files_dict_per_time[common_key] for common_key in files_dict_per_time
             }
             logger.info(
                 f"Unpaired dataset built with {sum([len(f) for f in unpaired_files_dict_per_time.values()])} files in total"
