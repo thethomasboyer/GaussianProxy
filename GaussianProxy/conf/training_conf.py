@@ -9,8 +9,8 @@ from omegaconf import MISSING
 class Slurm:
     enabled: bool
     monitor: bool
-    total_job_time: Optional[int] = None # in minutes
-    send_timeout_signal_n_minutes_before_end: int = 1 # in minutes
+    total_job_time: Optional[int] = None  # in minutes
+    send_timeout_signal_n_minutes_before_end: int = 5  # in minutes
     email: str
     output_folder: str
     num_gpus: int

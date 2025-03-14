@@ -54,7 +54,7 @@ install()
 CONFIRMATION_TIME_LAUNCH_DEBUG_SEC = 5
 
 # how much to wait before resubmitting the task at SIGUSR2 receival at timeout, in seconds
-SLEEP_TIME_AFTER_SIGNAL_RECEIVED_SEC = 45
+SLEEP_TIME_AFTER_SIGNAL_RECEIVED_SEC = 3 * 60
 
 
 @hydra.main(
