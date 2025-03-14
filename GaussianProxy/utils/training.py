@@ -294,8 +294,10 @@ class TimeDiffusion:
             if Path(chckpt_save_path, "checkpointing_flag.txt").exists():
                 if self.accelerator.is_main_process:
                     Path(chckpt_save_path, "checkpointing_flag.txt").unlink()
-                self.accelerator.wait_for_everyone()
-                self.logger.warning("Saw the checkpointing flag file: removed it, and stopping training now")
+                # will wait for everyone inside _checkpoint
+                self.logger.warning(
+                    "Saw the checkpointing flag file: removed it, checkpointing, and stopping training now"
+                )
                 self._checkpoint()
                 break
 
@@ -1847,6 +1849,7 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         this_chkpt_subfolder = self.chckpt_save_path / f"step_{self.global_optimization_step}"
+        self.logger.debug(f"Saving a checkpoint at step {self.global_optimization_step}...")
         self.accelerator.save_state(this_chkpt_subfolder.as_posix())
 
         # Resuming args saved in json file
