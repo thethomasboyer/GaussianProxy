@@ -1503,7 +1503,7 @@ def metrics_computation(
             f"Computing metrics on {nb_samples_gen} generated samples at {gen_samples_input.as_posix()} vs {nb_true_samples} true samples at {true_datasets_to_compare_with[task].base_path} on process {accelerator.process_index}",
             main_process_only=False,
         )
-        # no caching as the true dataset is fixed only in case `nb_samples_to_gen_per_time` is a number or 'adapt',
+        # no caching as the true dataset is fixed only in case `nb_samples_to_gen_per_time` is a number or does not contain 'half',
         # so we should use caching only in that case => never cache for now
         metrics = torch_fidelity.calculate_metrics(
             input1=true_datasets_to_compare_with[task],
@@ -1591,7 +1591,6 @@ def _generate_images_for_metrics_computation(
         this_proc_gen_batches = find_this_proc_this_time_batches_for_metrics_comp(
             eval_strat,
             true_datasets_to_compare_with[video_time_name].base_path / video_time_name,
-            gen_dir,
             logger,
             training_was_with_unpaired_data,
             accelerator,
@@ -1653,7 +1652,7 @@ def _generate_images_for_metrics_computation(
     logger.debug("Finished image generation in MetricsComputation")
 
     ##### 1.5 Augment the generated samples if applicable
-    if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+    if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
         logger.info("Augmenting generated samples for metrics computation")
         # Partition generated subdirectories among processes
         subdirs = [metrics_computation_folder / str(video_time_name) for video_time_name in eval_strat.selected_times]
@@ -1919,8 +1918,8 @@ def get_true_datasets_for_metrics_computation(
     Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images.
 
     Depending on `eval_strat.nb_samples_to_gen_per_time` the true datasets returned by this function can be:
-    - the hard augmented versions if `nb_samples_to_gen_per_time == "adapt half aug"`
-    - half of the whatever is used from last step if `"half" in nb_samples_to_gen_per_time`
+    - the hard augmented versions if `aug in nb_samples_to_gen_per_time"`
+    - half (taken at random) of the whatever is used from last step if `"half" in nb_samples_to_gen_per_time`
 
     Copied/Adapted from `GaussianProxy/utils/training.py`.
     """
@@ -1953,7 +1952,7 @@ def get_true_datasets_for_metrics_computation(
 
     # Force using the hard augmented version of the dataset if generating augmented samples
     all_files_per_time = {}
-    if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+    if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
         ds_path = base_dataset_path.with_name(
             base_dataset_path.name.removesuffix("_hard_augmented") + "_hard_augmented"
         )
@@ -1976,8 +1975,10 @@ def get_true_datasets_for_metrics_computation(
             all_files_per_time[time_name] = files
 
     # Then if generating half the number of samples, take half of the available true data to compare with
-    for time_name in all_files_per_time:
-        all_files_per_time[time_name] = all_files_per_time[time_name][: len(all_files_per_time[time_name]) // 2]
+    if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "half" in eval_strat.nb_samples_to_gen_per_time:
+        logger.debug("'half' in nb_samples_to_gen_per_time: comparing to half the true dataset")
+        for time_name in all_files_per_time:
+            all_files_per_time[time_name] = all_files_per_time[time_name][: len(all_files_per_time[time_name]) // 2]
 
     # Finally instantiate the datasets
     for time_name, all_files in all_files_per_time.items():
@@ -1991,7 +1992,7 @@ def get_true_datasets_for_metrics_computation(
         assert len(dataset) > 0, (
             f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
         )
-        if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
+        if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
             assert training_was_with_unpaired_data or len(dataset) % 8 == 0, (
                 f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
             )
@@ -2019,7 +2020,6 @@ def get_true_datasets_for_metrics_computation(
 def find_this_proc_this_time_batches_for_metrics_comp(
     eval_strat: MetricsComputation,
     true_data_class_path: Path,
-    gen_dir: Path,
     logger: MultiProcessAdapter,
     training_was_with_unpaired_data: bool,
     accelerator: Accelerator,
@@ -2031,6 +2031,7 @@ def find_this_proc_this_time_batches_for_metrics_comp(
     - an `int`: the number of samples to generate
     - `"adapt"`: generate as many samples as there are in the true data time
     - `"adapt half"`: generate half as many samples as there are in the true data time
+    - `"adapt aug"`: generate as many samples as there are in the true data time, then 8⨉ augment them (Dih4)
     - `"adapt half aug"`: generate half as many samples as there are in the true data time, then 8⨉ augment them (Dih4)
 
     Copied/Adapted from `GaussianProxy/utils/training.py`.
@@ -2042,6 +2043,13 @@ def find_this_proc_this_time_batches_for_metrics_comp(
         tot_nb_samples = len(list(true_data_class_path.iterdir()))
     elif eval_strat.nb_samples_to_gen_per_time == "adapt half":
         tot_nb_samples = len(list(true_data_class_path.iterdir())) // 2
+    elif eval_strat.nb_samples_to_gen_per_time == "adapt aug":
+        nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
+        assert training_was_with_unpaired_data or nb_all_aug_samples % 8 == 0, (
+            f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+        )
+        tot_nb_samples = nb_all_aug_samples // 8  # 8⨉ augment them
+        logger.debug("Will augment samples 8⨉ after generation")
     elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
         nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
         assert training_was_with_unpaired_data or nb_all_aug_samples % 8 == 0, (
