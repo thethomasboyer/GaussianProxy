@@ -8,6 +8,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
 from math import ceil
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import torch
 import torch_fidelity
 from accelerate import Accelerator, DistributedType
 from accelerate.logging import MultiProcessAdapter
+from accelerate.utils import InitProcessGroupKwargs
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
@@ -119,7 +121,10 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     ###############################################################################################
     #                                          Accelerator
     ###############################################################################################
-    accelerator = Accelerator()
+    accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=1200))  # 20 minutes before NCCL timeout
+    accelerator = Accelerator(
+        kwargs_handlers=[accelerator_kwargs],
+    )
 
     ###############################################################################################
     #                                            Logger
