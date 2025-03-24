@@ -103,8 +103,10 @@ def main(cfg: Config) -> None:
 
         # get the total number of cpus
         match cfg.slurm.constraint:
-            case "a100" | "h100":
+            case "a100":
                 cpus_per_task = int(64 * cfg.slurm.num_gpus / 8)
+            case "h100":
+                cpus_per_task = int(96 * cfg.slurm.num_gpus / 4)
             case s if isinstance(s, str) and s.startswith("v100"):
                 assert cfg.slurm.partition is None, (
                     f"Expected partition to not be set when constraint is set; got {cfg.slurm.partition}"
