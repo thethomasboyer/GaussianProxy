@@ -450,8 +450,6 @@ def similarity_with_train_data(
     - plotting the distribution of these n closest similarities
     - showing the p < n closest pairs
 
-    `batch` is ignored!
-
     All computations are forcefully performed on fp32 for numerical precision.
 
     Similarities can be Euclidean cosine, L2, or both.
