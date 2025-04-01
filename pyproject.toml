@@ -44,6 +44,7 @@ dependencies = [
     "pip>=25.0.1",
     "torch-fidelity",
     "beartype>=0.20.0",
+    "pyarrow>=19.0.1",
 ]
 
 [tool.ruff]
