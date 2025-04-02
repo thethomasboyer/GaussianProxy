@@ -325,6 +325,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 )
             except AttributeError as e:
                 logger.warning(str(e))
+                logger.warning("Assuming training was with paired data")
                 training_was_with_unpaired_data = False
             metrics_computation(
                 cfg,
@@ -1921,8 +1922,8 @@ def get_true_datasets_for_metrics_computation(
     Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images.
 
     Depending on `eval_strat.nb_samples_to_gen_per_time` the true datasets returned by this function can be:
-    - the hard augmented versions if `aug in nb_samples_to_gen_per_time"`
-    - half (taken at random) of the whatever is used from last step if `"half" in nb_samples_to_gen_per_time`
+    - the hard augmented versions if `"aug" in nb_samples_to_gen_per_time"`
+    - half (taken at random) of whatever is used from last step if `"half" in nb_samples_to_gen_per_time`
 
     Copied/Adapted from `GaussianProxy/utils/training.py`.
     """
@@ -1996,9 +1997,14 @@ def get_true_datasets_for_metrics_computation(
             f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
         )
         if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
-            assert training_was_with_unpaired_data or len(dataset) % 8 == 0, (
-                f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
-            )
+            if "half" in eval_strat.nb_samples_to_gen_per_time:
+                assert training_was_with_unpaired_data or len(dataset) % 4 == 0, (
+                    f"Expected number of samples to be a multiple of 4 when using paired data and 'half', got {len(dataset)}"
+                )
+            else:
+                assert training_was_with_unpaired_data or len(dataset) % 8 == 0, (
+                    f"Expected number of samples to be a multiple of 8 when using paired data and no 'half', got {len(dataset)}"
+                )
         logger.debug(
             f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
         )
