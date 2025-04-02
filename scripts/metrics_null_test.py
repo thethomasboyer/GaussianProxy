@@ -22,7 +22,6 @@ from torchvision.transforms import (
     ConvertImageDtype,
     RandomHorizontalFlip,
     RandomVerticalFlip,
-    Resize,
 )
 
 from GaussianProxy.conf.training_conf import DataSet
@@ -40,7 +39,7 @@ torch.set_grad_enabled(False)
 
 ############################################### Conf ##############################################
 # Dataset
-from my_conf.dataset.biotine_png_128_hard_aug_inference import dataset  # noqa: E402
+from my_conf.dataset.BBBC021_196_docetaxel_hard_aug_inference import dataset  # noqa: E402
 
 assert dataset.dataset_params is not None
 
@@ -54,15 +53,15 @@ flips_rot = [t for t in dataset.transforms.transforms if is_flip_or_rotation(t)]
 transforms = Compose(
     [
         ConvertImageDtype(torch.uint8),
-        Resize(size=128),
+        # Resize(size=128),
     ]
 )
 
 
 # replace the lambda sorting func in dataset_params with a normal function
 # so that it can be pickled # !!! must be modified manually !!!
-def sorting_func(subdir: Path) -> int:
-    return int(subdir.name)
+def sorting_func(subdir: Path):
+    return float(subdir.name)
 
 
 dataset.dataset_params.sorting_func = sorting_func
