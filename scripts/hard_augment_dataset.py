@@ -14,9 +14,7 @@ from GaussianProxy.utils.misc import generate_all_augs
 install()
 
 ###################################################### Arguments ######################################################
-DATASET_BASE_PATH = Path(
-    "/projects/static2dynamic/datasets/20231017ChromaLive_6hr_4ch/MIP_normalized/paired_dataset/patches"
-)
+DATASET_BASE_PATH = Path("/projects/static2dynamic/datasets/BBBC021/196x196/docetaxel")
 EXTENSION = "png"
 DEBUG = False
 TRANSFORMS = ["RandomHorizontalFlip", "RandomVerticalFlip", "RandomRotationSquareSymmetry"]
@@ -40,7 +38,7 @@ def augment_save_one_file(base_file: Path, aug_subdir_path: Path):
         if not DEBUG:
             aug.save(this_aug_save_path)
         else:
-            print(f"Would have saved patch {i} of {ending(base_file, 3)} to {ending(this_aug_save_path, 3)}")
+            print(f"Would have saved augmentation {i} of {ending(base_file, 3)} to {ending(this_aug_save_path, 3)}")
 
 
 if __name__ == "__main__":
@@ -49,7 +47,7 @@ if __name__ == "__main__":
     print(f"Found {len(subdirs_names)} subdirectories: {subdirs_names}")
 
     # get all base files to augment
-    all_files = list(DATASET_BASE_PATH.glob(f"**/*.{EXTENSION}"))
+    all_files = list(DATASET_BASE_PATH.glob(f"**/*.{EXTENSION}", recurse_symlinks=True))
     print(f"Found {len(all_files)} base files in total")
 
     # create augmented subdirs in a adjacent dir to the base dataset one
@@ -64,7 +62,7 @@ if __name__ == "__main__":
 
     with ProcessPoolExecutor() as executor:
         if DEBUG:
-            print("DEBUG MODE: only testing 30 random patches")
+            print("DEBUG MODE: only testing 30 random images")
             all_files = random.sample(all_files, 30)
         futures = {executor.submit(augment_save_one_file, file, aug_subdir_path): file for file in all_files}
         for future in as_completed(futures):
@@ -81,7 +79,7 @@ if __name__ == "__main__":
         for subdir_name in subdirs_names:
             found_nb = len(list((aug_subdir_path / subdir_name).glob(f"*.{EXTENSION}")))
             expected_nb = 8 * len(list((DATASET_BASE_PATH / subdir_name).glob(f"*.{EXTENSION}")))
-            assert (
-                found_nb == expected_nb
-            ), f"Expected {expected_nb} files in {ending(aug_subdir_path / subdir_name, 2)}, found {found_nb}"
+            assert found_nb == expected_nb, (
+                f"Expected {expected_nb} files in {ending(aug_subdir_path / subdir_name, 2)}, found {found_nb}"
+            )
         print("All checks passed")
