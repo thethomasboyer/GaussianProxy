@@ -14,10 +14,10 @@ from GaussianProxy.utils.misc import generate_all_augs
 install()
 
 ###################################################### Arguments ######################################################
-DATASET_BASE_PATH = Path("/projects/static2dynamic/datasets/BBBC021/196x196/docetaxel")
-EXTENSION = "png"
+DATASET_BASE_PATH = Path("/projects/static2dynamic/datasets/DiabeticRetinopathy/prepared_dataset/train")
+EXTENSION = "jpeg"
 DEBUG = False
-TRANSFORMS = ["RandomHorizontalFlip", "RandomVerticalFlip", "RandomRotationSquareSymmetry"]
+TRANSFORMS = ["RandomHorizontalFlip"]
 
 ######################################################### Info ########################################################
 print(f"Augmenting base dataset located at {DATASET_BASE_PATH}", flush=True)

@@ -39,7 +39,7 @@ torch.set_grad_enabled(False)
 
 ############################################### Conf ##############################################
 # Dataset
-from my_conf.dataset.BBBC021_196_docetaxel_hard_aug_inference import dataset  # noqa: E402
+from my_conf.dataset.diabetic_retinopathy_inference import dataset  # noqa: E402
 
 assert dataset.dataset_params is not None
 

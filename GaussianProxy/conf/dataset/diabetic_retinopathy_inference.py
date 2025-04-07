@@ -1,5 +1,5 @@
 from torch import float32
-from torchvision.transforms import Compose, ConvertImageDtype, Normalize, RandomHorizontalFlip, Resize
+from torchvision.transforms import Compose, ConvertImageDtype, Normalize, Resize
 from torchvision.transforms.v2 import CenterCrop
 
 from GaussianProxy.conf.training_conf import DataSet, DatasetParams
@@ -13,7 +13,6 @@ transforms = Compose(
         # single int => image resized to (size * aspect_ratio, size) or (size, size * aspect_ratio) with aspect_ratio >= 1 preserved
         Resize(256),
         CenterCrop(256),  # pyright: ignore[reportAttributeAccessIssue]
-        RandomHorizontalFlip(),
         ConvertImageDtype(float32),
         Normalize(mean=[0.5] * NUMBER_OF_CHANNELS, std=[0.5] * NUMBER_OF_CHANNELS),
     ]
