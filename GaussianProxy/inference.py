@@ -2175,7 +2175,7 @@ def clean_inference_strategy_folder(
         if inpt.lower() != "y":
             raise RuntimeError("Refusing to proceed with a non-cleared folder.")
         else:
-            logger.info(f"Deleting files/folders:{[f.name for f in existing_problematic_files]}")
+            logger.info(f"Deleting files/folders: {[f.name for f in existing_problematic_files]}")
             for f in existing_problematic_files:
                 if f.is_dir():
                     shutil.rmtree(f)
