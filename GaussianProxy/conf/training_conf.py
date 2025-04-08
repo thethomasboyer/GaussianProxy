@@ -177,6 +177,7 @@ class MetricsComputation(EvaluationStrategy):
     nb_recompute: int = 1  # TODO: not used
     selected_times: list
     dtype: str = "float32"
+    augmentations_for_metrics_comp: list[str]
 
 
 @dataclass

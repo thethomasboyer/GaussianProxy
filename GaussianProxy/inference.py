@@ -117,6 +117,16 @@ def get_distrib_logger(inference_conf: InferenceConfig) -> MultiProcessAdapter:
     return MultiProcessAdapter(logger, {})
 
 
+# Hard-coded datasets hard augmentation factor
+# (only hard augmented datasets listed here)
+HARD_AUGMENTATION_FACTORS = {  # TODO: remove this and use 2 ** len(augmentations for metrics comp) instead
+    "biotine_png_hard_aug": 8,
+    "chromaLive6h_3ch_png_patches_380px_hard_aug": 8,
+    "BBBC021_196_hard_aug_docetaxel": 8,
+    "diabetic_retinopathy_inference_hard_augmented": 2,
+}
+
+
 def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     ###############################################################################################
     #                                          Accelerator
@@ -1598,6 +1608,7 @@ def _generate_images_for_metrics_computation(
             logger,
             training_was_with_unpaired_data,
             accelerator,
+            cfg.dataset.name,
         )
 
         batches_pbar = pbar_manager.counter(
@@ -1665,8 +1676,11 @@ def _generate_images_for_metrics_computation(
         for subdir in assigned_subdirs:
             logger.debug(f"Process {accelerator.process_index} augmenting folder {subdir}", main_process_only=False)
             # augment
-            extension = "png"  # TODO: remove this hardcoded extension (by moving DatasetParams'params into the base DataSet class used in config, another TODO)
-            hard_augment_dataset_all_square_symmetries(subdir, logger, extension, n_workers_per_process)
+            assert cfg.dataset.dataset_params is not None
+            extension = cfg.dataset.dataset_params.file_extension
+            hard_augment_dataset_all_square_symmetries(
+                subdir, logger, extension, n_workers_per_process, eval_strat.augmentations_for_metrics_comp
+            )
             # check result
             assert (nb_elems := len(list((subdir).glob(f"*.{extension}"))) % 8 == 0), (
                 f"Expected number of elements to be a multiple of 8, got:\n{nb_elems} in {subdir}"
@@ -1997,13 +2011,14 @@ def get_true_datasets_for_metrics_computation(
             f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
         )
         if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
+            base_aug_factor = HARD_AUGMENTATION_FACTORS[cfg.dataset.name]
             if "half" in eval_strat.nb_samples_to_gen_per_time:
-                assert training_was_with_unpaired_data or len(dataset) % 4 == 0, (
-                    f"Expected number of samples to be a multiple of 4 when using paired data and 'half', got {len(dataset)}"
+                assert training_was_with_unpaired_data or len(dataset) % (base_aug_factor / 2) == 0, (
+                    f"Expected number of samples to be a multiple of {base_aug_factor / 2} when using paired data and 'half', got {len(dataset)} at {ds_path}"
                 )
             else:
-                assert training_was_with_unpaired_data or len(dataset) % 8 == 0, (
-                    f"Expected number of samples to be a multiple of 8 when using paired data and no 'half', got {len(dataset)}"
+                assert training_was_with_unpaired_data or len(dataset) % base_aug_factor == 0, (
+                    f"Expected number of samples to be a multiple of {base_aug_factor} when using paired data and no 'half', got {len(dataset)} at {ds_path}"
                 )
         logger.debug(
             f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
@@ -2032,6 +2047,7 @@ def find_this_proc_this_time_batches_for_metrics_comp(
     logger: MultiProcessAdapter,
     training_was_with_unpaired_data: bool,
     accelerator: Accelerator,
+    dataset_name: str,
 ) -> list[int]:
     """
     Return the list of batch sizes to generate, for a given `video_time_idx` and splitting between processes.
@@ -2046,6 +2062,8 @@ def find_this_proc_this_time_batches_for_metrics_comp(
     Copied/Adapted from `GaussianProxy/utils/training.py`.
     """
     # find total number of samples to generate for this video time
+    base_aug_factor = HARD_AUGMENTATION_FACTORS[dataset_name]
+
     if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
         tot_nb_samples = eval_strat.nb_samples_to_gen_per_time
     elif eval_strat.nb_samples_to_gen_per_time == "adapt":
@@ -2054,18 +2072,20 @@ def find_this_proc_this_time_batches_for_metrics_comp(
         tot_nb_samples = len(list(true_data_class_path.iterdir())) // 2
     elif eval_strat.nb_samples_to_gen_per_time == "adapt aug":
         nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
-        assert training_was_with_unpaired_data or nb_all_aug_samples % 8 == 0, (
-            f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+        assert training_was_with_unpaired_data or nb_all_aug_samples % base_aug_factor == 0, (
+            f"Expected number of samples to be a multiple of {base_aug_factor} when using paired data, got {nb_all_aug_samples}"
         )
-        tot_nb_samples = nb_all_aug_samples // 8  # 8⨉ augment them
-        logger.debug("Will augment samples 8⨉ after generation")
+        tot_nb_samples = nb_all_aug_samples // base_aug_factor  # base_aug_factor ⨉ augment them
+        logger.debug(f"Will augment samples {base_aug_factor}⨉ after generation")
     elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
         nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
-        assert training_was_with_unpaired_data or nb_all_aug_samples % 8 == 0, (
-            f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+        assert training_was_with_unpaired_data or nb_all_aug_samples % base_aug_factor == 0, (
+            f"Expected number of samples to be a multiple of {base_aug_factor} when using paired data, got {nb_all_aug_samples}"
         )
-        tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
-        logger.debug("Will augment samples 8⨉ after generation")
+        tot_nb_samples = nb_all_aug_samples // (
+            base_aug_factor * 2
+        )  # half the number of samples, *then* base_aug_factor ⨉ augment them
+        logger.debug(f"Will augment samples {base_aug_factor}⨉ after generation")
     else:
         raise ValueError(
             f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', 'adapt half', or 'adapt half aug', got {eval_strat.nb_samples_to_gen_per_time}"

@@ -685,14 +685,15 @@ def hard_augment_dataset_all_square_symmetries(
     logger: MultiProcessAdapter,
     files_ext: str,
     max_workers: int | None = None,
+    augmentations: list[type] | list[str] = (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry),  # type: ignore[reportArgumentType]
 ):
     """
-    Save ("in-place") the 8 augmented versions of each image in the given `dataset_path`.
+    Save ("in-place") the n augmented versions of each image in the given `dataset_path`.
 
     ### Args:
     - `dataset_path_or_paths` (`Path` or `list[Path]`): The path or list of paths to the dataset(s) to augment.
 
-    Each image will be augmented with the 8 square symmetries (Dih4)
+    Each image will be augmented with up to the 8 square symmetries (Dih4)
     and saved in the same subfolder with '_aug_<idx>' appended.
 
     This function launches a pool of `max_workers` processes.
@@ -716,7 +717,7 @@ def hard_augment_dataset_all_square_symmetries(
     futures = []
     with ProcessPoolExecutor(max_workers) as executor:
         for base_img in all_base_imgs:
-            futures.append(executor.submit(_aug_save_img, base_img))
+            futures.append(executor.submit(_aug_save_img, base_img, augmentations))
 
         for future in as_completed(futures):
             future.result()  # raises exception if any
@@ -724,9 +725,9 @@ def hard_augment_dataset_all_square_symmetries(
     logger.debug("Finished augmenting datasets to disk")
 
 
-def _aug_save_img(base_img_path: Path):
+def _aug_save_img(base_img_path: Path, augmentations: list[type] | list[str]):
     base_img = Image.open(base_img_path)
-    augs = generate_all_augs(base_img, [RandomRotationSquareSymmetry, RandomHorizontalFlip, RandomVerticalFlip])
+    augs = generate_all_augs(base_img, augmentations)
     for aug_idx, aug in enumerate(augs[1:]):  # skip the original image
         save_path = base_img_path.parent / f"{base_img_path.stem}_aug{aug_idx}{base_img_path.suffix}"
         aug.save(save_path)
