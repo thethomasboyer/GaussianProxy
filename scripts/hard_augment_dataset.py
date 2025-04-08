@@ -2,7 +2,6 @@ import random
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from time import sleep
 
 from PIL import Image
 from rich.traceback import install
@@ -17,13 +16,18 @@ install()
 DATASET_BASE_PATH = Path("/projects/static2dynamic/datasets/DiabeticRetinopathy/prepared_dataset/train")
 EXTENSION = "jpeg"
 DEBUG = False
+CHECK_ONLY = True
 TRANSFORMS = ["RandomHorizontalFlip"]
 
 ######################################################### Info ########################################################
 print(f"Augmenting base dataset located at {DATASET_BASE_PATH}", flush=True)
 print(f"Using the following transforms: {TRANSFORMS}", flush=True)
 print("DEBUG:", DEBUG, flush=True)
-sleep(3)
+print("CHECK_ONLY:", CHECK_ONLY, flush=True)
+inpt = input("Proceed? (y/[n])")
+if inpt.lower() != "y":
+    print("Exiting")
+    sys.exit(0)
 
 
 def ending(path: Path, n: int):
@@ -52,33 +56,36 @@ if __name__ == "__main__":
 
     # create augmented subdirs in a adjacent dir to the base dataset one
     aug_subdir_path = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
-    print(f"Saving augmented images at {aug_subdir_path}")
-    sleep(3)
-    for subdir_name in subdirs_names:
-        (aug_subdir_path / subdir_name).mkdir(parents=True, exist_ok=True)
+    if not CHECK_ONLY:
+        input(f"Saving augmented images at {aug_subdir_path}: proceed? (y/[n])")
+        if inpt.lower() != "y":
+            print("Exiting")
+            sys.exit(0)
+        for subdir_name in subdirs_names:
+            (aug_subdir_path / subdir_name).mkdir(parents=True, exist_ok=True)
 
-    # augment and save to disk
-    pbar = tqdm(total=len(all_files), desc="Saving augmented images")
+        # augment and save to disk
+        pbar = tqdm(total=len(all_files), desc="Saving augmented images")
 
-    with ProcessPoolExecutor() as executor:
-        if DEBUG:
-            print("DEBUG MODE: only testing 30 random images")
-            all_files = random.sample(all_files, 30)
-        futures = {executor.submit(augment_save_one_file, file, aug_subdir_path): file for file in all_files}
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                raise Exception(f"Error processing file {futures[future]}") from e
-            pbar.update()
+        with ProcessPoolExecutor() as executor:
+            if DEBUG:
+                print("DEBUG MODE: only testing 30 random images")
+                all_files = random.sample(all_files, 30)
+            futures = {executor.submit(augment_save_one_file, file, aug_subdir_path): file for file in all_files}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    raise Exception(f"Error processing file {futures[future]}") from e
+                pbar.update()
 
-    pbar.close()
+        pbar.close()
 
     # check result
     if not DEBUG:
         for subdir_name in subdirs_names:
             found_nb = len(list((aug_subdir_path / subdir_name).glob(f"*.{EXTENSION}")))
-            expected_nb = 8 * len(list((DATASET_BASE_PATH / subdir_name).glob(f"*.{EXTENSION}")))
+            expected_nb = (2 ** len(TRANSFORMS)) * len(list((DATASET_BASE_PATH / subdir_name).glob(f"*.{EXTENSION}")))
             assert found_nb == expected_nb, (
                 f"Expected {expected_nb} files in {ending(aug_subdir_path / subdir_name, 2)}, found {found_nb}"
             )
