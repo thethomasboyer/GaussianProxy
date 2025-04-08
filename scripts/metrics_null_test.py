@@ -10,6 +10,7 @@ import os
 import random
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from functools import partial
 from pathlib import Path
 from pprint import pprint
 from warnings import warn
@@ -18,10 +19,12 @@ import torch
 import torch_fidelity
 from torch.utils.data import Subset
 from torchvision.transforms import (
+    CenterCrop,
     Compose,
     ConvertImageDtype,
     RandomHorizontalFlip,
     RandomVerticalFlip,
+    Resize,
 )
 
 from GaussianProxy.conf.training_conf import DataSet
@@ -39,7 +42,7 @@ torch.set_grad_enabled(False)
 
 ############################################### Conf ##############################################
 # Dataset
-from my_conf.dataset.diabetic_retinopathy_inference import dataset  # noqa: E402
+from my_conf.dataset.diabetic_retinopathy_inference import diabetic_retinopathy_inference as dataset  # noqa: E402
 
 assert dataset.dataset_params is not None
 
@@ -53,18 +56,30 @@ flips_rot = [t for t in dataset.transforms.transforms if is_flip_or_rotation(t)]
 transforms = Compose(
     [
         ConvertImageDtype(torch.uint8),
-        # Resize(size=128),
+        Resize(256),
+        CenterCrop(256),
     ]
 )
 
 
 # replace the lambda sorting func in dataset_params with a normal function
-# so that it can be pickled # !!! must be modified manually !!!
-def sorting_func(subdir: Path):
-    return float(subdir.name)
+def sorting_func(dataset_name: str, key: str | Path):
+    if isinstance(key, Path):
+        key = key.name
+    match dataset_name:
+        case "chromaLive6h_3ch_png_patches_380px_hard_aug":
+            return -1 if key == "all_classes" else float(key.split("_")[-1])
+        case "biotine_png_hard_aug":
+            return -1 if key == "all_classes" else int(key)
+        case "BBBC021_196_hard_aug_docetaxel":
+            return -1 if key == "all_classes" else float(key)
+        case "diabetic_retinopathy":
+            return -1 if key == "all_classes" else int(key)
+        case _:
+            raise ValueError(f"Unknown/Unimplemented dataset name: {dataset_name}")
 
 
-dataset.dataset_params.sorting_func = sorting_func
+dataset.dataset_params.sorting_func = partial(sorting_func, dataset.name)
 
 nb_repeats = 10
 
@@ -298,6 +313,7 @@ def compute_metrics(
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn")  # for starting processes with CUDA
 
+    print(f"Using dataset {dataset.name}")
     print(f"Using transforms:\n{transforms}")
     print(f"Will save metrics to {metrics_save_path}")
     print(f"Using {n_processes} processes for parallel execution (must map 1-to-1 with CUDA devices)")
