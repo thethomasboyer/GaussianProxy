@@ -505,9 +505,10 @@ def warn_about_dtype_conv(
 def save_images_for_metrics_compute(
     images: Tensor,
     save_folder: Path,
+    file_extension: str,
     process_idx: int | None = None,
 ):
-    """Saves [-1;1] tensors to [0; 255] uint8 PNG images in the given folder."""
+    """Saves [-1;1] tensors to [0; 255] uint8 images in the given folder."""
     # Checks
     assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
     assert images.dtype == torch.float32, f"Expected float32 tensor, got {images.dtype}"
@@ -522,9 +523,9 @@ def save_images_for_metrics_compute(
         pil_img = Image.fromarray(img.transpose(1, 2, 0))
         tmpst = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         if process_idx is not None:
-            filename = f"proc_{process_idx}_{tmpst}.png"
+            filename = f"proc_{process_idx}_{tmpst}.{file_extension}"
         else:
-            filename = tmpst + ".png"
+            filename = tmpst + f".{file_extension}"
         assert not (save_folder / filename).exists(), f"File {filename} already exists"
         pil_img.save(save_folder / filename)
 

@@ -154,7 +154,7 @@ def setup_dataloaders(
     this_run_folder: Path,
     chckpt_save_path: Path,
     debug: bool = False,
-) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
+) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader], DatasetParams]:
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
     Each dataloader is a `torch.utils.data.DataLoader` over a custom `Dataset`.
@@ -278,7 +278,7 @@ def _dataset_builder(
     chckpt_save_path: Path,
     debug: bool = False,
     train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
-) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader]]:
+) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader], DatasetParams]:
     """Builds the train & test dataloaders."""
 
     # Get train & test splits for each time
@@ -400,7 +400,7 @@ def _dataset_builder(
     _print_short_datasets_info(test_reprs_to_log, logger, "Test datasets:")
 
     # Return the dataloaders
-    return train_dataloaders_dict, test_dataloaders_dict
+    return train_dataloaders_dict, test_dataloaders_dict, dataset_params
 
 
 def _build_train_test_splits(

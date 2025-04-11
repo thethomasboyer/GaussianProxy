@@ -1653,6 +1653,7 @@ def _generate_images_for_metrics_computation(
             save_images_for_metrics_compute(
                 image,
                 gen_dir,
+                cfg.dataset.dataset_params.file_extension,
                 accelerator.process_index,
             )
 
@@ -1668,7 +1669,9 @@ def _generate_images_for_metrics_computation(
 
     ##### 1.5 Augment the generated samples if applicable
     if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
-        logger.info("Augmenting generated samples for metrics computation")
+        logger.info(
+            f"Augmenting generated samples {2 ** len(eval_strat.augmentations_for_metrics_comp)} times for metrics computation with augmentations: {eval_strat.augmentations_for_metrics_comp}"
+        )
         # Partition generated subdirectories among processes
         subdirs = [metrics_computation_folder / str(video_time_name) for video_time_name in eval_strat.selected_times]
         assigned_subdirs = subdirs[accelerator.process_index :: accelerator.num_processes]
@@ -1682,9 +1685,14 @@ def _generate_images_for_metrics_computation(
                 subdir, logger, extension, n_workers_per_process, eval_strat.augmentations_for_metrics_comp
             )
             # check result
-            assert (nb_elems := len(list((subdir).glob(f"*.{extension}"))) % 8 == 0), (
-                f"Expected number of elements to be a multiple of 8, got:\n{nb_elems} in {subdir}"
+            assert (
+                nb_elems := len(list((subdir).glob(f"*.{extension}")))
+                % 2 ** len(eval_strat.augmentations_for_metrics_comp)
+                == 0
+            ), (
+                f"Expected number of elements to be a multiple of {2 ** len(eval_strat.augmentations_for_metrics_comp)}, got:\n{nb_elems} in {subdir}"
             )
+        logger.info("Finished augmenting generated samples for metrics computation")
 
     # wait for data augmentation to finish before returning
     accelerator.wait_for_everyone()
@@ -2033,10 +2041,10 @@ def get_true_datasets_for_metrics_computation(
         few_samples = dataset.__getitems__(few_samples_indexes)
         for sample_idx, sample in enumerate(few_samples):
             pil_img = Image.fromarray(sample.permute(1, 2, 0).numpy())
-            orig_filename = dataset.samples[few_samples_indexes[sample_idx]].name
+            orig_filename = dataset.samples[few_samples_indexes[sample_idx]].stem
             out_dir = metrics_computation_folder / "few_true_samples_for_processing_check" / time
             out_dir.mkdir(parents=True, exist_ok=True)
-            pil_img.save(out_dir / f"{orig_filename}_processed.png")
+            pil_img.save(out_dir / f"{orig_filename}_processed.{data_files_common_suffix}")
 
     return true_datasets_to_compare_with
 

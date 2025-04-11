@@ -205,6 +205,9 @@ class TimeDiffusion:
         else:
             raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {self.net_type}")
 
+        # check that dataset_params is set
+        assert self.cfg.dataset.dataset_params is not None, "Dataset parameters must be set in the configuration."
+
     def fit(
         self,
         train_dataloaders: dict[TimeKey, DataLoader],
@@ -1454,6 +1457,7 @@ class TimeDiffusion:
                 save_images_for_metrics_compute(
                     image,
                     gen_dir,
+                    self.cfg.dataset.dataset_params.file_extension,
                     self.accelerator.process_index,
                 )
 

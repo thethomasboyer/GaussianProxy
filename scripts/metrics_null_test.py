@@ -83,7 +83,7 @@ dataset.dataset_params.sorting_func = partial(sorting_func, dataset.name)
 
 nb_repeats = 10
 
-batch_size = 512 + 256
+batch_size = 512
 
 metrics_save_path = Path(f"notebooks/evaluations/{dataset.name}/eval_metrics.json")
 metrics_save_path.parent.mkdir(parents=True, exist_ok=True)
