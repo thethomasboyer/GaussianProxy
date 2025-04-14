@@ -735,6 +735,7 @@ class TimeDiffusion:
                 while train_batch_time0.shape[0] != self.cfg.training.train_batch_size:
                     train_batch_time0 = torch.cat([train_batch_time0, next(iter(train_dl_time0))])
                     train_batch_time0 = train_batch_time0[: self.cfg.training.train_batch_size]
+                train_batch_time0 = train_batch_time0.to(self.accelerator.device)  # train dls are not prepared
                 assert (
                     expected_shape := (
                         self.cfg.training.train_batch_size,
@@ -932,7 +933,7 @@ class TimeDiffusion:
             inverted_gauss = batch
             inversion_video_time = inference_video_time_encoding.forward(0, batch.shape[0])
 
-            for t in inverted_scheduler.timesteps:
+            for t in inverted_scheduler.timesteps.to(self.accelerator.device):
                 model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
 
