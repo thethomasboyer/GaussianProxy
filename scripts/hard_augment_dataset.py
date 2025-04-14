@@ -21,6 +21,8 @@ TRANSFORMS = ["RandomHorizontalFlip"]
 
 ######################################################### Info ########################################################
 print(f"Augmenting base dataset located at {DATASET_BASE_PATH}", flush=True)
+aug_subdir_path = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
+print(f"Augmented dataset will be saved at {aug_subdir_path}", flush=True)
 print(f"Using the following transforms: {TRANSFORMS}", flush=True)
 print("DEBUG:", DEBUG, flush=True)
 print("CHECK_ONLY:", CHECK_ONLY, flush=True)
@@ -55,7 +57,6 @@ if __name__ == "__main__":
     print(f"Found {len(all_files)} base files in total")
 
     # create augmented subdirs in a adjacent dir to the base dataset one
-    aug_subdir_path = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
     if not CHECK_ONLY:
         input(f"Saving augmented images at {aug_subdir_path}: proceed? (y/[n])")
         if inpt.lower() != "y":
