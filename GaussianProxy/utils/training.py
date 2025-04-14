@@ -30,6 +30,7 @@ from torchvision.transforms.transforms import Compose, ConvertImageDtype, Normal
 
 from GaussianProxy.conf.training_conf import (
     Config,
+    DatasetParams,
     ForwardNoising,
     InvertedRegeneration,
     IterativeInvertedRegeneration,
@@ -115,6 +116,7 @@ class TimeDiffusion:
     net_type: type[UNet2DModel | UNet2DConditionModel]
     video_time_encoding: VideoTimeEncoding
     accelerator: Accelerator
+    dataset_params: DatasetParams  # TODO: remove this when the DatasetParams TODO is done
     # populated arguments when calling .fit
     chckpt_save_path: Path = field(init=False)
     optimizer: Optimizer = field(init=False)
@@ -204,9 +206,6 @@ class TimeDiffusion:
             self._net_pred = self._unet2d_condition_pred
         else:
             raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {self.net_type}")
-
-        # check that dataset_params is set
-        assert self.cfg.dataset.dataset_params is not None, "Dataset parameters must be set in the configuration."
 
     def fit(
         self,
@@ -780,6 +779,7 @@ class TimeDiffusion:
                     inference_video_time_encoding,
                     raw_train_dataloaders,
                     test_dataloaders,
+                    file_extension=self.dataset_params.file_extension,
                 )
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
@@ -1341,6 +1341,7 @@ class TimeDiffusion:
         inference_video_time_encoding: VideoTimeEncoding,
         train_dataloaders: dict[float, DataLoader],
         test_dataloaders: dict[float, DataLoader],
+        file_extension: str,
     ):
         """
         Compute metrics such as FID.
@@ -1457,7 +1458,7 @@ class TimeDiffusion:
                 save_images_for_metrics_compute(
                     image,
                     gen_dir,
-                    self.cfg.dataset.dataset_params.file_extension,
+                    file_extension,
                     self.accelerator.process_index,
                 )
 

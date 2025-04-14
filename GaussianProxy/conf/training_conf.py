@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,8 +65,8 @@ class DatasetParams:  # TODO: fusion with DataSet
     """
 
     file_extension: str
-    key_transform: Callable[[str], int] | Callable[[str], str]
-    sorting_func: Callable
+    key_transform: Any  # should be Callable[[str], int] | Callable[[str], str] ...
+    sorting_func: Any  # should be Callable[something...]
     dataset_class: type
 
 

@@ -177,7 +177,6 @@ def main(cfg: Config) -> None:
     train_dataloaders, test_dataloaders, dataset_params = setup_dataloaders(
         cfg, accelerator, num_workers, logger, this_run_folder, chckpt_save_path, cfg.debug
     )
-    cfg.dataset.dataset_params = dataset_params
 
     # ------------------------------------ Debug -------------------------------------
     if cfg.debug:
@@ -285,6 +284,7 @@ def main(cfg: Config) -> None:
         net_type,
         video_time_encoding,
         accelerator,
+        dataset_params,
     )
 
     # ----------------------------- Resume Training State ----------------------------
