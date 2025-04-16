@@ -7,9 +7,7 @@ transforms:
   # Convert to float32 (and normalize to [0, 1]) before resizing
   - _target_: torchvision.transforms.ConvertImageDtype
     dtype: ${torch_dtype:float32}
-  # Random crop from 299x299 to 192x192, then resize to 128x128
-  - _target_: torchvision.transforms.RandomCrop
-    size: 192
+  # Resize to 128x128
   - _target_: torchvision.transforms.Resize
     size: 128
   # Normalize to [-1, 1]
