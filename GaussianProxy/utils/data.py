@@ -260,6 +260,13 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
+        case "NASH_steatosis":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ImageDataset,
+            )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
