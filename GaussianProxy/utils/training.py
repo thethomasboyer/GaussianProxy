@@ -119,6 +119,7 @@ class TimeDiffusion:
     dataset_params: DatasetParams  # TODO: remove this when the DatasetParams TODO is done
     # populated arguments when calling .fit
     chckpt_save_path: Path = field(init=False)
+    this_run_folder: Path = field(init=False)
     optimizer: Optimizer = field(init=False)
     lr_scheduler: LRScheduler = field(init=False)
     logger: MultiProcessAdapter = field(init=False)
@@ -290,7 +291,6 @@ class TimeDiffusion:
         # loop through training batches
         for time, batch in self._yield_data_batches(
             train_timestep_dataloaders,
-            self.logger,
             self.cfg.training.nb_time_samplings - init_count,
         ):
             ### First check for checkpointing flag file (written by the launcher when timeing out)
@@ -410,7 +410,6 @@ class TimeDiffusion:
     def _yield_data_batches(
         self,
         dataloaders: dict[float, DataLoader],
-        logger: MultiProcessAdapter,
         nb_time_samplings: int,
     ) -> Generator[tuple[float, Tensor], None, None]:
         """
@@ -1474,8 +1473,10 @@ class TimeDiffusion:
         self.logger.debug("Finished image generation in MetricsComputation")
 
         ##### 1.5 Augment the generated samples if applicable
-        if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-            self.logger.info("Augmenting generated samples for metrics computation")
+        if isinstance(eval_strat.nb_samples_to_gen_per_time, str) and "aug" in eval_strat.nb_samples_to_gen_per_time:
+            self.logger.info(
+                f"Augmenting generated samples {2 ** len(eval_strat.augmentations_for_metrics_comp)} times for metrics computation with augmentations: {eval_strat.augmentations_for_metrics_comp}"
+            )
             # on main process:
             if self.accelerator.is_main_process:
                 # augment
@@ -1487,14 +1488,18 @@ class TimeDiffusion:
                     subdirs_to_augment,
                     self.logger,
                     extension,
+                    eval_strat.augmentations_for_metrics_comp,
                 )
                 # check result
                 nb_elems_per_class = {
                     class_path.name: len(list((metrics_computation_folder / class_path.name).glob(f"*.{extension}")))
                     for class_path in subdirs_to_augment
                 }
-                assert all(nb_elems_per_class[cl_name] % 8 == 0 for cl_name in nb_elems_per_class), (
-                    f"Expected number of elements to be a multiple of 8, got:\n{nb_elems_per_class}"
+                assert all(
+                    nb_elems_per_class[cl_name] % 2 ** len(eval_strat.augmentations_for_metrics_comp) == 0
+                    for cl_name in nb_elems_per_class
+                ), (
+                    f"Expected number of elements to be a multiple of {2 ** len(eval_strat.augmentations_for_metrics_comp)}, got:\n{nb_elems_per_class}"
                 )
 
         # wait for data augmentation to finish before returning
@@ -1644,6 +1649,8 @@ class TimeDiffusion:
         - `"adapt half aug"`: generate half as many samples as there are in the true data time, then 8⨉ augment them (Dih4)
         """
         # find total number of samples to generate for this video time
+        base_aug_factor = 2 ** len(eval_strat.augmentations_for_metrics_comp)
+
         if isinstance(eval_strat.nb_samples_to_gen_per_time, int):
             tot_nb_samples = eval_strat.nb_samples_to_gen_per_time
         elif eval_strat.nb_samples_to_gen_per_time == "adapt":
@@ -1652,11 +1659,13 @@ class TimeDiffusion:
             tot_nb_samples = len(list(true_data_class_path.iterdir())) // 2
         elif eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
             nb_all_aug_samples = len(list(true_data_class_path.iterdir()))
-            assert self.cfg.training.unpaired_data or nb_all_aug_samples % 8 == 0, (
-                f"Expected number of samples to be a multiple of 8 when using paired data, got {nb_all_aug_samples}"
+            assert self.cfg.training.unpaired_data or nb_all_aug_samples % base_aug_factor == 0, (
+                f"Expected number of samples to be a multiple of {base_aug_factor} when using paired data, got {nb_all_aug_samples}"
             )
-            tot_nb_samples = nb_all_aug_samples // (8 * 2)  # half the number of samples, *then* 8⨉ augment them
-            self.logger.debug("Will augment samples 8⨉ after generation")
+            tot_nb_samples = nb_all_aug_samples // (
+                base_aug_factor * 2
+            )  # half the number of samples, *then* base_aug_factor⨉ augment them
+            self.logger.debug(f"Will augment samples {base_aug_factor}⨉ after generation")
         else:
             raise ValueError(
                 f"Expected 'nb_samples_to_gen_per_time' to be an int, 'adapt', 'adapt half', or 'adapt half aug', got {eval_strat.nb_samples_to_gen_per_time}"
@@ -1732,6 +1741,10 @@ class TimeDiffusion:
         )
         self.logger.debug(f"Using transforms for true datasets in metrics computation: {metrics_compute_transforms}")
         # TODO: programmatically check consistency with true samples processing in misc/save_images_for_metrics_compute
+        base_aug_factor = 2 ** len(eval_strat.augmentations_for_metrics_comp)  # only used if 'aug' strategy
+        self.logger.debug(
+            f"Using augemntations: {eval_strat.augmentations_for_metrics_comp} giving base_aug_factor: {base_aug_factor} for 'aug' strategies"
+        )
 
         all_true_files_per_time = {}
         # Use the hard augmented version of the dataset if generating augmented samples,
@@ -1775,10 +1788,18 @@ class TimeDiffusion:
             assert len(dataset) > 0, (
                 f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
             )
-            if eval_strat.nb_samples_to_gen_per_time == "adapt half aug":
-                assert self.cfg.training.unpaired_data or len(dataset) % 8 == 0, (
-                    f"Expected number of samples to be a multiple of 8 when using paired data, got {len(dataset)}"
-                )
+            if (
+                isinstance(eval_strat.nb_samples_to_gen_per_time, str)
+                and "aug" in eval_strat.nb_samples_to_gen_per_time
+            ):
+                if "half" in eval_strat.nb_samples_to_gen_per_time:
+                    assert self.cfg.training.unpaired_data or len(dataset) % (base_aug_factor / 2) == 0, (
+                        f"Expected number of samples to be a multiple of {base_aug_factor / 2} when using paired data and 'half', got {len(dataset)} at {dataset.base_path}"
+                    )
+                else:
+                    assert self.cfg.training.unpaired_data or len(dataset) % base_aug_factor == 0, (
+                        f"Expected number of samples to be a multiple of {base_aug_factor} when using paired data and no 'half', got {len(dataset)} at {dataset.base_path}"
+                    )
             self.logger.debug(
                 f"True dataset to compare with for metrics computation for time {time_name} has {len(dataset)} samples at {dataset.base_path}"
             )
