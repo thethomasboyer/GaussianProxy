@@ -4,12 +4,12 @@ data_shape: [ 3, 128, 128 ]
 transforms:
   _target_: torchvision.transforms.transforms.Compose
   transforms:
-  # Convert to float32 (and normalize to [0, 1]) before resizing
-  - _target_: torchvision.transforms.ConvertImageDtype
-    dtype: ${torch_dtype:float32}
   # Resize to 128x128
   - _target_: torchvision.transforms.Resize
     size: 128
+  # Convert to float32 (and normalize to [0, 1])
+  - _target_: torchvision.transforms.ConvertImageDtype
+    dtype: ${torch_dtype:float32}
   # Normalize to [-1, 1]
   - _target_: torchvision.transforms.Normalize
     mean: [ 0.5, 0.5, 0.5 ]
