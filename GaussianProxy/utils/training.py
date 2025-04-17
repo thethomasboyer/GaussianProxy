@@ -1488,7 +1488,7 @@ class TimeDiffusion:
                     subdirs_to_augment,
                     self.logger,
                     extension,
-                    eval_strat.augmentations_for_metrics_comp,
+                    augmentations=eval_strat.augmentations_for_metrics_comp,
                 )
                 # check result
                 nb_elems_per_class = {
