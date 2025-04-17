@@ -45,6 +45,7 @@ dependencies = [
     "torch-fidelity",
     "beartype>=0.20.0",
     "pyarrow>=19.0.1",
+    "mypy>=1.15.0",
 ]
 
 [tool.ruff]
@@ -93,3 +94,6 @@ exclude = [
 
 [tool.uv.sources]
 torch-fidelity = { git = "https://github.com/thethomasboyer/torch-fidelity-symlinks" }
+
+[tool.mypy]
+disable_error_code = "import-untyped, import-not-found"
