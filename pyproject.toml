@@ -97,3 +97,15 @@ torch-fidelity = { git = "https://github.com/thethomasboyer/torch-fidelity-symli
 
 [tool.mypy]
 disable_error_code = "import-untyped, import-not-found"
+exclude = '''
+(
+    (^|/)\.venv(/|$)|
+    (^|/)\.ruff_cache(/|$)|
+    (^|/)src(/|$)|
+    (^|/)experiments(/|$)|
+    (__pycache__)(/|$)|
+    \.local/share/uv/python(/|$)|
+    \.vscode-server/extensions(/|$)|
+    \.vscode/extensions(/|$)
+)
+'''
