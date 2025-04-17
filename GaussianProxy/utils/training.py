@@ -1369,6 +1369,9 @@ class TimeDiffusion:
         # but still clear it here to ensure clean state
         if self.accelerator.is_main_process:
             if metrics_computation_folder.exists():
+                self.logger.warning(
+                    f"metrics_computation_folder ({metrics_computation_folder}) exists, it should not; deleting"
+                )
                 shutil.rmtree(metrics_computation_folder)
             metrics_computation_folder.mkdir()
         self.accelerator.wait_for_everyone()
