@@ -19,12 +19,12 @@ import torch
 import torch_fidelity
 from torch.utils.data import Subset
 from torchvision.transforms import (
-    CenterCrop,
+    CenterCrop,  # noqa: F401
     Compose,
     ConvertImageDtype,
     RandomHorizontalFlip,
     RandomVerticalFlip,
-    Resize,
+    Resize,  # noqa: F401
 )
 
 from GaussianProxy.conf.training_conf import DataSet
@@ -47,7 +47,7 @@ torch.backends.cudnn.benchmark = False
 
 ############################################### Conf ##############################################
 # Dataset
-from my_conf.dataset.diabetic_retinopathy_inference import diabetic_retinopathy_inference as dataset  # noqa: E402
+from my_conf.dataset.Jurkat_inference_hard_aug import dataset  # noqa: E402
 
 assert dataset.dataset_params is not None
 
@@ -62,9 +62,7 @@ flips_rot = [t for t in dataset.transforms.transforms if is_flip_or_rotation(t)]
 # transforms = Compose(flips_rot + [ConvertImageDtype(torch.uint8)])
 transforms = Compose(
     [
-        ConvertImageDtype(torch.uint8),
-        Resize(256),
-        CenterCrop(256),
+        ConvertImageDtype(torch.uint8),  # needed for FID computation
     ]
 )
 
@@ -80,8 +78,21 @@ def sorting_func(dataset_name: str, key: str | Path):
             return -1 if key == "all_classes" else int(key)
         case "BBBC021_196_hard_aug_docetaxel":
             return -1 if key == "all_classes" else float(key)
-        case "diabetic_retinopathy":
+        case "diabetic_retinopathy" | "diabetic_retinopathy_inference_hard_augmented":
             return -1 if key == "all_classes" else int(key)
+        case "imagenet_n01917289_hard_aug_inference":
+            int(key)
+        case "Jurkat":
+            phase_order = (
+                "G1",
+                "S",
+                "G2",
+                "Prophase",
+                "Metaphase",
+                "Anaphase",
+                "Telophase",
+            )
+            return -1 if key == "all_classes" else phase_order.index(key)
         case _:
             raise ValueError(f"Unknown/Unimplemented dataset name: {dataset_name}")
 
@@ -97,7 +108,7 @@ metrics_save_path.parent.mkdir(parents=True, exist_ok=True)
 
 recompute = True
 
-n_processes: int = 3
+cuda_devices: tuple[int] = (2,)
 
 ############################################## Utils ##############################################
 
@@ -243,7 +254,7 @@ def compute_metrics(
     metrics_save_path: Path,
     exp_repeats: dict[str, dict[str, BaseDataset]],
     subdirs: list[Path],
-    n_processes: int,
+    cuda_devices: tuple[int],
 ):
     if metrics_save_path.exists():
         raise RuntimeError(f"File {metrics_save_path} already exists, not overwriting")
@@ -275,14 +286,14 @@ def compute_metrics(
     print(f"Will process {len(tasks)} tasks in total")
 
     # Group tasks by cuda device (round-robin assignment)
-    task_groups: dict[int, list[dict[str, Any]]] = {i: [] for i in range(n_processes)}
+    task_groups: dict[int, list[dict[str, Any]]] = {i: [] for i in cuda_devices}
     for idx, task in enumerate(tasks):
-        device_id = idx % n_processes
+        device_id = cuda_devices[idx % len(cuda_devices)]
         task["cuda_device"] = device_id
         task_groups[device_id].append(task)
 
     tmp_files: dict[int, Path] = {}
-    with ProcessPoolExecutor(max_workers=n_processes) as executor:
+    with ProcessPoolExecutor(max_workers=len(cuda_devices)) as executor:
         future_to_device: dict[Any, int] = {}
         for device_id, group in task_groups.items():
             tmp_file = metrics_save_path.parent / f"tmp_metrics_{device_id}.json"
@@ -323,7 +334,7 @@ if __name__ == "__main__":
     print(f"Using dataset {dataset.name}")
     print(f"Using transforms:\n{transforms}")
     print(f"Will save metrics to {metrics_save_path}")
-    print(f"Using {n_processes} processes for parallel execution (must map 1-to-1 with CUDA devices)")
+    print(f"Using devices {cuda_devices} for parallel execution")
 
     ### Compute splits
     exp_repeats, nb_elems_per_class, subdirs = compute_splits(dataset)
@@ -333,11 +344,14 @@ if __name__ == "__main__":
         inpt = input("Confirm recompute (y/[n]):")
         if inpt != "y":
             warn(f"Will not recompute but load from {metrics_save_path}")
-            with open(metrics_save_path) as f:
-                eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
+            try:
+                with open(metrics_save_path) as f:
+                    eval_metrics: dict[str, dict[str, dict[str, float]]] = json.load(f)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(f"Metrics file {metrics_save_path} not found") from e
         else:
             warn("Will recompute using parallel metrics computation")
-            eval_metrics = compute_metrics(batch_size, metrics_save_path, exp_repeats, subdirs, n_processes)
+            eval_metrics = compute_metrics(batch_size, metrics_save_path, exp_repeats, subdirs, cuda_devices)
     else:
         warn(f"Will not recompute but load from {metrics_save_path}")
         with open(metrics_save_path) as f:
