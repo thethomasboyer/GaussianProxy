@@ -75,7 +75,7 @@ from my_conf.my_inference_conf import inference_conf
 torch.set_grad_enabled(False)
 
 # Speed up
-torch.set_float32_matmul_precision("high")
+torch.set_float32_matmul_precision("high")  # replaces torch.backends.cuda.matmul.allow_tf32
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
@@ -1430,6 +1430,11 @@ def metrics_computation(
     Adapted from utils/training.py
     """
     ##### 0. Preparations
+    # Set precision flags
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.benchmark = False
+
     # Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)

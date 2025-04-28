@@ -1349,6 +1349,11 @@ class TimeDiffusion:
         Everything is distributed.
         """
         ##### 0. Preparations
+        # Set precision flags
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
+
         # duplicate the scheduler to not mess with the training one
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
         inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)

@@ -153,7 +153,7 @@ def modify_args_for_debug(
         strat.nb_diffusion_timesteps = 5
         if hasattr(strat, "nb_samples_to_gen_per_time"):  # TODO move this check to the dedicated "checks" function?
             assert hasattr(strat, "batch_size"), "Expected batch_size to be present"
-            # only change it if it's a hard-coded value
+            # only change it it's a hard-coded value
             if isinstance(strat.nb_samples_to_gen_per_time, int):
                 strat.nb_samples_to_gen_per_time = 2 * strat.batch_size
     # TODO: update registered wandb config

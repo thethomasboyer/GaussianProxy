@@ -40,6 +40,11 @@ from GaussianProxy.utils.data import RandomRotationSquareSymmetry
 # Disable grads globally
 torch.set_grad_enabled(False)
 
+# Precision
+torch.set_float32_matmul_precision("highest")  # replaces torch.backends.cuda.matmul.allow_tf32
+torch.backends.cudnn.allow_tf32 = False
+torch.backends.cudnn.benchmark = False
+
 ############################################### Conf ##############################################
 # Dataset
 from my_conf.dataset.diabetic_retinopathy_inference import diabetic_retinopathy_inference as dataset  # noqa: E402
@@ -48,7 +53,9 @@ assert dataset.dataset_params is not None
 
 # now split the dataset into 2 non-overlapping parts, respecting classes proportions...
 # ...and repeat that 10 times to get std of the metric
-is_flip_or_rotation = lambda t: isinstance(t, (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry))
+is_flip_or_rotation = lambda t: isinstance(
+    t, (RandomHorizontalFlip | RandomVerticalFlip | RandomRotationSquareSymmetry)
+)
 flips_rot = [t for t in dataset.transforms.transforms if is_flip_or_rotation(t)]
 
 # with or without augmentations:

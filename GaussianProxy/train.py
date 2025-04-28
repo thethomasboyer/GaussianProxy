@@ -228,8 +228,9 @@ def main(cfg: Config) -> None:
 
     # --------------------------------- Miscellaneous ---------------------------------
     # PyTorch mixed precision
-    torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision("high")  # replaces torch.backends.cuda.matmul.allow_tf32
     torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
     # ----------------------------------- Evaluation ----------------------------------
     logger.info(f"Will use evaluation: {cfg.evaluation}")
