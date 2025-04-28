@@ -50,10 +50,11 @@ dependencies = [
 
 [tool.ruff]
 line-length = 120
-lint.ignore = ["E721", "E731", "E501", "B028", "SIM108"]
+lint.ignore = ["E721", "E731", "E501", "UP038", "B028", "SIM108"]
 # E721 - Type comparison using type() instead of isinstance()
 # E731 - Use of lambda function when a def would be better
 # E501 - Line too long
+# UP038 - Use X | Y for type annotation instead of Union[X, Y] (depreciated)
 # B028 - No explicit stacklevel keyword argument found in warning function
 # SIM108 - Use ternary operator
 lint.select = [
