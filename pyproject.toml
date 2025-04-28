@@ -46,6 +46,7 @@ dependencies = [
     "beartype>=0.20.0",
     "pyarrow>=19.0.1",
     "mypy>=1.15.0",
+    "umap-learn>=0.5.7",
 ]
 
 [tool.ruff]

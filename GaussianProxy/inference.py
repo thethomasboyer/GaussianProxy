@@ -1587,6 +1587,8 @@ def _generate_images_for_metrics_computation(
     cfg: InferenceConfig,
     logger: MultiProcessAdapter,
 ):
+    assert cfg.dataset.dataset_params is not None
+
     # loop over training video times
     video_times_pbar = pbar_manager.counter(
         total=len(eval_video_times),
