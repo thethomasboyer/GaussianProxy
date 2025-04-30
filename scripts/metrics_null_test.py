@@ -101,14 +101,14 @@ dataset.dataset_params.sorting_func = partial(sorting_func, dataset.name)
 
 nb_repeats = 10
 
-batch_size = 512
+batch_size = 256
 
 metrics_save_path = Path(f"notebooks/evaluations/{dataset.name}/eval_metrics.json")
 metrics_save_path.parent.mkdir(parents=True, exist_ok=True)
 
 recompute = True
 
-cuda_devices: tuple[int] = (2,)
+cuda_devices: tuple[int, ...] = (0, 1, 2)
 
 ############################################## Utils ##############################################
 
@@ -199,7 +199,7 @@ def process_task_group_on_one_device(
       - (if key != "all_classes") subdir: Path object
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
-    print(f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} on  process {os.getpid()}")
+    print(f"=> CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} on process {os.getpid()}")
     results: dict[str, dict[str, Any]] = defaultdict(dict)
     for task in task_group:
         exp_rep: str = task["exp_rep"]
@@ -208,7 +208,9 @@ def process_task_group_on_one_device(
         split2: BaseDataset = task["split2"]
         batch_size: int = task["batch_size"]
         if key == "all_classes":
-            print(f"Computing metrics {exp_rep} {key}: {len(split1)} vs {len(split2)} samples on device {cuda_device}")
+            print(
+                f"-> Computing metrics {exp_rep} {key}: {len(split1)} vs {len(split2)} samples on device {cuda_device}"
+            )
             metrics = torch_fidelity.calculate_metrics(
                 input1=split1,
                 input2=split2,
@@ -219,6 +221,7 @@ def process_task_group_on_one_device(
                 verbose=cuda_device == 0,
                 samples_find_deep=True,
                 cache=False,
+                save_cpu_ram=True,
             )
         else:
             subdir = task["subdir"]
@@ -231,7 +234,7 @@ def process_task_group_on_one_device(
                 [i for i, e in enumerate(split2.samples) if e.parent == subdir],
             )
             print(
-                f"Computing metrics {exp_rep} {key}: {len(ds1_this_cl)} vs {len(ds2_this_cl)} samples on device {cuda_device}"
+                f"-> Computing metrics {exp_rep} {key}: {len(ds1_this_cl)} vs {len(ds2_this_cl)} samples on device {cuda_device}"
             )
             metrics = torch_fidelity.calculate_metrics(
                 input1=ds1_this_cl,
@@ -242,6 +245,7 @@ def process_task_group_on_one_device(
                 prc=True,
                 verbose=cuda_device == 0,
                 cache=False,
+                save_cpu_ram=True,
             )
         results[exp_rep][key] = metrics
     with open(temp_output_path, "w") as f:
@@ -254,7 +258,7 @@ def compute_metrics(
     metrics_save_path: Path,
     exp_repeats: dict[str, dict[str, BaseDataset]],
     subdirs: list[Path],
-    cuda_devices: tuple[int],
+    cuda_devices: tuple[int, ...],
 ):
     if metrics_save_path.exists():
         raise RuntimeError(f"File {metrics_save_path} already exists, not overwriting")
@@ -293,12 +297,13 @@ def compute_metrics(
         task_groups[device_id].append(task)
 
     tmp_files: dict[int, Path] = {}
-    with ProcessPoolExecutor(max_workers=len(cuda_devices)) as executor:
+    mp_context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=len(cuda_devices), mp_context=mp_context) as executor:
         future_to_device: dict[Any, int] = {}
         for device_id, group in task_groups.items():
             tmp_file = metrics_save_path.parent / f"tmp_metrics_{device_id}.json"
             tmp_files[device_id] = tmp_file
-            print(f"Processing {len(group)} tasks on device {device_id}, saving to {tmp_file}")
+            print(f"=> Processing {len(group)} tasks on device {device_id}, saving to {tmp_file}")
             future = executor.submit(process_task_group_on_one_device, group, device_id, tmp_file)
             future_to_device[future] = device_id
         for future in as_completed(future_to_device):
