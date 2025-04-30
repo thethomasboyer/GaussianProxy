@@ -124,6 +124,7 @@ HARD_AUGMENTATION_FACTORS = {  # TODO: remove this and use 2 ** len(augmentation
     "chromaLive6h_3ch_png_patches_380px_hard_aug": 8,
     "BBBC021_196_hard_aug_docetaxel": 8,
     "diabetic_retinopathy_inference_hard_augmented": 2,
+    "Jurkat": 8,
 }
 
 
