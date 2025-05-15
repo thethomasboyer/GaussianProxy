@@ -82,6 +82,8 @@ class DataSet:
     # same goes for selected_dists: should be list[int] | list[str]...
     selected_dists: list | None = None
     dataset_params: DatasetParams | None = None
+    fully_ordered: bool = False
+    path_to_single_parquet: str | None = None
 
 
 @dataclass

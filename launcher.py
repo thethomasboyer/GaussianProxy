@@ -332,6 +332,8 @@ WRITABLE_FILES_OR_FOLDERS = [
     ".git",
     "train_samples.json",
     "test_samples.json",
+    "train_samples.parquet",
+    "test_samples.parquet",
     "checkpoints",  # last checkpoint will be immediatly re-written at run resume (TODO: don't)
 ]
 

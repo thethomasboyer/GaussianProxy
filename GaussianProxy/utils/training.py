@@ -18,6 +18,8 @@ from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
+from hydra.utils import instantiate
+from pandas import DataFrame
 from PIL import Image
 from torch import IntTensor, Tensor
 from torch.optim.lr_scheduler import LRScheduler
@@ -222,12 +224,13 @@ class TimeDiffusion:
         this_run_folder: Path,
         resuming_args: ResumingArgs | None = None,
         profile: bool = False,
+        fully_ordered_data: DataFrame | None = None,
     ):
         """
         Global high-level fitting method.
 
         Arguments:
-            train_dataloaders (dict[TimeKey, DataLoader])
+            train_dataloaders (dict[TimeKey, DataLoader]) or Dataset
             Dictionary of "_fake_"training dataloaders. The actual training batch creation is done in the `_yield_data_batches` method.
         """
         logger.debug(
@@ -292,6 +295,7 @@ class TimeDiffusion:
         for time, batch in self._yield_data_batches(
             train_timestep_dataloaders,
             self.cfg.training.nb_time_samplings - init_count,
+            fully_ordered_data,
         ):
             ### First check for checkpointing flag file (written by the launcher when timeing out)
             if Path(chckpt_save_path, "checkpointing_flag.txt").exists():
@@ -405,9 +409,62 @@ class TimeDiffusion:
         )
         self._eval_video_times = torch.sort(eval_video_times).values  # sort it for better viz
 
+    def _yield_data_batches(
+        self,
+        dataloaders: dict[float, DataLoader],
+        nb_time_samplings: int,
+        fully_ordered_data: DataFrame | None,
+    ):
+        if self.cfg.dataset.fully_ordered:
+            assert fully_ordered_data is not None, "Expecting fully_ordered_data to be set"
+            return self._yield_data_batches_fully_ordered(fully_ordered_data, nb_time_samplings)
+        else:
+            return self._yield_data_batches_discrete_timestamps(dataloaders, nb_time_samplings)
+
     @torch.no_grad()
     @log_state(state_logger)
-    def _yield_data_batches(
+    def _yield_data_batches_fully_ordered(
+        self,
+        dataframe: DataFrame,
+        nb_time_samplings: int,
+    ) -> Generator[tuple[float, Tensor], None, None]:
+        # Instanciate a fake dataset for now to reuse some logic
+        if type(self.cfg.dataset.transforms) is not Compose:
+            transforms: Compose = instantiate(self.cfg.dataset.transforms)
+        else:
+            transforms = self.cfg.dataset.transforms
+        self.logger.info(f"Using train transforms {transforms}")
+        loader = self.dataset_params.dataset_class(
+            [Path("path", "to", "placeholder")], transforms=transforms
+        )  # placeholder to avoid errors
+
+        # Iterate nb_time_samplings times
+        for _ in range(nb_time_samplings):
+            # sample a time between 0 and 1
+            t = torch.rand(1).item()
+
+            # get the train_batch_size closest samples to t as paths
+            closest_idx_in_df = dataframe["time"].sub(t).abs().argsort()[: self.cfg.training.train_batch_size]
+            batch_paths: list[Path] = dataframe.iloc[closest_idx_in_df]["file_path"].to_list()
+
+            # load the batch
+            batch = loader.get_items_by_name(batch_paths)
+
+            # now concatenate tensors and manually move to device
+            # since training dataloaders are not prepared
+            batch = torch.stack(batch).to(self.accelerator.device)
+
+            # check shape and append
+            assert batch.shape == (
+                self.cfg.training.train_batch_size,
+                *self.data_shape,
+            ), f"Expecting sample shape {(self.cfg.training.train_batch_size, *self.data_shape)}, got {batch.shape}"
+
+            yield t, batch
+
+    @torch.no_grad()
+    @log_state(state_logger)
+    def _yield_data_batches_discrete_timestamps(
         self,
         dataloaders: dict[float, DataLoader],
         nb_time_samplings: int,

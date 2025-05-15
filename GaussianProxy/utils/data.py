@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import TypeVar
 
 import numpy as np
+import pandas as pd
 import tifffile
 import torch
 import torchvision.transforms.functional as tf
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
+from accelerate.utils import broadcast
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
@@ -148,13 +150,13 @@ TimeKey = TypeVar("TimeKey", int, str)  # TODO: remove this mess and just use st
 
 def setup_dataloaders(
     cfg: Config,
-    accelerator,
+    accelerator: Accelerator,
     num_workers: int,
     logger: MultiProcessAdapter,
     this_run_folder: Path,
     chckpt_save_path: Path,
     debug: bool = False,
-) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader], DatasetParams]:
+) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader], DatasetParams, pd.DataFrame | None]:
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
     Each dataloader is a `torch.utils.data.DataLoader` over a custom `Dataset`.
@@ -173,6 +175,9 @@ def setup_dataloaders(
     |   |   |   - ...
     |   |   - ...
     ```
+
+    –with the exception of fully ordered datasets where the data is expected to be found
+    in a single parquet file with a 'time' and 'file_path' columns.
 
     The train/test split that was saved to disk is reused if found
     and if `cfg.checkpointing.resume_from_checkpoint is not False`.
@@ -267,10 +272,17 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
+        case "NASH_steatosis_fully_ordered_dinov2_s":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ImageDataset,
+            )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
-    return _dataset_builder(
+    train_dataloaders_dict, test_dataloaders_dict, dataset_params = _dataset_builder(
         cfg,
         accelerator,
         ds_params,
@@ -280,6 +292,73 @@ def setup_dataloaders(
         chckpt_save_path,
         debug,
     )
+
+    if cfg.dataset.fully_ordered:
+        fully_ordered_data = _dataset_builder_fully_ordered(cfg, accelerator, logger, this_run_folder, debug)
+    else:
+        fully_ordered_data = None
+
+    return train_dataloaders_dict, test_dataloaders_dict, dataset_params, fully_ordered_data
+
+
+def _dataset_builder_fully_ordered(
+    cfg: Config,
+    accelerator: Accelerator,
+    logger: MultiProcessAdapter,
+    this_run_folder: Path,
+    debug: bool = False,
+    train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
+) -> pd.DataFrame:
+    """Builds the train DataFrame for fully ordered datasets."""
+    assert cfg.dataset.fully_ordered, "This function is only for fully ordered datasets"
+    logger.warning("Test split built but not used for now: TODO")  # TODO
+
+    # 1. Get train & test splits for each time
+    build_new_train_test_split = True
+    if cfg.checkpointing.resume_from_checkpoint is not False:
+        saved_splits_exist = (
+            Path(this_run_folder, "train_samples.parquet").exists()
+            and Path(this_run_folder, "test_samples.parquet").exists()
+        )
+        if not saved_splits_exist:
+            logger.warning("No train/test split saved to disk found; building new one")
+        else:
+            build_new_train_test_split = False
+
+    if build_new_train_test_split:
+        all_train_files, all_test_files = _build_train_test_splits_fully_ordered(
+            cfg, logger, train_split_frac, accelerator
+        )
+    else:
+        all_train_files, all_test_files = load_train_test_splits_fully_ordered(this_run_folder, logger)
+
+    # 2. Build train datasets & test dataloaders
+    if type(cfg.dataset.transforms) is not Compose:
+        transforms: Compose = instantiate(cfg.dataset.transforms)
+    else:
+        transforms = cfg.dataset.transforms
+
+    # no flips nor rotations for test data for consistent evaluation
+    test_transforms, _ = remove_flips_and_rotations_from_transforms(transforms)
+    logger.warning(
+        f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
+    )
+    logger.warning(f"Using test transforms: {test_transforms}")
+    if debug:
+        logger.warning("Ignoring Debug mode (TODO)")
+
+    # 3. Save train/test split to disk if new
+    if build_new_train_test_split:
+        all_train_files.to_parquet(this_run_folder / "train_samples.parquet")
+        all_test_files.to_parquet(this_run_folder / "test_samples.parquet")
+        logger.info("Saved new train & test samples to train_samples.parquet & test_samples.parquet")
+
+    # 4. Print some info about the datasets
+    logger.info(f"Train dataset has {len(all_train_files)} samples")
+    logger.info(f"Test dataset has {len(all_test_files)} samples")
+
+    # 5. Return the Dataframe
+    return all_train_files
 
 
 def _dataset_builder(
@@ -318,6 +397,7 @@ def _dataset_builder(
         )
     else:
         all_train_files, all_test_files = load_train_test_splits(this_run_folder, logger)
+
     assert all_train_files.keys() == all_test_files.keys(), (
         f"Expected same timestamps between train and test split, got: {all_train_files.keys()} vs {all_test_files.keys()}"
     )
@@ -344,9 +424,10 @@ def _dataset_builder(
     logger.warning(f"Using test transforms: {test_transforms}")
     if debug:
         logger.warning("Debug mode: limiting test dataloader to 2 evaluation batch")
+
     # time per time
-    train_reprs_to_log: list[str] = []
-    test_reprs_to_log: list[str] = []
+    train_reprs_to_log: list[str] = []  # logging utilities
+    test_reprs_to_log: list[str] = []  # logging utilities
     for timestamp in timestamps:
         ### Create train dataloader
         train_files = all_train_files[timestamp]
@@ -376,7 +457,7 @@ def _dataset_builder(
         )
         ### Create test dataloader
         test_files = all_test_files[timestamp]
-        test_ds = dataset_params.dataset_class(
+        test_ds: BaseDataset = dataset_params.dataset_class(
             samples=test_files,
             transforms=test_transforms,
             expected_initial_data_range=cfg.dataset.expected_initial_data_range,
@@ -391,8 +472,8 @@ def _dataset_builder(
             shuffle=False,  # keep the order for consistent logging
         )
 
-    # Save train/test split to disk if new TODO: save root path of dataset only once!
-    if build_new_train_test_split:
+    # Save train/test split to disk if new
+    if build_new_train_test_split and accelerator.is_main_process:
         # train
         serializable_train_files: dict[TimeKey | str, str | list[str]] = {
             time: [p.name for p in list_paths] for time, list_paths in all_train_files.items()
@@ -523,11 +604,11 @@ def _build_train_test_splits(
             test_files = [files[i] for i in test_idxes]
             train_files = [f for f in files if f not in test_files]
         else:
-            # Compute the split index
+            # Compute the split index TODO: randomize but with same result across processes!!!
             split_idx = int(train_split_frac * len(files))
             train_files = files[:split_idx]
             test_files = files[split_idx:]
-        assert set(train_files) | (set(test_files)) == set(files), (
+        assert set(train_files) | set(test_files) == set(files), (
             f"Expected train_files + test_files == all files, but got {len(train_files)}, {len(test_files)}, and {len(files)} elements respectively"
         )
         all_train_files[timestamp] = train_files
@@ -551,6 +632,40 @@ def _build_train_test_splits(
             all_train_files[timestep] = random.sample(files, nb_samples_if_unpaired)
 
     return all_train_files, all_test_files
+
+
+def _build_train_test_splits_fully_ordered(
+    cfg: Config, logger: MultiProcessAdapter, train_split_frac: float, accelerator: Accelerator
+):
+    # checks
+    assert cfg.dataset.fully_ordered, "This function is only for fully ordered datasets"
+    assert cfg.dataset.path_to_single_parquet is not None, "cfg.dataset.path_to_single_parquet is not set"
+
+    # load single parquet file
+    data = pd.read_parquet(cfg.dataset.path_to_single_parquet)
+    logger.debug(f"Found {len(data)} files in total in parquet file")
+
+    # checks
+    assert (data.columns == ["time", "file_path"]).all(), f"Expected columns ['time', 'file_path'], got {data.columns}"
+    if cfg.training.unpaired_data:
+        raise NotImplementedError("TODO?")
+    if cfg.training.as_many_samples_as_unpaired:
+        raise NotImplementedError("TODO?")
+
+    # split into train/test at random
+    if accelerator.is_main_process:
+        random_seed = torch.randint(2**16, (1,), device=accelerator.device)
+    else:
+        random_seed = torch.zeros((1,), device=accelerator.device)
+    random_seed: Tensor = broadcast(random_seed)  # pyright: ignore[reportAssignmentType]
+    logger.debug(f"Broadcasted random seed: {random_seed.item()}")
+
+    train_data = data.sample(frac=train_split_frac, random_state=int(random_seed.item()))
+    test_data = data.drop(train_data.index)
+
+    logger.info(f"Built train & test splits with lengths {len(train_data)} and {len(test_data)} respectively")
+
+    return train_data, test_data
 
 
 def load_train_test_splits(
@@ -583,6 +698,26 @@ def load_train_test_splits(
     logger.info("Loaded train & test samples from train_samples.json & test_samples.json")
 
     return all_train_files, all_test_files
+
+
+def load_train_test_splits_fully_ordered(this_run_folder: Path, logger: MultiProcessAdapter):
+    # load
+    train_data = pd.read_parquet(this_run_folder / "train_samples.parquet")
+    test_data = pd.read_parquet(this_run_folder / "test_samples.parquet")
+
+    # checks
+    assert (train_data.columns == ["time", "file_path"]).all(), (
+        f"Expected columns ['time', 'file_path'], got {train_data.columns}"
+    )
+    assert (test_data.columns == ["time", "file_path"]).all(), (
+        f"Expected columns ['time', 'file_path'], got {test_data.columns}"
+    )
+
+    logger.info(
+        f"Loaded train & test samples from train_samples.parquet & test_samples.parquet with lengths {len(train_data)} and {len(test_data)} respectively"
+    )
+
+    return train_data, test_data
 
 
 def extract_video_id(filename: str) -> tuple[str, str]:
