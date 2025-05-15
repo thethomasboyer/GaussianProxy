@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from warnings import warn
 
 from omegaconf import MISSING
 
@@ -298,7 +299,7 @@ class Config:
     # Miscellaneous
     debug: bool
     profile: bool
-    fork_run: bool
+    resume_method: str = "rewind"
     diff_mode: str = "config_only"  # "config_only" or "full"
 
     # Caches
@@ -325,3 +326,17 @@ class Config:
 
     # Optimization
     learning_rate: float
+
+    def __post_init__(self):
+        # Checks
+        for eval_strat in self.evaluation.strategies:
+            if isinstance(eval_strat, MetricsComputation):
+                if self.dataset.selected_dists is not None:
+                    if not set(eval_strat.selected_times).issubset(set(self.dataset.selected_dists)):
+                        raise ValueError(
+                            f"MetricsComputation selected_times {eval_strat.selected_times} not in dataset"
+                        )
+                else:
+                    warn(
+                        f"Cannot check if MetricsComputation's selected_times {eval_strat.selected_times} are in dataset {self.dataset.name} because no selected_dists were provided"
+                    )

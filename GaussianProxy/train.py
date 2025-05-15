@@ -145,12 +145,21 @@ def main(cfg: Config) -> None:
             # wandb offline run resume *simply* does not work...
             logger.warning("Offline mode: (ignoring potential previous messages and) force starting a new run")
         else:
-            if cfg.fork_run:
-                logger.info(f"Forking run {prev_run_id} from step {start_step}")
-                init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"
-            else:
-                logger.info(f"Rewinding run {prev_run_id} from step {start_step}")
-                init_kwargs["wandb"]["resume_from"] = f"{prev_run_id}?_step={start_step}"
+            match cfg.resume_method:
+                case "fork":
+                    logger.info(f"Forking run {prev_run_id} from step {start_step}")
+                    init_kwargs["wandb"]["fork_from"] = f"{prev_run_id}?_step={start_step}"
+                case "rewind":
+                    logger.info(f"Rewinding run {prev_run_id} from step {start_step}")
+                    init_kwargs["wandb"]["resume_from"] = f"{prev_run_id}?_step={start_step}"
+                case "new_run":
+                    logger.info(
+                        f"Starting a new run from run {prev_run_id}'s latest checkpoint, but not resuming it in wandb"
+                    )
+                case _:
+                    raise ValueError(
+                        f"Invalid resume method '{cfg.resume_method}'. Must be one of 'fork', 'rewind', or 'new_run'."
+                    )
 
     accelerator.init_trackers(
         project_name=cfg.project,
