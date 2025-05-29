@@ -37,7 +37,7 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
     dataset.transforms = used_transforms
     print(f"\nNow using transforms: {used_transforms}")
 
-    all_samples = list(Path(dataset.path).rglob(f"*.{dataset.dataset_params.file_extension}"))
+    all_samples = list(Path(dataset.path).rglob(f"*.{dataset.dataset_params.file_extension}", recurse_symlinks=True))
     ds = ImageDataset(all_samples, dataset.transforms, dataset.expected_initial_data_range)
     print("\nInstantiated dataset:", ds)
 
@@ -140,7 +140,7 @@ def save_encodings(
         assert (cls_tokens == outputs.last_hidden_state.cpu().numpy()[:, 0, :]).all()
 
         # labels
-        labels = [dataset.dataset_params.key_transform(p.parent.stem) for p in paths]
+        labels = [dataset.dataset_params.key_transform(p.parent.name) for p in paths]
 
         # save each row of data to rows list
         for this_cls_token, this_label, this_path in zip(cls_tokens, labels, paths, strict=True):
@@ -221,7 +221,7 @@ def plot_histograms_continuous_time_preds(
     basename: str,
     y_log_scale: bool = False,
 ):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(18, 18))
 
     # Top: combined histogram
     sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, palette="viridis", multiple="stack", ax=ax1)
@@ -233,7 +233,7 @@ def plot_histograms_continuous_time_preds(
     else:
         ax1.set_ylabel("Count")
 
-    # Bottom: histogram with hue by labels
+    # Middle: histogram with hue by labels
     sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, alpha=0.5, palette="viridis", ax=ax2)
     ax2.set_title("Histogram of continuous time predictions colored by true labels")
     ax2.set_xlabel("Continuous time prediction")
@@ -243,6 +243,22 @@ def plot_histograms_continuous_time_preds(
     else:
         ax2.set_ylabel("Count")
     ax2.get_legend().set_title("True label")
+
+    # Bottom: per-class normalized (density) histogram
+    sns.histplot(
+        x=continuous_time_predictions,
+        hue=labels,
+        bins=100,
+        palette="viridis",
+        stat="percent",
+        common_norm=False,  # each class sums to 1
+        ax=ax3,
+        alpha=0.5,
+    )
+    ax3.set_title("Per-class normalized (density) histogram")
+    ax3.set_xlabel("Continuous time prediction")
+    ax3.set_ylabel("Probability (per class)")
+    ax3.get_legend().set_title("True label")
 
     plt.suptitle(f"Continuous time predictions histogram for {basename}", fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
@@ -440,7 +456,7 @@ def plot_3D_embeddings(
         category_orders={"color": [str(label) for label in sorted_unique_labels]},
         labels={"x": xyz_labels[0], "y": xyz_labels[1], "z": xyz_labels[2], "color": "Label"},
         title=title,
-        opacity=0.4,
+        opacity=0.5,
     )
     fig.update_traces(marker=dict(size=2))
     # Enforce 1:1:1 aspect ratio
@@ -659,10 +675,10 @@ if __name__ == "__main__":
         "Base save dir": base_save_dir,
         "Run save path": this_run_save_path,
     }
-    label_width = max(len(param) for param in params)
+    label_width = max(len(param) for param in params) + 1  # ":"
     for param, value in params.items():
         label_str = f"{param}:"
-        dots = "_" * (label_width - len(label_str)) + ""
+        dots = "_" * (label_width - len(label_str))
         print(f"    {label_str}{dots} {value}")
     print()
     inpt = input("=> Continue? (y/[]) ")
@@ -706,9 +722,10 @@ if __name__ == "__main__":
 
     # Process each dataset iteratively
     for ds in datasets:
-        print(f"\n{'#' * 60}")
+        print()
+        print("#" * 60)
         print(f"Processing dataset: {ds.name}")
-        print(f"\n{'#' * 60}")
+        print("#" * 60)
 
         this_run_save_path_this_ds = this_run_save_path / ds.name
         this_run_save_path_this_ds.mkdir(parents=True, exist_ok=True)
