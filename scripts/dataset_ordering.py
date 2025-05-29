@@ -461,6 +461,15 @@ def plot_3D_embeddings(
     fig.update_traces(marker=dict(size=2))
     # Enforce 1:1:1 aspect ratio
     fig.update_scenes(aspectmode="cube")
+    # Set default view axes limits neglecting the spline
+    x_min, x_max = shuffled_projector_embeddings[:, 0].min(), shuffled_projector_embeddings[:, 0].max()
+    y_min, y_max = shuffled_projector_embeddings[:, 1].min(), shuffled_projector_embeddings[:, 1].max()
+    z_min, z_max = shuffled_projector_embeddings[:, 2].min(), shuffled_projector_embeddings[:, 2].max()
+    fig.update_scenes(
+        xaxis=dict(range=[x_min, x_max]),
+        yaxis=dict(range=[y_min, y_max]),
+        zaxis=dict(range=[z_min, z_max]),
+    )
 
     # 2. Add time centroids if projector is LDA
     if isinstance(projector, LinearDiscriminantAnalysis):
@@ -471,7 +480,7 @@ def plot_3D_embeddings(
                 y=centroids_lda_embeddings[:, 1],
                 z=centroids_lda_embeddings[:, 2],
                 mode="markers",
-                marker=dict(symbol="cross", size=5, color="darkgoldenrod"),
+                marker=dict(symbol="cross", size=7, color="darkgoldenrod"),
                 name="centroids",
             )
         )
@@ -929,7 +938,11 @@ if __name__ == "__main__":
         ### From pure proba (bad)
         print("\n-> from pure probabilities")
         proba = lda.predict_proba(cls_tokens)
-        continuous_time_predictions = proba @ lda.classes_
+        lda_class_times = np.array(  # we just do this mapping manually to ensure the order is correct
+            [sorted_unique_label_times[sorted_unique_labels.index(str(cls))] for cls in lda.classes_], dtype=np.float32
+        )
+        print(f"Derived LDA class times: {lda_class_times} from LDA classes: {lda.classes_}")
+        continuous_time_predictions = proba @ lda_class_times
         print(
             f"Computed continuous time predictions from LDA probabilities, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
@@ -939,10 +952,10 @@ if __name__ == "__main__":
         plot_boxplots_continuous_time_preds(this_run_save_path_this_ds, labels, continuous_time_predictions, "proba")
 
         ### From decision function
-        print("\n-> from decision function")
         # ie signed distance to the hyperplane
+        print("\n-> from decision function")
         scores = lda.decision_function(cls_tokens)
-        continuous_time_predictions = scores @ lda.classes_
+        continuous_time_predictions = scores @ lda_class_times
         print(
             f"Computed continuous time predictions from LDA decision function, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
