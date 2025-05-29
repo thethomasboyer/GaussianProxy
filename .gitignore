@@ -33,3 +33,4 @@ notebooks/tmp_downloaded_eval_values
 *.apng
 
 ordering_datasets
+notebooks/ordering_dataset_tests
