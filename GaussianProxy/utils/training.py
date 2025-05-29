@@ -448,7 +448,7 @@ class TimeDiffusion:
             batch_paths: list[Path] = dataframe.iloc[closest_idx_in_df]["file_path"].to_list()
 
             # load the batch
-            batch = loader.get_items_by_name(batch_paths)
+            batch = loader.get_items_by_name(batch_paths)  # TODO: very slow, should be fetched in advance / in parallel
 
             # now concatenate tensors and manually move to device
             # since training dataloaders are not prepared

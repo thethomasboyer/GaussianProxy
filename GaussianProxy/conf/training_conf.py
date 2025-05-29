@@ -329,14 +329,17 @@ class Config:
 
     def __post_init__(self):
         # Checks
-        for eval_strat in self.evaluation.strategies:
-            if isinstance(eval_strat, MetricsComputation):
-                if self.dataset.selected_dists is not None:
-                    if not set(eval_strat.selected_times).issubset(set(self.dataset.selected_dists)):
-                        raise ValueError(
-                            f"MetricsComputation selected_times {eval_strat.selected_times} not in dataset"
+        if not isinstance(self.dataset, DataSet):
+            warn(f"Cannot check config because dataset is not instantiated yet (is {type(self.dataset)})")
+        else:
+            for eval_strat in self.evaluation.strategies:
+                if isinstance(eval_strat, MetricsComputation):
+                    if self.dataset.selected_dists is not None:
+                        if not set(eval_strat.selected_times).issubset(set(self.dataset.selected_dists)):
+                            raise ValueError(
+                                f"MetricsComputation selected_times {eval_strat.selected_times} not in dataset"
+                            )
+                    else:
+                        warn(
+                            f"Cannot check if MetricsComputation's selected_times {eval_strat.selected_times} are in dataset {self.dataset.name} because no selected_dists were provided"
                         )
-                else:
-                    warn(
-                        f"Cannot check if MetricsComputation's selected_times {eval_strat.selected_times} are in dataset {self.dataset.name} because no selected_dists were provided"
-                    )
