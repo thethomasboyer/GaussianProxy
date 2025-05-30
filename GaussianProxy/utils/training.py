@@ -18,8 +18,6 @@ from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
-from hydra.utils import instantiate
-from pandas import DataFrame
 from PIL import Image
 from torch import IntTensor, Tensor
 from torch.optim.lr_scheduler import LRScheduler
@@ -39,7 +37,7 @@ from GaussianProxy.conf.training_conf import (
     MetricsComputation,
     SimpleGeneration,
 )
-from GaussianProxy.utils.data import BaseDataset, TimeKey
+from GaussianProxy.utils.data import BaseContinuousTimeDatasetReturnValue, BaseDataset, TimeKey
 from GaussianProxy.utils.misc import (
     StateLogger,
     get_evenly_spaced_timesteps,
@@ -224,7 +222,7 @@ class TimeDiffusion:
         this_run_folder: Path,
         resuming_args: ResumingArgs | None = None,
         profile: bool = False,
-        fully_ordered_data: DataFrame | None = None,
+        fully_ordered_dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue] | None = None,
     ):
         """
         Global high-level fitting method.
@@ -292,10 +290,10 @@ class TimeDiffusion:
         if self.accelerator.is_main_process:
             batches_pbar.refresh()
         # loop through training batches
-        for time, batch in self._yield_data_batches(
+        for time_or_times, batch in self._yield_data_batches(
             train_timestep_dataloaders,
             self.cfg.training.nb_time_samplings - init_count,
-            fully_ordered_data,
+            fully_ordered_dataloader,
         ):
             ### First check for checkpointing flag file (written by the launcher when timeing out)
             if Path(chckpt_save_path, "checkpointing_flag.txt").exists():
@@ -331,7 +329,7 @@ class TimeDiffusion:
 
             ### Then train for one gradient step
             # gradient step here
-            self._fit_one_batch(batch, time)
+            self._fit_one_batch(batch, time_or_times)
             # take one profiler step
             if profiler is not None:
                 profiler.step()
@@ -413,11 +411,11 @@ class TimeDiffusion:
         self,
         dataloaders: dict[float, DataLoader],
         nb_time_samplings: int,
-        fully_ordered_data: DataFrame | None,
+        fully_ordered_dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue] | None,
     ):
         if self.cfg.dataset.fully_ordered:
-            assert fully_ordered_data is not None, "Expecting fully_ordered_data to be set"
-            return self._yield_data_batches_fully_ordered(fully_ordered_data, nb_time_samplings)
+            assert fully_ordered_dataloader is not None, "Expecting fully_ordered_dataloader to be set"
+            return self._yield_data_batches_fully_ordered(fully_ordered_dataloader, nb_time_samplings)
         else:
             return self._yield_data_batches_discrete_timestamps(dataloaders, nb_time_samplings)
 
@@ -425,42 +423,36 @@ class TimeDiffusion:
     @log_state(state_logger)
     def _yield_data_batches_fully_ordered(
         self,
-        dataframe: DataFrame,
+        dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue],
         nb_time_samplings: int,
-    ) -> Generator[tuple[float, Tensor], None, None]:
-        # Instanciate a fake dataset for now to reuse some logic
-        if type(self.cfg.dataset.transforms) is not Compose:
-            transforms: Compose = instantiate(self.cfg.dataset.transforms)
-        else:
-            transforms = self.cfg.dataset.transforms
-        self.logger.info(f"Using train transforms {transforms}")
-        loader = self.dataset_params.dataset_class(
-            [Path("path", "to", "placeholder")], transforms=transforms
-        )  # placeholder to avoid errors
+    ) -> Generator[tuple[Tensor, Tensor], None, None]:
+        dl_iterator = iter(dataloader)
 
         # Iterate nb_time_samplings times
         for _ in range(nb_time_samplings):
-            # sample a time between 0 and 1
-            t = torch.rand(1).item()
+            # sample batch_size samples randomly
+            batch: dict  # from the collate_fn : dict with "times" and "images" tensors
+            try:
+                batch = next(dl_iterator)
+            except StopIteration:
+                self.logger.debug(
+                    f"Reforming dataloader iterator on process {self.accelerator.process_index}",
+                    main_process_only=False,
+                )
+                dl_iterator = iter(dataloader)
+                batch = next(dl_iterator)
 
-            # get the train_batch_size closest samples to t as paths
-            closest_idx_in_df = dataframe["time"].sub(t).abs().argsort()[: self.cfg.training.train_batch_size]
-            batch_paths: list[Path] = dataframe.iloc[closest_idx_in_df]["file_path"].to_list()
+            # nothing to be done here since training dataloaders are prepared by accelerator
+            times: Tensor = batch["times"]  # pyright: ignore[reportAttributeAccessIssue]
+            images: Tensor = batch["images"]  # pyright: ignore[reportAttributeAccessIssue]
 
-            # load the batch
-            batch = loader.get_items_by_name(batch_paths)  # TODO: very slow, should be fetched in advance / in parallel
-
-            # now concatenate tensors and manually move to device
-            # since training dataloaders are not prepared
-            batch = torch.stack(batch).to(self.accelerator.device)
-
-            # check shape and append
-            assert batch.shape == (
+            # check shape
+            assert images.shape == (
                 self.cfg.training.train_batch_size,
                 *self.data_shape,
-            ), f"Expecting sample shape {(self.cfg.training.train_batch_size, *self.data_shape)}, got {batch.shape}"
+            ), f"Expecting sample shape {(self.cfg.training.train_batch_size, *self.data_shape)}, got {images.shape}"
 
-            yield t, batch
+            yield times, images
 
     @torch.no_grad()
     @log_state(state_logger)
@@ -563,7 +555,7 @@ class TimeDiffusion:
     def _fit_one_batch(
         self,
         batch: Tensor,
-        time: float,
+        time: float | Tensor,
     ):
         """
         Perform one training step on one batch at one timestep.
@@ -594,7 +586,10 @@ class TimeDiffusion:
         noisy_batch = self.dynamic.add_noise(batch, noise, diff_timesteps)  # pyright: ignore[reportArgumentType]
 
         # Encode time
-        video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
+        if isinstance(time, float):
+            video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
+        else:
+            video_time_codes = self.video_time_encoding.forward(time)
 
         # Get model predictions
         pred = self._net_pred(noisy_batch, diff_timesteps, video_time_codes)

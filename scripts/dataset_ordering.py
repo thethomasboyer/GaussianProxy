@@ -6,8 +6,8 @@ from __future__ import annotations
 import random
 import sys
 from pathlib import Path
-from typing import Literal
 
+import attrs
 from rich.traceback import install
 
 sys.path.append(".")
@@ -167,14 +167,19 @@ def save_encodings(
 def plot_2D_embeddings(
     unique_labels: list[str],
     labels: np.ndarray,
-    embeddings: np.ndarray,
-    model_name: str,
+    projector: PCA | LinearDiscriminantAnalysis | umap.UMAP,
+    projector_embeddings: np.ndarray,
+    encoding_scheme: str,
     dataset: DataSet,
     rng: Generator,
     viz_name: str,
     base_save_path: Path,
     subtitle: str | None = None,
     xy_labels: tuple[str, str] | None = None,
+    spline_values: np.ndarray | None = None,
+    projection_pairs: tuple[np.ndarray, np.ndarray] | None = None,
+    centroids_in_base_embedding_space: np.ndarray | None = None,
+    projection_type: Literal["base embedding space", "LDA embedding space"] = "base embedding space",
 ):
     plt.figure(figsize=(10, 10))
     # Use a sequential color palette with as many colors as unique labels
@@ -184,21 +189,16 @@ def plot_2D_embeddings(
     # Make the plot order random
     indices = np.arange(len(labels))
     rng.shuffle(indices)
-    shuffled_embeddings = embeddings[indices]
+    shuffled_embeddings = projector_embeddings[indices]
     shuffled_labels = [labels[i] for i in indices]
     shuffled_colors = [label_to_color[str(label)] for label in shuffled_labels]
 
     plt.scatter(shuffled_embeddings[:, 0], shuffled_embeddings[:, 1], c=shuffled_colors, s=10, alpha=0.5)
-    plt.legend(
-        handles=[
-            Line2D(
-                [0], [0], marker="o", color="w", markerfacecolor=label_to_color[label], label=str(label), markersize=8
-            )
-            for label in unique_labels
-        ]
-    )
+    xlim = plt.gca().get_xlim()
+    ylim = plt.gca().get_ylim()
+
     plt.gca().set_aspect("equal", "datalim")
-    plt.suptitle(f"{viz_name} projection of CLS tokens of {model_name} on {dataset.name} dataset")
+    plt.suptitle(f"{viz_name.split('_')[0]} projection of CLS tokens of {encoding_scheme} on {dataset.name} dataset")
     if subtitle is not None:
         plt.title(subtitle)
     if xy_labels is not None:
@@ -207,6 +207,103 @@ def plot_2D_embeddings(
     else:
         plt.xlabel(f"{viz_name} 1")
         plt.ylabel(f"{viz_name} 2")
+
+    # 2. Plot spline values
+    if spline_values is not None:
+        if projection_type == "base embedding space":
+            spline_projector_emb: np.ndarray = projector.transform(spline_values)  # pyright: ignore[reportAssignmentType]
+            plt.plot(
+                spline_projector_emb[:, 0],
+                spline_projector_emb[:, 1],
+                color="red",
+                linewidth=1.5,
+                label="centroid-spline",
+            )
+        elif projection_type == "LDA embedding space" and isinstance(projector, LinearDiscriminantAnalysis):
+            plt.plot(
+                spline_values[:, 0],
+                spline_values[:, 1],
+                color="red",
+                linewidth=1.5,
+                label="centroid-spline",
+            )
+        else:
+            print(f"Not plotting spline values for {projection_type} projection type with {type(projector)} projector")
+
+    # 3. Plot some projections on spline
+    if projection_pairs is not None:
+        assert len(projection_pairs) == 2, (
+            f"Expected projection_pairs to have shape (2, n_points, embedding_dim), got {projection_pairs.shape}"
+        )
+        source_coord, projected_coord = projection_pairs[0], projection_pairs[1]
+        assert source_coord.shape == projected_coord.shape, (
+            f"Expected source and projected coordinates to have the same shape, got {source_coord.shape} and {projected_coord.shape}"
+        )
+        if projection_type == "base embedding space":
+            source_coord_projector_emb: np.ndarray = projector.transform(source_coord)  # pyright: ignore[reportAssignmentType]
+            projected_time_coord_projector_emb: np.ndarray = projector.transform(projected_coord)  # pyright: ignore[reportAssignmentType]
+            for idx in range(len(source_coord)):
+                plt.plot(
+                    [source_coord_projector_emb[idx, 0], projected_time_coord_projector_emb[idx, 0]],
+                    [source_coord_projector_emb[idx, 1], projected_time_coord_projector_emb[idx, 1]],
+                    color="gray",
+                    linewidth=1,
+                    label="Projection Line" if idx == 0 else None,
+                )
+        elif projection_type == "LDA embedding space" and isinstance(projector, LinearDiscriminantAnalysis):
+            for idx in range(len(source_coord)):
+                plt.plot(
+                    [source_coord[idx, 0], projected_coord[idx, 0]],
+                    [source_coord[idx, 1], projected_coord[idx, 1]],
+                    color="gray",
+                    linewidth=1,
+                    label="Projection Line" if idx == 0 else None,
+                )
+        else:
+            print(
+                f"Not plotting projection pairs for {projection_type} projection type with {type(projector)} projector"
+            )
+
+    # 4. Add time centroids
+    if centroids_in_base_embedding_space is not None:
+        centroids_projector_embeddings: np.ndarray = projector.transform(centroids_in_base_embedding_space)  # pyright: ignore[reportAssignmentType]
+        plt.scatter(
+            centroids_projector_embeddings[:, 0],
+            centroids_projector_embeddings[:, 1],
+            marker="*",
+            s=30,
+            c="gold",
+            edgecolor="black",
+            label="Centroids",
+        )
+
+    # 5. Add legend and restore original axes limits
+    class_handles = [
+        mlines.Line2D([], [], color=label_to_color[label], marker="o", linestyle="None", markersize=8, label=str(label))
+        for label in unique_labels
+    ]
+    # Add handles for spline, projections, centroids if present
+    extra_handles = []
+    if spline_values is not None:
+        extra_handles.append(mlines.Line2D([], [], color="red", linestyle="-", linewidth=2, label="Centroid spline"))
+    if projection_pairs is not None:
+        extra_handles.append(mlines.Line2D([], [], color="gray", linestyle="-", linewidth=1.5, label="Projection Line"))
+    if centroids_in_base_embedding_space is not None:
+        extra_handles.append(
+            mlines.Line2D(
+                [],
+                [],
+                color="gold",
+                marker="*",
+                linestyle="None",
+                markersize=10,
+                markeredgecolor="black",
+                label="Centroids",
+            )
+        )
+    plt.legend(handles=class_handles + extra_handles, title="Legend")
+    plt.xlim(xlim)
+    plt.ylim(ylim)
 
     save_path = base_save_path / f"2d_{viz_name.lower()}.png"
     plt.tight_layout()
@@ -219,13 +316,15 @@ def plot_histograms_continuous_time_preds(
     continuous_time_predictions: np.ndarray,
     labels: np.ndarray,
     basename: str,
+    encoding_scheme: str,
+    dataset_name: str,
     y_log_scale: bool = False,
 ):
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(18, 18))
 
     # Top: combined histogram
     sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, palette="viridis", multiple="stack", ax=ax1)
-    ax1.set_title("Histogram of continuous time predictions")
+    ax1.set_title("Stacked histogram of continuous time predictions")
     ax1.set_xlabel("Continuous time prediction")
     if y_log_scale:
         ax1.set_yscale("log")
@@ -235,7 +334,7 @@ def plot_histograms_continuous_time_preds(
 
     # Middle: histogram with hue by labels
     sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, alpha=0.5, palette="viridis", ax=ax2)
-    ax2.set_title("Histogram of continuous time predictions colored by true labels")
+    ax2.set_title("Layered histogram of continuous time predictions")
     ax2.set_xlabel("Continuous time prediction")
     if y_log_scale:
         ax2.set_yscale("log")
@@ -255,12 +354,14 @@ def plot_histograms_continuous_time_preds(
         ax=ax3,
         alpha=0.5,
     )
-    ax3.set_title("Per-class normalized (density) histogram")
+    ax3.set_title("Per-class normalized histogram")
     ax3.set_xlabel("Continuous time prediction")
-    ax3.set_ylabel("Probability (per class)")
+    ax3.set_ylabel("Percentage of samples (per class)")
     ax3.get_legend().set_title("True label")
 
-    plt.suptitle(f"Continuous time predictions histogram for {basename}", fontsize=16)
+    plt.suptitle(
+        f"Continuous time predictions histogram for {basename} with {encoding_scheme} on {dataset_name}", fontsize=16
+    )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     save_path = base_save_path / f"{basename}_continuous_time_predictions_histogram.png"
@@ -420,8 +521,10 @@ def plot_3D_embeddings(
     encoding_scheme: str,
     subtitle: str | None = None,
     xyz_labels: tuple[str, str, str] | None = None,
-    spline_raw_values: np.ndarray | None = None,
+    spline_values: np.ndarray | None = None,
     projection_pairs: tuple[np.ndarray, np.ndarray] | None = None,
+    centroids_in_base_embedding_space: np.ndarray | None = None,
+    projection_type: Literal["base embedding space", "LDA embedding space"] = "base embedding space",
 ):
     """
     Plot 3D embeddings of some projector (e.g. PCA, LDA) with time labels.
@@ -443,7 +546,7 @@ def plot_3D_embeddings(
     if xyz_labels is None:
         xyz_labels = (f"{viz_name} 1", f"{viz_name} 2", f"{viz_name} 3")
 
-    title = f"3D {viz_name} projection of CLS tokens of {encoding_scheme} from {dataset.name}"
+    title = f"3D {viz_name.split('_')[0]} projection of CLS tokens of {encoding_scheme} from {dataset.name}"
     if subtitle is not None:
         title += f"<br><sub>{subtitle}</sub>"
 
@@ -471,14 +574,14 @@ def plot_3D_embeddings(
         zaxis=dict(range=[z_min, z_max]),
     )
 
-    # 2. Add time centroids if projector is LDA
-    if isinstance(projector, LinearDiscriminantAnalysis):
-        centroids_lda_embeddings = projector.transform(projector.means_)  # pyright: ignore[reportArgumentType]
+    # 2. Add time centroids
+    if centroids_in_base_embedding_space is not None:
+        centroids_projector_embeddings: np.ndarray = projector.transform(centroids_in_base_embedding_space)  # pyright: ignore[reportAssignmentType]
         fig.add_trace(
             go.Scatter3d(
-                x=centroids_lda_embeddings[:, 0],
-                y=centroids_lda_embeddings[:, 1],
-                z=centroids_lda_embeddings[:, 2],
+                x=centroids_projector_embeddings[:, 0],
+                y=centroids_projector_embeddings[:, 1],
+                z=centroids_projector_embeddings[:, 2],
                 mode="markers",
                 marker=dict(symbol="cross", size=7, color="darkgoldenrod"),
                 name="centroids",
@@ -486,18 +589,32 @@ def plot_3D_embeddings(
         )
 
     # 3. Plot spline values
-    if spline_raw_values is not None:
-        spline_lda_emb: np.ndarray = projector.transform(spline_raw_values)  # pyright: ignore[reportAssignmentType]
-        fig.add_trace(
-            go.Scatter3d(
-                x=spline_lda_emb[:, 0],
-                y=spline_lda_emb[:, 1],
-                z=spline_lda_emb[:, 2],
-                mode="lines",
-                line=dict(color="red", width=3),
-                name="centroid-spline",
+    if spline_values is not None:
+        if projection_type == "base embedding space":
+            spline_projector_emb: np.ndarray = projector.transform(spline_values)  # pyright: ignore[reportAssignmentType]
+            fig.add_trace(
+                go.Scatter3d(
+                    x=spline_projector_emb[:, 0],
+                    y=spline_projector_emb[:, 1],
+                    z=spline_projector_emb[:, 2],
+                    mode="lines",
+                    line=dict(color="red", width=3),
+                    name="centroid-spline",
+                )
             )
-        )
+        elif projection_type == "LDA embedding space" and isinstance(projector, LinearDiscriminantAnalysis):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=spline_values[:, 0],
+                    y=spline_values[:, 1],
+                    z=spline_values[:, 2],
+                    mode="lines",
+                    line=dict(color="red", width=3),
+                    name="centroid-spline",
+                )
+            )
+        else:
+            print(f"Not plotting spline values for {projection_type} projection type with {type(projector)} projector")
 
     # 4. Plot some projections on spline
     if projection_pairs is not None:
@@ -508,20 +625,39 @@ def plot_3D_embeddings(
         assert source_coord.shape == projected_coord.shape, (
             f"Expected source and projected coordinates to have the same shape, got {source_coord.shape} and {projected_coord.shape}"
         )
-        source_coord_lda_emb: np.ndarray = projector.transform(source_coord)  # pyright: ignore[reportAssignmentType]
-        projected_time_coord_lda_emb: np.ndarray = projector.transform(projected_coord)  # pyright: ignore[reportAssignmentType]
-        for idx in range(len(source_coord)):
-            fig.add_trace(
-                go.Scatter3d(
-                    x=[source_coord_lda_emb[idx, 0], projected_time_coord_lda_emb[idx, 0]],
-                    y=[source_coord_lda_emb[idx, 1], projected_time_coord_lda_emb[idx, 1]],
-                    z=[source_coord_lda_emb[idx, 2], projected_time_coord_lda_emb[idx, 2]],
-                    mode="lines",
-                    line=dict(color="black", width=3),
-                    legendgroup="Projection Lines",
-                    name="Projection Line" if idx == 0 else None,
-                    showlegend=(idx == 0),
+        if projection_type == "base embedding space":
+            source_coord_projector_emb: np.ndarray = projector.transform(source_coord)  # pyright: ignore[reportAssignmentType]
+            projected_time_coord_projector_emb: np.ndarray = projector.transform(projected_coord)  # pyright: ignore[reportAssignmentType]
+            for idx in range(len(source_coord)):
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[source_coord_projector_emb[idx, 0], projected_time_coord_projector_emb[idx, 0]],
+                        y=[source_coord_projector_emb[idx, 1], projected_time_coord_projector_emb[idx, 1]],
+                        z=[source_coord_projector_emb[idx, 2], projected_time_coord_projector_emb[idx, 2]],
+                        mode="lines",
+                        line=dict(color="gray", width=2),
+                        legendgroup="Projection Lines",
+                        name="Projection Line" if idx == 0 else None,
+                        showlegend=(idx == 0),
+                    )
                 )
+        elif projection_type == "LDA embedding space" and isinstance(projector, LinearDiscriminantAnalysis):
+            for idx in range(len(source_coord)):
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=[source_coord[idx, 0], projected_coord[idx, 0]],
+                        y=[source_coord[idx, 1], projected_coord[idx, 1]],
+                        z=[source_coord[idx, 2], projected_coord[idx, 2]],
+                        mode="lines",
+                        line=dict(color="gray", width=2),
+                        legendgroup="Projection Lines",
+                        name="Projection Line" if idx == 0 else None,
+                        showlegend=(idx == 0),
+                    )
+                )
+        else:
+            print(
+                f"Not plotting projection pairs for {projection_type} projection type with {type(projector)} projector"
             )
 
     # 5. Save and return
@@ -530,8 +666,8 @@ def plot_3D_embeddings(
     print(f"Saved interactive 3D plot to {save_path}")
 
     png_save_path = save_path.with_suffix(".png")
-    fig.update_layout(width=1400, height=1000)
-    fig.write_image(png_save_path, scale=4)
+    fig.update_layout(width=2800, height=2000)
+    fig.write_image(png_save_path, scale=2)
     print(f"Saved 3D plot to {png_save_path}")
 
 
@@ -568,6 +704,7 @@ def plot_histograms_distances_to_true_labels(
     basename: str,
     base_save_path: Path,
     labels: np.ndarray,
+    viz_name: str,
 ):
     dists_to_true_label: list[float] = []
     nb_changes = 0
@@ -628,10 +765,266 @@ def plot_histograms_distances_to_true_labels(
     plt.suptitle(f"Distances to true label histograms for {basename}", fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
-    save_path = base_save_path / f"{basename}_distances_to_true_labels_histogram.png"
+    save_path = base_save_path / f"{basename}_{viz_name}_distances_to_true_labels_histogram.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"Saved histogram of distances to true labels to {save_path}")
+
+
+def fit_spline_project_time_plots(
+    projection_type: Literal["base embedding space", "LDA embedding space"],
+    centroids_in_base_embedding_space: np.ndarray,
+    sorted_unique_labels: list[str],
+    sorted_unique_label_times: list[float],
+    params: Params,
+    cls_tokens: np.ndarray,
+    labels: np.ndarray,
+    ds: DataSet,
+    rng: Generator,
+    umap_2d_reducer: umap.UMAP,
+    umap_2d_embeddings: np.ndarray,
+    umap_3d_reducer: umap.UMAP,
+    umap_3d_embeddings: np.ndarray,
+    pca: PCA,
+    pca_embeddings: np.ndarray,
+    lda: LinearDiscriminantAnalysis,
+    lda_embeddings: np.ndarray,
+    this_run_save_path_this_ds: Path,
+    encoding_scheme: str,
+    pca_explained_variance: np.ndarray,
+    lda_explained_variance: np.ndarray,
+    df: pd.DataFrame,
+):
+    if projection_type == "base embedding space":
+        # Compute spline
+        print(f"Fitting interpolating spline through class centroids of base embedding space of {encoding_scheme}")
+        print(
+            f"Centroids shape: {centroids_in_base_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
+        )
+        spline = make_interp_spline(sorted_unique_label_times, centroids_in_base_embedding_space)
+        # Evaluate spline
+        assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
+        t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
+        print(
+            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
+        )
+        times_to_eval_spline = np.linspace(t_min, t_max, 1000)
+        spline_values = spline(times_to_eval_spline)  # these are in DINO's embedding space
+        # Project base embeddings on spline
+        continuous_time_predictions = project_to_time(cls_tokens, spline, t_min, t_max)
+        print(
+            f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
+        )
+        # Plot spline and projections along with base embeddings
+        random_idx_to_plot_projections = rng.choice(len(cls_tokens), size=50, replace=False)
+        projection_pairs = (
+            cls_tokens[random_idx_to_plot_projections],
+            spline(continuous_time_predictions[random_idx_to_plot_projections]),
+        )
+    elif projection_type == "LDA embedding space":
+        # Compute spline
+        print("Fitting interpolating spline through class centroids of LDA embedding space")
+        centroids_in_lda_embedding_space = lda.transform(centroids_in_base_embedding_space)
+        print(
+            f"Centroids shape: {centroids_in_lda_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
+        )
+        spline = make_interp_spline(sorted_unique_label_times, centroids_in_lda_embedding_space)
+        # Evaluate spline
+        assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
+        t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
+        print(
+            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
+        )
+        times_to_eval_spline = np.linspace(t_min, t_max, 1000)
+        spline_values = spline(times_to_eval_spline)  # these are in LDA's embedding space
+        # Project lda embeddings on spline
+        continuous_time_predictions = project_to_time(lda_embeddings, spline, t_min, t_max)
+        print(
+            f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
+        )
+        # Plot spline and projections along with base embeddings
+        random_idx_to_plot_projections = rng.choice(len(cls_tokens), size=50, replace=False)
+        projection_pairs = (
+            lda.transform(cls_tokens[random_idx_to_plot_projections]),
+            spline(continuous_time_predictions[random_idx_to_plot_projections]),
+        )
+    else:
+        raise ValueError(
+            f"Unknown projection type: {projection_type}. Expected 'base embedding space' or 'LDA embedding space'."
+        )
+
+    vizes_name_suffix = f"{projection_type.replace(' ', '_')}_spline_projection"
+
+    # plot 2D & 3D embeddings with spline and projections for LDA, UMAP and PCA viz
+    if projection_type == "base embedding space":
+        plot_2D_embeddings(
+            sorted_unique_labels,
+            labels,
+            umap_2d_reducer,
+            umap_2d_embeddings,
+            params.model_name,
+            ds,
+            rng,
+            f"UMAP_{vizes_name_suffix}",
+            this_run_save_path_this_ds,
+            f"Seed={params.seed} | params.frac_range_delta={params.frac_range_delta}",
+            ("UMAP 1", "UMAP 2"),
+            spline_values,
+            projection_pairs,
+            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            projection_type,
+        )
+        plot_2D_embeddings(
+            sorted_unique_labels,
+            labels,
+            pca,
+            pca_embeddings,
+            params.model_name,
+            ds,
+            rng,
+            f"PCA_{vizes_name_suffix}",
+            this_run_save_path_this_ds,
+            f"Total explained variance: {np.sum(pca_explained_variance[:2]) * 100:.1f}%",
+            (
+                f"PCA 1 ({pca_explained_variance[0] * 100:.1f}% of explained variance)",
+                f"PCA 2 ({pca_explained_variance[1] * 100:.1f}% of explained variance)",
+            ),
+            spline_values,
+            projection_pairs,
+            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            projection_type,
+        )
+    plot_2D_embeddings(
+        sorted_unique_labels,
+        labels,
+        lda,
+        lda_embeddings,
+        params.model_name,
+        ds,
+        rng,
+        f"LDA_{vizes_name_suffix}",
+        this_run_save_path_this_ds,
+        f"Total explained variance: {np.sum(lda_explained_variance[:2]) * 100:.1f}%",
+        (
+            f"LDA 1 ({lda_explained_variance[0] * 100:.1f}% of explained variance)",
+            f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
+        ),
+        spline_values,
+        projection_pairs,
+        centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+        projection_type,
+    )
+    if projection_type == "base embedding space":
+        plot_3D_embeddings(
+            labels,
+            sorted_unique_labels,
+            umap_3d_embeddings,
+            umap_3d_reducer,
+            rng,
+            this_run_save_path_this_ds,
+            ds,
+            f"UMAP_{vizes_name_suffix}",
+            encoding_scheme,
+            f"Seed={params.seed} | params.frac_range_delta={params.frac_range_delta}",
+            ("UMAP 1", "UMAP 2", "UMAP 3"),
+            spline_values,
+            projection_pairs,
+            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            projection_type,
+        )
+        plot_3D_embeddings(
+            labels,
+            sorted_unique_labels,
+            pca_embeddings,
+            pca,
+            rng,
+            this_run_save_path_this_ds,
+            ds,
+            f"PCA_{vizes_name_suffix}",
+            encoding_scheme,
+            f"Total explained variance: {np.sum(pca_explained_variance[:3]) * 100:.1f}% | seed={params.seed} | params.frac_range_delta={params.frac_range_delta}",
+            (
+                f"PCA 1 ({pca_explained_variance[0] * 100:.1f}% of explained variance)",
+                f"PCA 2 ({pca_explained_variance[1] * 100:.1f}% of explained variance)",
+                f"PCA 3 ({pca_explained_variance[2] * 100:.1f}% of explained variance)",
+            ),
+            spline_values,
+            projection_pairs,
+            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            projection_type,
+        )
+    plot_3D_embeddings(
+        labels,
+        sorted_unique_labels,
+        lda_embeddings,
+        lda,
+        rng,
+        this_run_save_path_this_ds,
+        ds,
+        f"LDA_{vizes_name_suffix}",
+        encoding_scheme,
+        f"Total explained variance: {np.sum(lda_explained_variance[:3]) * 100:.1f}% | params.frac_range_delta={params.frac_range_delta}",
+        (
+            f"LDA 1 ({lda_explained_variance[0] * 100:.1f}% of explained variance)",
+            f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
+            f"LDA 3 ({lda_explained_variance[2] * 100:.1f}% of explained variance)",
+        ),
+        spline_values,
+        projection_pairs,
+        centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+        projection_type,
+    )
+
+    # Plot histograms and boxplots of continuous time predictions
+    plot_histograms_continuous_time_preds(
+        this_run_save_path_this_ds,
+        continuous_time_predictions,
+        labels,
+        vizes_name_suffix,
+        encoding_scheme,
+        ds.name,
+    )
+    plot_boxplots_continuous_time_preds(
+        this_run_save_path_this_ds, labels, continuous_time_predictions, vizes_name_suffix, len(df) <= 10_000
+    )
+
+    # plot distances to true labels
+    plot_histograms_distances_to_true_labels(
+        sorted_unique_label_times,
+        sorted_unique_labels,
+        continuous_time_predictions,
+        ds.name,
+        this_run_save_path_this_ds,
+        labels,
+        vizes_name_suffix,
+    )
+
+    # min-max-normalize to [0,1] # TODO: 5-95 percentile?
+    continuous_time_predictions -= continuous_time_predictions.min()
+    continuous_time_predictions /= continuous_time_predictions.max()
+    plot_histograms_continuous_time_preds(
+        this_run_save_path_this_ds,
+        continuous_time_predictions,
+        labels,
+        f"{vizes_name_suffix}_min_max_norm",
+        encoding_scheme,
+        ds.name,
+    )
+
+    return continuous_time_predictions
+
+
+@attrs.define
+class Params:
+    datasets: list[DataSet]
+    device: str
+    model_name: str
+    batch_size: int
+    use_model_preprocessor: bool
+    recompute_encodings: bool | Literal["no-overwrite"]
+    save_times: Literal["no-overwrite"] | Literal["overwrite"] | Literal["ask-before-overwrite"] | Literal["no"]
+    seed: int
+    frac_range_delta: float  # fraction of the true time range to use for t_min, t_max parametrization
 
 
 if __name__ == "__main__":
@@ -649,43 +1042,38 @@ if __name__ == "__main__":
     from my_conf.dataset.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds  # noqa: E402
     from my_conf.dataset.NASH_steatosis_inference import dataset as NASH_steatosis_ds  # noqa: E402
 
-    datasets: list[DataSet] = [NASH_steatosis_ds, diabetic_retinopathy_ds, biotine_ds, bbbc021_ds, NASH_fibrosis_ds]
-    device = "cuda:0"
-    model_name = "facebook/dinov2-with-registers-giant"
-    batch_size = 1024
-    use_model_preprocessor = False
-    recompute_encodings: bool | Literal["no-overwrite"] = "no-overwrite"
-    save_times: Literal["no-overwrite"] | Literal["overwrite"] | Literal["ask-before-overwrite"] | Literal["no"] = (
-        "overwrite"
+    # fmt: off
+    params = Params(
+        datasets               = [NASH_steatosis_ds, diabetic_retinopathy_ds, biotine_ds, bbbc021_ds, NASH_fibrosis_ds],
+        device                 = "cuda:0",
+        model_name             = "facebook/dinov2-with-registers-giant",
+        batch_size             = 1024,
+        use_model_preprocessor = False,
+        recompute_encodings    = False,
+        save_times             = "no",
+        seed                   = random.randint(0, 2**32 - 1),
+        frac_range_delta       = 0.3,
     )
-    seed = random.randint(0, 2**32 - 1)
-    frac_range_delta = 0.3  # fraction of the true time range to use for t_min, t_max parametrization
+    # fmt: on
 
     ###################################################################################################################
     ##################################################### Launch ######################################################
     ###################################################################################################################
     base_save_dir = Path("ordering_datasets")
-    encoding_scheme = model_name.replace("/", "_") + (
-        "_model_preproc" if use_model_preprocessor else "_dataset_preproc"
+    encoding_scheme = params.model_name.replace("/", "_") + (
+        "_model_preproc" if params.use_model_preprocessor else "_dataset_preproc"
     )
     this_run_save_path = base_save_dir / encoding_scheme
     this_run_save_path.mkdir(parents=True, exist_ok=True)
     print("\n=> Parameters:")
-    params = {
-        "Device": device,
-        "Model": model_name,
-        "Datasets": [ds.name for ds in datasets],
-        "Batch size": batch_size,
-        "Use model preprocessor": use_model_preprocessor,
-        "Recomputing encodings": recompute_encodings,
-        "Saving times": save_times,
-        "Seed": seed,
-        "Delta used to extend the spline": frac_range_delta,
+    params_print = {
+        "Datasets": [ds.name for ds in params.datasets],
         "Base save dir": base_save_dir,
         "Run save path": this_run_save_path,
+        **{k: v for k, v in attrs.asdict(params).items() if k != "datasets"},
     }
-    label_width = max(len(param) for param in params) + 1  # ":"
-    for param, value in params.items():
+    label_width = max(len(param) for param in params_print) + 1  # ":"
+    for param, value in params_print.items():
         label_str = f"{param}:"
         dots = "_" * (label_width - len(label_str))
         print(f"    {label_str}{dots} {value}")
@@ -698,7 +1086,10 @@ if __name__ == "__main__":
     # ruff: noqa: E402
     print("Loading imports... ", end="", flush=True)
     # Imports
+    from typing import Literal
+
     import matplotlib.gridspec as gridspec
+    import matplotlib.lines as mlines
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
@@ -707,7 +1098,6 @@ if __name__ == "__main__":
     import seaborn as sns
     import torch
     import umap
-    from matplotlib.lines import Line2D
     from numpy.random import Generator
     from PIL import Image
     from scipy.interpolate import BSpline, make_interp_spline
@@ -730,7 +1120,7 @@ if __name__ == "__main__":
     print("done", flush=True)
 
     # Process each dataset iteratively
-    for ds in datasets:
+    for ds in params.datasets:
         print()
         print("#" * 60)
         print(f"Processing dataset: {ds.name}")
@@ -739,13 +1129,13 @@ if __name__ == "__main__":
         this_run_save_path_this_ds = this_run_save_path / ds.name
         this_run_save_path_this_ds.mkdir(parents=True, exist_ok=True)
 
-        # Save seed for reproducibility
+        # Save params.seed for reproducibility
         seed_file_path = this_run_save_path_this_ds / "seed.txt"
         with open(seed_file_path, "w") as f:
-            f.write(str(seed))
-        print(f"Saved seed to {seed_file_path}")
+            f.write(str(params.seed))
+        print(f"Saved params.seed to {seed_file_path}")
         # common rng for this run
-        rng = np.random.default_rng(seed=seed)
+        rng = np.random.default_rng(seed=params.seed)
 
         ###################################################################################################################
         ################################################ Compute encodings ################################################
@@ -753,16 +1143,16 @@ if __name__ == "__main__":
         encodings_filename = f"{encoding_scheme}_encodings.parquet"
         load_existing_encodings = False
         df: pd.DataFrame = pd.DataFrame()  # pylance is idiotic
-        if recompute_encodings is not False:
+        if params.recompute_encodings is not False:
             df_or_None = save_encodings(
-                device,
-                model_name,
+                params.device,
+                params.model_name,
                 ds,
-                use_model_preprocessor,
+                params.use_model_preprocessor,
                 this_run_save_path_this_ds,
                 encodings_filename,
-                batch_size,
-                recompute_encodings,
+                params.batch_size,
+                params.recompute_encodings,
             )
             if df_or_None is None:
                 load_existing_encodings = True
@@ -812,13 +1202,22 @@ if __name__ == "__main__":
         ### UMAP
         print("\n=> UMAP")
         # 2D
-        umap_2d_reducer = umap.UMAP(random_state=seed)
+        umap_2d_reducer = umap.UMAP(random_state=params.seed)
         umap_2d_embeddings: np.ndarray = umap_2d_reducer.fit_transform(cls_tokens)  # pyright: ignore[reportAssignmentType]
         plot_2D_embeddings(
-            sorted_unique_labels, labels, umap_2d_embeddings, model_name, ds, rng, "UMAP", this_run_save_path_this_ds
+            sorted_unique_labels,
+            labels,
+            umap_2d_reducer,
+            umap_2d_embeddings,
+            encoding_scheme,
+            ds,
+            rng,
+            "UMAP",
+            this_run_save_path_this_ds,
+            f"Seed={params.seed}",
         )
         # 3D
-        umap_3d_reducer = umap.UMAP(random_state=seed, n_components=3)
+        umap_3d_reducer = umap.UMAP(random_state=params.seed, n_components=3)
         umap_3d_embeddings: np.ndarray = umap_3d_reducer.fit_transform(cls_tokens)  # pyright: ignore[reportAssignmentType]
         plot_3D_embeddings(
             labels,
@@ -830,20 +1229,21 @@ if __name__ == "__main__":
             ds,
             "UMAP",
             encoding_scheme,
-            f"Seed={seed}",
+            f"Seed={params.seed}",
         )
 
         ### PCA
         print("\n=> PCA")
-        pca = PCA(random_state=seed)
+        pca = PCA(random_state=params.seed)
         pca_embeddings = pca.fit_transform(cls_tokens)
         pca_explained_variance = pca.explained_variance_ratio_
         # 2D
         plot_2D_embeddings(
             sorted_unique_labels,
             labels,
+            pca,
             pca_embeddings,
-            model_name,
+            encoding_scheme,
             ds,
             rng,
             "PCA",
@@ -865,7 +1265,7 @@ if __name__ == "__main__":
             ds,
             "PCA",
             encoding_scheme,
-            f"Seed={seed} | Total explained variance: {np.sum(pca_explained_variance[:3]) * 100:.1f}%",
+            f"Seed={params.seed} | Total explained variance: {np.sum(pca_explained_variance[:3]) * 100:.1f}%",
             (
                 f"PCA 1 ({pca_explained_variance[0] * 100:.1f}% of explained variance)",
                 f"PCA 2 ({pca_explained_variance[1] * 100:.1f}% of explained variance)",
@@ -873,7 +1273,7 @@ if __name__ == "__main__":
             ),
         )
 
-        # LDA
+        ### LDA
         print("\n=> LDA")
         lda = LinearDiscriminantAnalysis()
         lda_embeddings = lda.fit_transform(cls_tokens, labels)
@@ -882,8 +1282,9 @@ if __name__ == "__main__":
         plot_2D_embeddings(
             sorted_unique_labels,
             labels,
+            lda,
             lda_embeddings,
-            model_name,
+            encoding_scheme,
             ds,
             rng,
             "LDA",
@@ -893,6 +1294,7 @@ if __name__ == "__main__":
                 f"LDA 1 ({lda_explained_variance[0] * 100:.1f}% of explained variance)",
                 f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
             ),
+            centroids_in_base_embedding_space=lda.means_,  # pyright: ignore[reportArgumentType]
         )
         # TODO: decision boundaries
         # # 1) take your 3‐dim LDA embedding and slice to 2D
@@ -905,7 +1307,7 @@ if __name__ == "__main__":
         # fig, ax = plt.subplots(figsize=(10, 10))
         # plot_result(lda_viz, X2, y, ax)
         # ax.set_title(
-        #     f"LDA projection of CLS tokens of {model_name} on {ds.name}\n"
+        #     f"LDA projection of CLS tokens of {params.model_name} on {ds.name}\n"
         #     f"Total explained variance: {np.sum(explained_variance[:2]) * 100:.1f}% | decision boundaries based on separatly fitted 2D LDA"
         # )
         # ax.set_xlabel(f"LDA 1 ({explained_variance[0] * 100:.1f}% var)")
@@ -928,6 +1330,7 @@ if __name__ == "__main__":
                 f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
                 f"LDA 3 ({lda_explained_variance[2] * 100:.1f}% of explained variance)",
             ),
+            centroids_in_base_embedding_space=lda.means_,  # pyright: ignore[reportArgumentType]
         )
 
         ###################################################################################################################
@@ -935,11 +1338,12 @@ if __name__ == "__main__":
         ###################################################################################################################
         print("\n=> Deriving continuous time predictions from LDA embeddings")
 
-        ### From pure proba (bad)
+        ### From pure proba
         print("\n-> from pure probabilities")
         proba = lda.predict_proba(cls_tokens)
         lda_class_times = np.array(  # we just do this mapping manually to ensure the order is correct
-            [sorted_unique_label_times[sorted_unique_labels.index(str(cls))] for cls in lda.classes_], dtype=np.float32
+            [sorted_unique_label_times[sorted_unique_labels.index(str(cls))] for cls in lda.classes_],  # pyright: ignore[reportGeneralTypeIssues]
+            dtype=np.float32,
         )
         print(f"Derived LDA class times: {lda_class_times} from LDA classes: {lda.classes_}")
         continuous_time_predictions = proba @ lda_class_times
@@ -947,7 +1351,7 @@ if __name__ == "__main__":
             f"Computed continuous time predictions from LDA probabilities, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         plot_histograms_continuous_time_preds(
-            this_run_save_path_this_ds, continuous_time_predictions, labels, "proba", True
+            this_run_save_path_this_ds, continuous_time_predictions, labels, "proba", encoding_scheme, ds.name, True
         )
         plot_boxplots_continuous_time_preds(this_run_save_path_this_ds, labels, continuous_time_predictions, "proba")
 
@@ -963,109 +1367,64 @@ if __name__ == "__main__":
         continuous_time_predictions /= continuous_time_predictions.max()
         print("Min-max normalized continuous time predictions to [0, 1]")
         plot_histograms_continuous_time_preds(
-            this_run_save_path_this_ds, continuous_time_predictions, labels, "decision_func"
+            this_run_save_path_this_ds, continuous_time_predictions, labels, "decision_func", encoding_scheme, ds.name
         )
         plot_boxplots_continuous_time_preds(
             this_run_save_path_this_ds, labels, continuous_time_predictions, "decision_func", len(df) <= 10_000
         )
 
         ### From projection on spline going through class centroids
-        print("\n-> from projection on spline going through class centroids")
-        print(f"Computing spline through class centroids of shape {lda.means_.shape}")  # pyright: ignore[reportAttributeAccessIssue]
-        # Compute spline
-        # (beware that embeddings must be that of the LDA here!)
-        print(
-            f"Fitting interpolating spline through class centroids of shape {lda.means_.shape} for labels: {sorted_unique_labels} at times {sorted_unique_label_times}"  # pyright: ignore[reportAttributeAccessIssue]
-        )
-        spline = make_interp_spline(sorted_unique_label_times, lda.means_)
-        # Evaluate spline
-        assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
-        t_min, t_max = -frac_range_delta, 1 + frac_range_delta
-        print(
-            f"Using {frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
-        )
-        times_to_eval_spline = np.linspace(t_min, t_max, 1000)
-        spline_values = spline(times_to_eval_spline)  # these are in DINO's embedding space
-        # Project on spline # TODO: try projecting on the spline in the 3D LDA space as it is this space that is structured around time!
-        continuous_time_predictions = project_to_time(cls_tokens, spline, t_min, t_max)
-        print(
-            f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
-        )
-        # plot spline and projections along with base embeddings
-        random_idx_to_plot_projections = rng.choice(len(cls_tokens), size=50, replace=False)
-        projection_pairs = (
-            cls_tokens[random_idx_to_plot_projections],
-            spline(continuous_time_predictions[random_idx_to_plot_projections]),
-        )
-        # plot 3D embeddings with spline and projections for LDA, UMAP and PCA viz
-        plot_3D_embeddings(
-            labels,
+        # of base encoding space (eg DINO's CLS tokens)
+        print("\n-> from projection on spline going through class centroids in base encoding space")
+        continuous_time_predictions = fit_spline_project_time_plots(
+            "base embedding space",
+            lda.means_,  # pyright: ignore[reportArgumentType]
             sorted_unique_labels,
-            lda_embeddings,
-            lda,
-            rng,
-            this_run_save_path_this_ds,
-            ds,
-            "LDA_splines",
-            encoding_scheme,
-            f"Total explained variance: {np.sum(lda_explained_variance[:3]) * 100:.1f}% | frac_range_delta={frac_range_delta}",
-            (
-                f"LDA 1 ({lda_explained_variance[0] * 100:.1f}% of explained variance)",
-                f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
-                f"LDA 3 ({lda_explained_variance[2] * 100:.1f}% of explained variance)",
-            ),
-            spline_values,
-            projection_pairs,
-        )
-        plot_3D_embeddings(
-            labels,
-            sorted_unique_labels,
-            umap_3d_embeddings,
-            umap_3d_reducer,
-            rng,
-            this_run_save_path_this_ds,
-            ds,
-            "UMAP_splines",
-            encoding_scheme,
-            f"Seed={seed} | frac_range_delta={frac_range_delta}",
-            spline_raw_values=spline_values,
-            projection_pairs=projection_pairs,
-        )
-        plot_3D_embeddings(
-            labels,
-            sorted_unique_labels,
-            pca_embeddings,
-            pca,
-            rng,
-            this_run_save_path_this_ds,
-            ds,
-            "PCA_splines",
-            encoding_scheme,
-            f"Seed={seed} | frac_range_delta={frac_range_delta}",
-            spline_raw_values=spline_values,
-            projection_pairs=projection_pairs,
-        )
-        # Plot histograms and boxplots of continuous time predictions
-        plot_histograms_continuous_time_preds(
-            this_run_save_path_this_ds, continuous_time_predictions, labels, "spline_projection"
-        )
-        plot_boxplots_continuous_time_preds(
-            this_run_save_path_this_ds, labels, continuous_time_predictions, "spline_projection", len(df) <= 10_000
-        )
-        # plot distances to true labels
-        plot_histograms_distances_to_true_labels(
             sorted_unique_label_times,
-            sorted_unique_labels,
-            continuous_time_predictions,
-            ds.name,
-            this_run_save_path_this_ds,
+            params,
+            cls_tokens,
             labels,
+            ds,
+            rng,
+            umap_2d_reducer,
+            umap_2d_embeddings,
+            umap_3d_reducer,
+            umap_3d_embeddings,
+            pca,
+            pca_embeddings,
+            lda,
+            lda_embeddings,
+            this_run_save_path_this_ds,
+            encoding_scheme,
+            pca_explained_variance,
+            lda_explained_variance,
+            df,
         )
-        # min-max-normalize to [0,1] # TODO: 5-95 percentile?
-        continuous_time_predictions -= continuous_time_predictions.min()
-        continuous_time_predictions /= continuous_time_predictions.max()
-        plot_histograms_continuous_time_preds(
-            this_run_save_path_this_ds, continuous_time_predictions, labels, "spline_projection_min_max_norm"
+        # of LDA embeddings
+        print("\n-> from projection on spline going through class centroids in LDA encoding space")
+        continuous_time_predictions = fit_spline_project_time_plots(
+            "LDA embedding space",
+            lda.means_,  # pyright: ignore[reportArgumentType]
+            sorted_unique_labels,
+            sorted_unique_label_times,
+            params,
+            cls_tokens,
+            labels,
+            ds,
+            rng,
+            umap_2d_reducer,
+            umap_2d_embeddings,
+            umap_3d_reducer,
+            umap_3d_embeddings,
+            pca,
+            pca_embeddings,
+            lda,
+            lda_embeddings,
+            this_run_save_path_this_ds,
+            encoding_scheme,
+            pca_explained_variance,
+            lda_explained_variance,
+            df,
         )
 
         ### Save new continuous time label
@@ -1080,16 +1439,16 @@ if __name__ == "__main__":
             data.append({"time": sample_continuous_time, "file_path": sample_file_path})
         df = pd.DataFrame(data)
 
-        if save_times != "no":
+        if params.save_times != "no":
             write_times = True
             if new_ds_file_save_path.exists():
-                if save_times == "no-overwrite":
+                if params.save_times == "no-overwrite":
                     print(f"File {new_ds_file_save_path} already exists, skipping saving")
                     write_times = False
-                elif save_times == "overwrite":
+                elif params.save_times == "overwrite":
                     print(f"File {new_ds_file_save_path} already exists, overwriting")
                     write_times = True
-                elif save_times == "ask-before-overwrite":
+                elif params.save_times == "ask-before-overwrite":
                     inpt = input(f"Delete existing file at {new_ds_file_save_path}? (y/n)")
                     if inpt == "y":
                         write_times = True
@@ -1097,7 +1456,7 @@ if __name__ == "__main__":
                         print("Refusing to continue")
                         write_times = False
                 else:
-                    raise ValueError(f"Unknown save_times value: {save_times}")
+                    raise ValueError(f"Unknown params.save_times value: {params.save_times}")
             if write_times:
                 df.to_parquet(new_ds_file_save_path, index=False)
                 print(f"Saved continuous time predictions dataset to {new_ds_file_save_path}")

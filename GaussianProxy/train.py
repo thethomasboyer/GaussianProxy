@@ -183,7 +183,7 @@ def main(cfg: Config) -> None:
     # ---------------------------------- Dataloaders ---------------------------------
     num_workers = cfg.dataloaders.num_workers if cfg.dataloaders.num_workers is not None else accelerator.num_processes
 
-    train_dataloaders, test_dataloaders, dataset_params, fully_ordered_data = setup_dataloaders(
+    train_dataloaders, test_dataloaders, dataset_params, fully_ordered_dataloader = setup_dataloaders(
         cfg, accelerator, num_workers, logger, this_run_folder, chckpt_save_path, cfg.debug
     )
 
@@ -319,7 +319,7 @@ def main(cfg: Config) -> None:
         this_run_folder,
         resuming_args,
         cfg.profile,
-        fully_ordered_data,
+        fully_ordered_dataloader,
     )
 
     # ----------------------------------- The End  -----------------------------------

@@ -34,3 +34,4 @@ notebooks/tmp_downloaded_eval_values
 
 ordering_datasets
 notebooks/ordering_dataset_tests
+.github/copilot-instructions.md

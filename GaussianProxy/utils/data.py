@@ -14,11 +14,12 @@ import torchvision.transforms.functional as tf
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 from accelerate.utils import broadcast
+from attrs import define
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from PIL import Image
 from torch import Tensor, dtype
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision.transforms.transforms import (
     Compose,
     RandomHorizontalFlip,
@@ -109,6 +110,98 @@ class BaseDataset(Dataset[Tensor]):
         return f"{name}: {len(self)} samples"
 
 
+@define
+class BaseContinuousTimeDatasetReturnValue:
+    time: float
+    tensor: Tensor
+
+
+class BaseContinuousTimeDataset(Dataset[BaseContinuousTimeDatasetReturnValue]):
+    """Just a dataset for continuous time data."""
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        transforms: Callable,
+        expected_initial_data_range: tuple[float, float] | None = None,
+        expected_dtype: dtype | None = None,  # TODO: this is never set?!?
+    ) -> None:
+        """
+        - base_path (`Path`): the path to the dataset directory
+        """
+        super().__init__()
+        self.df = df
+        self.transforms = transforms
+        self.expected_initial_data_range = expected_initial_data_range
+        self.expected_dtype = expected_dtype
+        # check that we indeed have sample
+        # (# we use __str__ in the error message, so any attribute assigned below this line cannot be used by __str__)
+        assert len(df) > 0, f"Got 0 samples in {self}"
+        assert df.columns.isin(["time", "file_path"]).all(), (
+            f"Expected columns ['time', 'file_path'], got {df.columns.tolist()}"
+        )
+        # common base path for the dataset
+        # Create train dataloader
+        base_path = df.iloc[0].file_path.parents[1]
+        assert all(  # TODO: this check might take a while...
+            (this_sample_base_path := f.parents[1]) == base_path for f in df.file_path
+        ), (
+            f"All files should be under the same directory, got base_path={base_path} and sample_base_path={this_sample_base_path}"
+        )
+        self.base_path = base_path
+
+    def _raw_image_loader(self, path: str | Path) -> Tensor:
+        raise NotImplementedError("Subclasses must implement this method")
+
+    def _load_to_pt_and_transform(self, path: str | Path) -> Tensor:
+        # load data
+        t = self._raw_image_loader(path)
+        # checks # TODO: check if this takes too much time
+        if self.expected_initial_data_range is not None and (
+            t.min() < self.expected_initial_data_range[0] or t.max() > self.expected_initial_data_range[1]
+        ):
+            raise ValueError(
+                f"Expected initial data range {self.expected_initial_data_range} but got [{t.min()}, {t.max()}] at {path}"
+            )
+        if self.expected_dtype is not None and t.dtype != self.expected_dtype:
+            raise ValueError(f"Expected dtype {self.expected_dtype} but got {t.dtype} at {path}")
+        # transform
+        t = self.transforms(t)
+        return t
+
+    def __getitem__(self, index: int) -> BaseContinuousTimeDatasetReturnValue:
+        elem = self.df.iloc[index]
+        time = elem.time
+        path = elem.file_path
+        sample = self._load_to_pt_and_transform(path)
+        return BaseContinuousTimeDatasetReturnValue(time=time, tensor=sample)
+
+    def __getitems__(self, indexes: list[int]) -> list[BaseContinuousTimeDatasetReturnValue]:
+        times = self.df.iloc[indexes].time.tolist()
+        paths = self.df.iloc[indexes].file_path.tolist()
+        samples = [self._load_to_pt_and_transform(p) for p in paths]
+        items = [
+            BaseContinuousTimeDatasetReturnValue(time=time, tensor=sample)
+            for time, sample in zip(times, samples, strict=True)
+        ]
+        return items
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __str__(self) -> str:
+        head = self.__class__.__name__
+        body_lines = [f"Number of datapoints: {len(self)}"]
+        if self.expected_initial_data_range is not None:
+            body_lines.append(f"Expected initial data range: {self.expected_initial_data_range}")
+        # Indent each line in the body
+        indented_body_lines = [" " * 4 + line for line in body_lines]
+        return "\n".join([head] + indented_body_lines)
+
+    def short_str(self, name: str | int) -> str:
+        return f"{name}: {len(self)} samples"
+
+
 class NumpyDataset(BaseDataset):
     """Just a dataset loading NumPy arrays."""
 
@@ -134,6 +227,13 @@ class TIFFDataset(BaseDataset):
         return torch.from_numpy(array).permute(2, 0, 1)
 
 
+class ContinuousTimeImageDataset(BaseContinuousTimeDataset):
+    """Just a dataset loading images, and moving the channel dim last."""
+
+    def _raw_image_loader(self, path: str | Path) -> Tensor:
+        return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
+
+
 class RandomRotationSquareSymmetry(Transform):
     """Randomly rotate the input by a multiple of π/2."""
 
@@ -156,7 +256,12 @@ def setup_dataloaders(
     this_run_folder: Path,
     chckpt_save_path: Path,
     debug: bool = False,
-) -> tuple[dict[TimeKey, DataLoader], dict[TimeKey, DataLoader], DatasetParams, pd.DataFrame | None]:
+) -> tuple[
+    dict[TimeKey, DataLoader],
+    dict[TimeKey, DataLoader],
+    DatasetParams,
+    DataLoader[BaseContinuousTimeDatasetReturnValue] | None,
+]:
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
     Each dataloader is a `torch.utils.data.DataLoader` over a custom `Dataset`.
@@ -294,11 +399,40 @@ def setup_dataloaders(
     )
 
     if cfg.dataset.fully_ordered:
-        fully_ordered_data = _dataset_builder_fully_ordered(cfg, accelerator, logger, this_run_folder, debug)
+        fully_ordered_dataloader = _dataset_builder_fully_ordered(
+            cfg, accelerator, logger, this_run_folder, ds_params, num_workers, debug
+        )
     else:
-        fully_ordered_data = None
+        fully_ordered_dataloader = None
 
-    return train_dataloaders_dict, test_dataloaders_dict, dataset_params, fully_ordered_data
+    return train_dataloaders_dict, test_dataloaders_dict, dataset_params, fully_ordered_dataloader
+
+
+def compute_continuous_time_weights(logger: MultiProcessAdapter, times: np.ndarray, n_bins: int = 100) -> list[float]:
+    """Computes weights for continuous time data based on the distribution of times."""
+    assert times.ndim == 1, f"Expected 1D array of times, got {times.ndim}D"
+    # Compute histogram of times
+    counts, bin_edges = np.histogram(times, bins=n_bins)
+    logger.info(f"Computed histogram with {n_bins} bins, counts: {counts}, bin edges: {bin_edges}")
+    # Put times inbetween bins
+    # such that returned index i satisfies bins[i-1] <= x < bins[i]
+    # exclude last bin edge so that samples at time=1 are in the [t=0.99, t=1.0) bin
+    #                     ↓                                                    ↑
+    # (well [t=0.99, t=1.0] now...)
+    bin_indices = np.digitize(times, bin_edges[:-1])
+    # now 1 <= bin_indices <= n_bins
+    assert np.all(bin_indices >= 1) and np.all(bin_indices <= n_bins), (
+        f"Expected bin indices in [1, {n_bins}], got min={bin_indices.min()}, max={bin_indices.max()}"
+    )
+    # normalize counts by weights
+    counts = np.maximum(counts, 1)  # avoid division by zero
+    weights = [float(1.0 / counts[idx - 1]) for idx in bin_indices]
+    # Plot the "weighted counts"
+    weighted_counts = np.zeros(n_bins)
+    for idx, w in zip(bin_indices, weights, strict=True):
+        weighted_counts[idx - 1] += w
+    logger.info(f"Computed weights, resulting in 'weighted counts': {weighted_counts} (should be allclose to 1)")
+    return weights
 
 
 def _dataset_builder_fully_ordered(
@@ -306,14 +440,22 @@ def _dataset_builder_fully_ordered(
     accelerator: Accelerator,
     logger: MultiProcessAdapter,
     this_run_folder: Path,
+    ds_params: DatasetParams,
+    num_workers: int,
     debug: bool = False,
     train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
-) -> pd.DataFrame:
-    """Builds the train DataFrame for fully ordered datasets."""
+) -> DataLoader[BaseContinuousTimeDatasetReturnValue]:
+    """Builds the train data loader for fully ordered datasets."""
     assert cfg.dataset.fully_ordered, "This function is only for fully ordered datasets"
+    assert issubclass(ds_params.dataset_class, BaseContinuousTimeDataset), (
+        f"Expected a BaseContinuousTimeDataset, got {ds_params.dataset_class}"
+    )
+    assert cfg.dataset.path_to_single_parquet is not None, (
+        f"Expected cfg.dataset.path_to_single_parquet to be set, got {cfg.dataset.path_to_single_parquet}"
+    )
     logger.warning("Test split built but not used for now: TODO")  # TODO
 
-    # 1. Get train & test splits for each time
+    # 1. Get train & test splits
     build_new_train_test_split = True
     if cfg.checkpointing.resume_from_checkpoint is not False:
         saved_splits_exist = (
@@ -332,7 +474,7 @@ def _dataset_builder_fully_ordered(
     else:
         all_train_files, all_test_files = load_train_test_splits_fully_ordered(this_run_folder, logger)
 
-    # 2. Build train datasets & test dataloaders
+    # 2. Build train & test dataloaders
     if type(cfg.dataset.transforms) is not Compose:
         transforms: Compose = instantiate(cfg.dataset.transforms)
     else:
@@ -357,8 +499,40 @@ def _dataset_builder_fully_ordered(
     logger.info(f"Train dataset has {len(all_train_files)} samples")
     logger.info(f"Test dataset has {len(all_test_files)} samples")
 
-    # 5. Return the Dataframe
-    return all_train_files
+    # 5. Build the train & test datasets
+    train_ds = ds_params.dataset_class(
+        df=all_train_files,
+        transforms=transforms,
+        expected_initial_data_range=cfg.dataset.expected_initial_data_range,
+    )
+    # test_ds: TODO and TO USE
+
+    # 6. Reweight the train dataloader sampling
+    times = train_ds.df["time"].to_numpy()
+    logger.info(f"Computing sampling weights for {len(times)} samples")
+    weights = compute_continuous_time_weights(logger, times)
+    sampler = WeightedRandomSampler(weights, len(weights))
+
+    # 7. Build the train dataloader
+    def continuous_ds_collate_fn(batch: list[BaseContinuousTimeDatasetReturnValue]):
+        times = [sample.time for sample in batch]
+        tensors = [sample.tensor for sample in batch]
+        # Convert times to a tensor if you want
+        return {"images": torch.stack(tensors), "times": torch.tensor(times)}
+
+    train_dl = DataLoader(
+        train_ds,
+        batch_size=cfg.training.train_batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        prefetch_factor=cfg.dataloaders.train_prefetch_factor,
+        pin_memory=cfg.dataloaders.pin_memory,
+        persistent_workers=cfg.dataloaders.persistent_workers,
+        collate_fn=continuous_ds_collate_fn,
+    )
+    # test_dl: TODO and TO USE
+
+    return train_dl
 
 
 def _dataset_builder(

@@ -66,7 +66,7 @@ class VideoTimeEncoding(ModelMixin, ConfigMixin):
 
             - `batch_size`: `int | None`
 
-        The number of elements in the batch. Must be provided iff `time` is a `float`.
+        The number of elements in the batch. Must be provided iff `time` is `float` or `int`.
 
         Returns
         -------
