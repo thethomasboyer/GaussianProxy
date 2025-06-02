@@ -183,8 +183,8 @@ def main(cfg: Config) -> None:
     # ---------------------------------- Dataloaders ---------------------------------
     num_workers = cfg.dataloaders.num_workers if cfg.dataloaders.num_workers is not None else accelerator.num_processes
 
-    train_dataloaders, test_dataloaders, dataset_params, fully_ordered_dataloader = setup_dataloaders(
-        cfg, accelerator, num_workers, logger, this_run_folder, chckpt_save_path, cfg.debug
+    train_dataloaders, test_dataloaders, dataset_params, fully_ordered_dataloader, all_train_files, all_test_files = (
+        setup_dataloaders(cfg, accelerator, num_workers, logger, this_run_folder, chckpt_save_path, cfg.debug)
     )
 
     # ------------------------------------ Debug -------------------------------------
@@ -263,7 +263,11 @@ def main(cfg: Config) -> None:
     # accelerator.register_for_checkpointing(lr_scheduler)
 
     # ----------------------------- Distributed Compute  -----------------------------
-    # We do NOT prepare *training* dataloaders! They are "fake" dataloader!
+    # We do NOT prepare *training* dataloaders! They are "fake" dataloader!..
+    # ...UNLESS we use a fully ordered dataset!
+    if cfg.dataset.fully_ordered:
+        assert fully_ordered_dataloader is not None, "Fully ordered dataloader should not be None"
+        fully_ordered_dataloader = accelerator.prepare(fully_ordered_dataloader)
 
     # test dataloaders:
     for key, dl in test_dataloaders.items():
@@ -320,6 +324,8 @@ def main(cfg: Config) -> None:
         resuming_args,
         cfg.profile,
         fully_ordered_dataloader,
+        all_train_files,
+        all_test_files,
     )
 
     # ----------------------------------- The End  -----------------------------------

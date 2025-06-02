@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
+import pandas as pd
 import torch
 import torch_fidelity
 import wandb
@@ -223,6 +224,8 @@ class TimeDiffusion:
         resuming_args: ResumingArgs | None = None,
         profile: bool = False,
         fully_ordered_dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue] | None = None,
+        all_train_files: pd.DataFrame | None = None,
+        all_test_files: pd.DataFrame | None = None,
     ):
         """
         Global high-level fitting method.
@@ -246,6 +249,8 @@ class TimeDiffusion:
             saved_artifacts_folder,
             resuming_args,
             this_run_folder,
+            all_train_files,
+            all_test_files,
         )
 
         # Modify dataloaders dicts to use the empirical distribution timesteps as keys
@@ -357,6 +362,8 @@ class TimeDiffusion:
         saved_artifacts_folder: Path,
         resuming_args: ResumingArgs | None,
         this_run_folder: Path,
+        all_train_files: pd.DataFrame | None,
+        all_test_files: pd.DataFrame | None,
     ):
         """
         Fit some remaining attributes before fitting.
@@ -406,6 +413,17 @@ class TimeDiffusion:
             device=self.accelerator.device,
         )
         self._eval_video_times = torch.sort(eval_video_times).values  # sort it for better viz
+        if self.cfg.dataset.fully_ordered:
+            assert all_train_files is not None and all_test_files is not None, (
+                "Expecting all_train_files and all_test_files to be set when using fully_ordered dataset"
+            )
+            assert all_train_files.columns.isin(["times", "file_path", "true_label"]) and all_test_files.columns.isin(
+                ["times", "file_path", "true_label"]
+            ), (
+                f"Expected columns ['times', 'file_path', 'true_label'], got {all_train_files.columns} and {all_test_files.columns}"
+            )
+        self.all_train_files = all_train_files
+        self.all_test_files = all_test_files
 
     def _yield_data_batches(
         self,
@@ -417,6 +435,9 @@ class TimeDiffusion:
             assert fully_ordered_dataloader is not None, "Expecting fully_ordered_dataloader to be set"
             return self._yield_data_batches_fully_ordered(fully_ordered_dataloader, nb_time_samplings)
         else:
+            assert fully_ordered_dataloader is None, (
+                f"Expecting fully_ordered_dataloader to be None, got {type(fully_ordered_dataloader)}"
+            )
             return self._yield_data_batches_discrete_timestamps(dataloaders, nb_time_samplings)
 
     @torch.no_grad()
@@ -1434,23 +1455,44 @@ class TimeDiffusion:
         self.accelerator.wait_for_everyone()
 
         # use training time encodings
-        eval_video_times = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
-        self.logger.info(
-            f"Selected video times for metrics computation: {eval_video_times} from {eval_strat.selected_times}"
-        )
-        eval_video_time_enc = inference_video_time_encoding.forward(
-            torch.tensor(eval_video_times).to(self.accelerator.device, TORCH_DTYPES[eval_strat.dtype])
-        )
+        true_labels_times = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
+        if self.cfg.dataset.fully_ordered:
+            eval_base_video_times_true_labels = [str(eval_time) for eval_time in eval_strat.selected_times]
+            all_files = pd.concat([self.all_train_files, self.all_test_files])
+            eval_video_time_preds = {
+                true_time_label: all_files.loc[all_files["true_label"] == true_time_label, "time"].to_numpy()
+                for true_time_label in eval_base_video_times_true_labels
+            }
+            self.logger.info(
+                f"Selected video times for metrics computation corresponding to continuous predictions from {eval_strat.selected_times}"
+            )
+            for true_time_label, time_preds in eval_video_time_preds.items():
+                self.logger.debug(
+                    f"Video time {true_time_label} has {len(time_preds)} time predictions: mean={time_preds.mean()}, std={time_preds.std()}"
+                )
+            eval_video_time_enc = {
+                true_time_label: inference_video_time_encoding.forward(
+                    torch.tensor(time_preds).to(self.accelerator.device, TORCH_DTYPES[eval_strat.dtype])
+                )
+                for true_time_label, time_preds in eval_video_time_preds.items()
+            }
+        else:
+            self.logger.info(
+                f"Selected video times for metrics computation: {true_labels_times} from {eval_strat.selected_times}"
+            )
+            eval_video_time_enc = inference_video_time_encoding.forward(
+                torch.tensor(true_labels_times).to(self.accelerator.device, TORCH_DTYPES[eval_strat.dtype])
+            )
 
         # get true datasets to compare against (in [0; 255] uint8 PNG images)
         true_datasets_to_compare_with = self._get_true_datasets_for_metrics_computation(
-            eval_strat, eval_video_times, train_dataloaders, test_dataloaders, metrics_computation_folder
+            eval_strat, true_labels_times, train_dataloaders, test_dataloaders, metrics_computation_folder
         )
 
         ##### 1. Generate the samples
         # loop over training video times
         video_times_pbar = pbar_manager.counter(
-            total=len(eval_video_times),
+            total=len(true_labels_times),
             position=2,
             desc="Training video timesteps  ",
             enable=self.accelerator.is_main_process,
@@ -1459,8 +1501,15 @@ class TimeDiffusion:
         if self.accelerator.is_main_process:
             video_times_pbar.refresh()
 
-        for video_time_idx, video_time_enc in video_times_pbar(enumerate(eval_video_time_enc)):
-            video_time_enc = video_time_enc.unsqueeze(0).repeat(eval_strat.batch_size, 1)
+        for video_time_idx in video_times_pbar(enumerate(true_labels_times)):
+            # if using continuous datasets: use the time preds on ground truths as video time encodings (later)
+            if self.cfg.dataset.fully_ordered:
+                # many batches in here!
+                video_time_enc = eval_video_time_enc[eval_base_video_times_true_labels[video_time_idx]]  # pyright: ignore[reportPossiblyUnboundVariable]
+            # if using discrete datasets: simply repeat the ground truth
+            else:
+                # same for all batches
+                video_time_enc = eval_video_time_enc[video_time_idx].unsqueeze(0).repeat(eval_strat.batch_size, 1)
 
             # get timestep name
             video_time_name = str(eval_strat.selected_times[video_time_idx])
@@ -1484,7 +1533,19 @@ class TimeDiffusion:
                 batches_pbar.refresh()
 
             # loop over generation batches
-            for batch_size in batches_pbar(this_proc_gen_batches):
+            for batch_idx, batch_size in batches_pbar(enumerate(this_proc_gen_batches)):
+                if self.cfg.dataset.fully_ordered:
+                    start = batch_idx * eval_strat.batch_size
+                    end = start + eval_strat.batch_size
+                    this_batch_video_time_enc = video_time_enc[start:end]
+                    if batch_idx % 9 == 0:
+                        self.logger.debug(
+                            f"At generation batch index {batch_idx}: using time preds between {start} and {end}: (15 first) {this_batch_video_time_enc[:15]}"
+                        )
+                else:
+                    # truncate to actual batch size
+                    this_batch_video_time_enc = video_time_enc[:batch_size]
+
                 gen_pbar = pbar_manager.counter(
                     total=len(inference_scheduler.timesteps),
                     position=4,
@@ -1504,11 +1565,10 @@ class TimeDiffusion:
                     device=self.accelerator.device,
                     dtype=TORCH_DTYPES[eval_strat.dtype],
                 )
-                video_time_enc = video_time_enc[:batch_size]
 
                 # loop over diffusion timesteps
                 for t in gen_pbar(inference_scheduler.timesteps):
-                    model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
+                    model_output = self._net_pred(image, t, this_batch_video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]
                     image = inference_scheduler.step(model_output, int(t), image, return_dict=False)[0]
 
                 # convert to f32 to avoid overflows
@@ -1592,7 +1652,7 @@ class TimeDiffusion:
         # TODO: weight tasks by number of samples
         # TODO: include "all_times" in the tasks, but ***differentiate between using seen data only and all the available dataset!***
         # tasks = ["all_times"] + list(self.timesteps_names_to_floats.keys())
-        tasks = [self.timesteps_floats_to_names[eval_time] for eval_time in eval_video_times]  # eval time names
+        tasks = [self.timesteps_floats_to_names[eval_time] for eval_time in true_labels_times]  # eval time names
         tasks_for_this_process = tasks[self.accelerator.process_index :: self.accelerator.num_processes]
         self.logger.debug(
             f"Tasks for process {self.accelerator.process_index}: {tasks_for_this_process}",

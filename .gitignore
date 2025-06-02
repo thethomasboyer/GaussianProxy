@@ -12,9 +12,6 @@ core-rg-*
 .env
 conf/encoding_conf
 *.code-workspace
-notebooks/**/*.mp4
-notebooks/**/*.png
-notebooks/**/*.pt
 notebooks/playground.ipynb
 *_outputs/
 *.egg-info
@@ -29,9 +26,9 @@ src
 notebooks/tmp_downloaded_eval_values
 *.pkl
 *.mkv
+*.mp4
 *.gif
 *.apng
-
 ordering_datasets
 notebooks/ordering_dataset_tests
 .github/copilot-instructions.md

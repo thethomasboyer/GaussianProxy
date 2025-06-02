@@ -256,12 +256,7 @@ def setup_dataloaders(
     this_run_folder: Path,
     chckpt_save_path: Path,
     debug: bool = False,
-) -> tuple[
-    dict[TimeKey, DataLoader],
-    dict[TimeKey, DataLoader],
-    DatasetParams,
-    DataLoader[BaseContinuousTimeDatasetReturnValue] | None,
-]:
+):
     """Returns a list of dataloaders for the dataset in cfg.dataset.name.
 
     Each dataloader is a `torch.utils.data.DataLoader` over a custom `Dataset`.
@@ -399,13 +394,20 @@ def setup_dataloaders(
     )
 
     if cfg.dataset.fully_ordered:
-        fully_ordered_dataloader = _dataset_builder_fully_ordered(
+        fully_ordered_dataloader, all_train_files, all_test_files = _dataset_builder_fully_ordered(
             cfg, accelerator, logger, this_run_folder, ds_params, num_workers, debug
         )
     else:
-        fully_ordered_dataloader = None
+        fully_ordered_dataloader, all_train_files, all_test_files = None, None, None
 
-    return train_dataloaders_dict, test_dataloaders_dict, dataset_params, fully_ordered_dataloader
+    return (
+        train_dataloaders_dict,
+        test_dataloaders_dict,
+        dataset_params,
+        fully_ordered_dataloader,
+        all_train_files,
+        all_test_files,
+    )
 
 
 def compute_continuous_time_weights(logger: MultiProcessAdapter, times: np.ndarray, n_bins: int = 100) -> list[float]:
@@ -444,7 +446,7 @@ def _dataset_builder_fully_ordered(
     num_workers: int,
     debug: bool = False,
     train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
-) -> DataLoader[BaseContinuousTimeDatasetReturnValue]:
+):
     """Builds the train data loader for fully ordered datasets."""
     assert cfg.dataset.fully_ordered, "This function is only for fully ordered datasets"
     assert issubclass(ds_params.dataset_class, BaseContinuousTimeDataset), (
@@ -532,7 +534,7 @@ def _dataset_builder_fully_ordered(
     )
     # test_dl: TODO and TO USE
 
-    return train_dl
+    return train_dl, all_train_files, all_test_files
 
 
 def _dataset_builder(
