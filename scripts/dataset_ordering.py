@@ -384,8 +384,19 @@ def plot_histograms_continuous_time_preds(
 ):
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(18, 18))
 
+    labels_type = type(labels[0])
+    hue_order = [labels_type(label) for label in sorted_unique_labels]
+
     # Top: stacked histogram
-    sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, palette="viridis", multiple="stack", ax=ax1)
+    sns.histplot(
+        x=continuous_time_predictions,
+        hue=labels,
+        bins=100,
+        palette="viridis",
+        multiple="stack",
+        ax=ax1,
+        hue_order=hue_order,
+    )
     ax1.set_title("Stacked histogram of continuous time predictions")
     ax1.set_xlabel("Continuous time prediction")
     if y_log_scale:
@@ -405,6 +416,7 @@ def plot_histograms_continuous_time_preds(
         stat="percent",
         common_norm=False,  # each class sums to 100%
         alpha=0.5,
+        hue_order=hue_order,
     )
     ax2.set_title("Layered histogram of continuous time predictions - per-class normalized")
     ax2.set_xlabel("Continuous time prediction")
@@ -419,6 +431,7 @@ def plot_histograms_continuous_time_preds(
         palette="viridis",
         ax=ax3,
         multiple="fill",
+        hue_order=hue_order,
     )
     ax3.set_title("Filled histogram")
     ax3.set_xlabel("Continuous time prediction")
@@ -458,7 +471,7 @@ def plot_boxplots_continuous_time_preds(
         y=continuous_time_predictions,
         palette="tab10",
         hue=labels,
-        hue_order=hue_order,
+        order=hue_order,
         boxprops={"alpha": 0.5},
         showfliers=False,
         ax=ax1,
@@ -471,7 +484,7 @@ def plot_boxplots_continuous_time_preds(
         alpha=0.7,
         palette="tab10",
         hue=labels,
-        hue_order=hue_order,
+        order=hue_order,
         jitter=0.3,
         ax=ax1,
         legend=False,
@@ -488,7 +501,7 @@ def plot_boxplots_continuous_time_preds(
             y=continuous_time_predictions,
             palette="tab10",
             hue=labels,
-            hue_order=hue_order,
+            order=hue_order,
             boxprops={"alpha": 0.5},
             showfliers=False,
             ax=ax2,  # pyright: ignore[reportPossiblyUnboundVariable]
@@ -501,7 +514,7 @@ def plot_boxplots_continuous_time_preds(
             alpha=0.7,
             palette="tab10",
             hue=labels,
-            hue_order=hue_order,
+            order=hue_order,
             ax=ax2,  # pyright: ignore[reportPossiblyUnboundVariable]
             legend=False,
         )
