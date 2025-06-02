@@ -1694,6 +1694,11 @@ class TimeDiffusion:
             shutil.rmtree(metrics_computation_folder)
             self.logger.debug(f"Cleaned up metrics computation folder {metrics_computation_folder}")
 
+        # set back precision flags
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
     def _find_this_proc_this_time_batches_for_metrics_comp(
         self,
         eval_strat: MetricsComputation,
