@@ -3,15 +3,49 @@
 # Most imports are made after the parameters printing section because Python imports are just so fucking slow
 from __future__ import annotations
 
+import logging
 import random
 import sys
 from pathlib import Path
 
 import attrs
+import colorlog
 from rich.traceback import install
 
-sys.path.append(".")
-install(show_locals=True, locals_max_string=20)
+install(show_locals=True, width=200)
+
+
+# Logging
+def get_logger(log_file_path: Path) -> logging.Logger:
+    term_handler = logging.StreamHandler(sys.stdout)
+    term_handler.setFormatter(
+        colorlog.ColoredFormatter(
+            "[%(cyan)s%(asctime)s%(reset)s][%(log_color)s%(levelname)s%(reset)s] %(message)s",
+            datefmt=None,
+            reset=True,
+            log_colors={
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+            secondary_log_colors={},
+            style="%",
+        )
+    )
+    term_handler.setLevel(logging.INFO)
+
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_file_path, mode="a")
+    file_handler.setFormatter(logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s"))
+    file_handler.setLevel(logging.DEBUG)
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(term_handler)
+    logger.addHandler(file_handler)
+    return logger
 
 
 #######################################################################################################################
@@ -21,7 +55,7 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
     # Checks
     assert dataset.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
 
-    print("Base dataset:", dataset)
+    logger.info(f"Base dataset: {dataset}")
 
     # Data transforms
     # Globally speaking, we would like to predict the time using the *same transformations* than those used in the data loading of the generative model.
@@ -29,17 +63,17 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
     #
     # *But* we also would like to use DINO's preprocessor...
     transforms_to_remove = [RandomCrop, RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry]
-    print(f"\nRemoving transforms:\n{['.'.join([c.__module__, c.__name__]) for c in transforms_to_remove]}")
+    logger.debug(f"\nRemoving transforms:{['.'.join([c.__module__, c.__name__]) for c in transforms_to_remove]}")
 
     used_transforms = Compose(
         [t for t in dataset.transforms.transforms if not any(isinstance(t, tr) for tr in transforms_to_remove)]
     )
     dataset.transforms = used_transforms
-    print(f"\nNow using transforms: {used_transforms}")
+    logger.warning(f"\nNow using transforms: {used_transforms}")
 
     all_samples = list(Path(dataset.path).rglob(f"*.{dataset.dataset_params.file_extension}", recurse_symlinks=True))
-    ds = ImageDataset(all_samples, dataset.transforms, dataset.expected_initial_data_range)
-    print("\nInstantiated dataset:", ds)
+    ds = ImageDataset(all_samples, dataset.transforms, dataset.expected_initial_data_range)  # pyright: ignore[reportAssignmentType]
+    logger.info(f"Instantiated dataset: {ds}")
 
     # Custom data loading:
     # Needed to keep the connection between data and data path
@@ -67,11 +101,12 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
         )
         return {"tensors": torch.stack(tensors), "paths": paths}
 
+    ds: torch.utils.data.Dataset[dict[str, Tensor | Path]]
     ds.__getitem__ = getitem_with_name.__get__(ds, type(ds))  # pylint: disable=no-value-for-parameter
-    ds.__getitems__ = getitems_with_names.__get__(ds, type(ds))  # pylint: disable=no-value-for-parameter
+    ds.__getitems__ = getitems_with_names.__get__(ds, type(ds))  # pylint: disable=no-value-for-parameter # pyright: ignore[reportAttributeAccessIssue]
 
     # Dataloader
-    dl = DataLoader(
+    dl: DataLoader[dict[str, Tensor | Path]] = DataLoader(
         ds,
         batch_size,
         shuffle=False,
@@ -100,7 +135,7 @@ def save_encodings(
 
     if (base_save_path / save_name).exists():
         if recompute_encodings == "no-overwrite":
-            print(
+            logger.info(
                 f"Encodings already exist at {base_save_path / save_name}. Skipping recomputation since recompute_encodings is set to 'no-overwrite'"
             )
             return
@@ -108,12 +143,12 @@ def save_encodings(
             (base_save_path / save_name).unlink()
     base_save_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saving new encodings to {base_save_path / save_name}")
+    logger.info(f"Saving new encodings to {base_save_path / save_name}")
     # Dataloader
     dataloader = adapt_dataset_get_dataloader(dataset, batch_size)
 
     # Model
-    print(f"Loading model {model_name} on device {device}...")
+    logger.info(f"Loading model {model_name} on device {device}...")
     processor = AutoImageProcessor.from_pretrained(model_name)
     model = Dinov2WithRegistersModel.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
 
@@ -140,7 +175,7 @@ def save_encodings(
         assert (cls_tokens == outputs.last_hidden_state.cpu().numpy()[:, 0, :]).all()
 
         # labels
-        labels = [dataset.dataset_params.key_transform(p.parent.name) for p in paths]
+        labels: list[int] | list[str] = [dataset.dataset_params.key_transform(p.parent.name) for p in paths]
 
         # save each row of data to rows list
         for this_cls_token, this_label, this_path in zip(cls_tokens, labels, paths, strict=True):
@@ -154,11 +189,11 @@ def save_encodings(
     # Convert to DataFrame and save
     df = pd.DataFrame(rows)
     df.to_parquet(base_save_path / save_name)
-    print(f"Saved data to {base_save_path / save_name}")
+    logger.info(f"Saved data to {base_save_path / save_name}")
 
     # smol print
-    print("DataFrame head:")
-    print(df.head())
+    logger.info("DataFrame head:")
+    logger.info(df.head())
 
     # return DataFrame
     return df
@@ -228,7 +263,9 @@ def plot_2D_embeddings(
                 label="centroid-spline",
             )
         else:
-            print(f"Not plotting spline values for {projection_type} projection type with {type(projector)} projector")
+            logger.debug(
+                f"Not plotting spline values for {projection_type} projection type with {type(projector)} projector"
+            )
 
     # 3. Plot some projections on spline
     if projection_pairs is not None:
@@ -260,7 +297,7 @@ def plot_2D_embeddings(
                     label="Projection Line" if idx == 0 else None,
                 )
         else:
-            print(
+            logger.debug(
                 f"Not plotting projection pairs for {projection_type} projection type with {type(projector)} projector"
             )
 
@@ -308,7 +345,32 @@ def plot_2D_embeddings(
     save_path = base_save_path / f"2d_{viz_name.lower()}.png"
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"Saved 2D plot to {save_path}")
+    logger.debug(f"Saved 2D plot to {save_path}")
+
+
+def plot_histograms_embeddings_means_vars(
+    tokens: np.ndarray, encoding_scheme: str, dataset_name: str, base_save_path: Path
+):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+
+    # Top: means
+    sns.histplot(x=tokens.mean(axis=0), bins=100, ax=ax1, color="skyblue")
+    ax1.set_title("Histogram of token means")
+    ax1.set_xlabel("Mean value")
+    ax1.set_ylabel("Count")
+
+    # Bottom: variances
+    sns.histplot(x=tokens.var(axis=0), bins=100, ax=ax2, color="salmon")
+    ax2.set_title("Histogram of token variances")
+    ax2.set_xlabel("Variance value")
+    ax2.set_ylabel("Count")
+
+    plt.suptitle(f"Histograms of means and variances of CLS token of {encoding_scheme} on {dataset_name}", fontsize=14)
+    plt.tight_layout()
+    save_path = base_save_path / "CLS_tokens_stats_histogram.png"
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    logger.debug(f"Saved histogram of means and vars of {encoding_scheme} CLS tokens to {save_path}")
 
 
 def plot_histograms_continuous_time_preds(
@@ -322,57 +384,62 @@ def plot_histograms_continuous_time_preds(
 ):
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(18, 18))
 
-    # Top: combined histogram
+    # Top: stacked histogram
     sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, palette="viridis", multiple="stack", ax=ax1)
     ax1.set_title("Stacked histogram of continuous time predictions")
     ax1.set_xlabel("Continuous time prediction")
     if y_log_scale:
         ax1.set_yscale("log")
-        ax1.set_ylabel("Count (log scale)")
+        ax1.set_ylabel("Raw count (log scale)")
     else:
-        ax1.set_ylabel("Count")
+        ax1.set_ylabel("Raw count")
 
-    # Middle: histogram with hue by labels
-    sns.histplot(x=continuous_time_predictions, hue=labels, bins=100, alpha=0.5, palette="viridis", ax=ax2)
-    ax2.set_title("Layered histogram of continuous time predictions")
-    ax2.set_xlabel("Continuous time prediction")
-    if y_log_scale:
-        ax2.set_yscale("log")
-        ax2.set_ylabel("Count (log scale)")
-    else:
-        ax2.set_ylabel("Count")
-    ax2.get_legend().set_title("True label")
-
-    # Bottom: per-class normalized (density) histogram
+    # Middle: layered histogram per class
     sns.histplot(
         x=continuous_time_predictions,
         hue=labels,
         bins=100,
         palette="viridis",
+        element="step",
+        ax=ax2,
         stat="percent",
-        common_norm=False,  # each class sums to 1
-        ax=ax3,
+        common_norm=False,  # each class sums to 100%
         alpha=0.5,
     )
-    ax3.set_title("Per-class normalized histogram")
+    ax2.set_title("Layered histogram of continuous time predictions - per-class normalized")
+    ax2.set_xlabel("Continuous time prediction")
+    ax2.set_ylabel("Percentage of samples (per class)")
+    ax2.get_legend().set_title("True label")
+
+    # Bottom: per-class normalized histogram
+    sns.histplot(
+        x=continuous_time_predictions,
+        hue=labels,
+        bins=100,
+        palette="viridis",
+        ax=ax3,
+        multiple="fill",
+    )
+    ax3.set_title("Filled histogram")
     ax3.set_xlabel("Continuous time prediction")
-    ax3.set_ylabel("Percentage of samples (per class)")
+    ax3.set_ylabel("Percentage of samples (per time bin)")
     ax3.get_legend().set_title("True label")
 
     plt.suptitle(
-        f"Continuous time predictions histogram for {basename} with {encoding_scheme} on {dataset_name}", fontsize=16
+        f"Continuous time predictions histogram for {basename} with {encoding_scheme} on {dataset_name}", fontsize=14
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
-    save_path = base_save_path / f"{basename}_continuous_time_predictions_histogram.png"
+    save_path = base_save_path / f"continuous_time_predictions_{basename}_histogram.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
-    print(f"Saved histogram of continuous time predictions to {save_path}")
+    logger.debug(f"Saved histogram of continuous time predictions to {save_path}")
 
 
 def plot_boxplots_continuous_time_preds(
     base_save_path: Path,
     labels: np.ndarray,
+    sorted_unique_labels: list[str],
     continuous_time_predictions: np.ndarray,
     basename: str,
     plot_swarmplot: bool = False,
@@ -382,12 +449,16 @@ def plot_boxplots_continuous_time_preds(
     else:
         fig, ax1 = plt.subplots(figsize=(14, 6))
 
+    labels_type = type(labels[0])
+    hue_order = [labels_type(label) for label in sorted_unique_labels]
+
     # Subplot 1: Boxplot and Stripplot
     sns.boxplot(
         x=labels,
         y=continuous_time_predictions,
         palette="tab10",
         hue=labels,
+        hue_order=hue_order,
         boxprops={"alpha": 0.5},
         showfliers=False,
         ax=ax1,
@@ -400,6 +471,7 @@ def plot_boxplots_continuous_time_preds(
         alpha=0.7,
         palette="tab10",
         hue=labels,
+        hue_order=hue_order,
         jitter=0.3,
         ax=ax1,
         legend=False,
@@ -416,6 +488,7 @@ def plot_boxplots_continuous_time_preds(
             y=continuous_time_predictions,
             palette="tab10",
             hue=labels,
+            hue_order=hue_order,
             boxprops={"alpha": 0.5},
             showfliers=False,
             ax=ax2,  # pyright: ignore[reportPossiblyUnboundVariable]
@@ -428,6 +501,7 @@ def plot_boxplots_continuous_time_preds(
             alpha=0.7,
             palette="tab10",
             hue=labels,
+            hue_order=hue_order,
             ax=ax2,  # pyright: ignore[reportPossiblyUnboundVariable]
             legend=False,
         )
@@ -442,10 +516,10 @@ def plot_boxplots_continuous_time_preds(
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.suptitle(f"True labels vs continuous time predictions for {basename}", fontsize=16)
 
-    save_path = base_save_path / f"{basename}_continuous_time_predictions_boxplots.png"
+    save_path = base_save_path / f"continuous_time_predictions_{basename}_boxplots.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
-    print(f"Saved boxplots of continuous time predictions to {save_path}")
+    logger.debug(f"Saved boxplots of continuous time predictions to {save_path}")
 
 
 # def plot_ellipse(mean: np.ndarray, cov: np.ndarray, color: str, ax: plt.Axes) -> None:
@@ -614,7 +688,9 @@ def plot_3D_embeddings(
                 )
             )
         else:
-            print(f"Not plotting spline values for {projection_type} projection type with {type(projector)} projector")
+            logger.debug(
+                f"Not plotting spline values for {projection_type} projection type with {type(projector)} projector"
+            )
 
     # 4. Plot some projections on spline
     if projection_pairs is not None:
@@ -656,19 +732,19 @@ def plot_3D_embeddings(
                     )
                 )
         else:
-            print(
+            logger.debug(
                 f"Not plotting projection pairs for {projection_type} projection type with {type(projector)} projector"
             )
 
     # 5. Save and return
     save_path = base_save_path / f"3d_{viz_name}.html"
     fig.write_html(save_path, auto_open=False)
-    print(f"Saved interactive 3D plot to {save_path}")
+    logger.debug(f"Saved interactive 3D plot to {save_path}")
 
     png_save_path = save_path.with_suffix(".png")
-    fig.update_layout(width=2800, height=2000)
+    fig.update_layout(width=2100, height=1500)
     fig.write_image(png_save_path, scale=2)
-    print(f"Saved 3D plot to {png_save_path}")
+    logger.debug(f"Saved 3D plot to {png_save_path}")
 
 
 def project_to_time(points: np.ndarray, spline: BSpline, t_min: float, t_max: float) -> np.ndarray:
@@ -701,7 +777,7 @@ def plot_histograms_distances_to_true_labels(
     sorted_unique_label_times: list[float],
     sorted_unique_labels: list[str],
     continuous_times: np.ndarray,
-    basename: str,
+    dataset_name: str,
     base_save_path: Path,
     labels: np.ndarray,
     viz_name: str,
@@ -729,9 +805,9 @@ def plot_histograms_distances_to_true_labels(
 
         changes_count_by_dist[abs(true_label_time - closest_label_time)] += 1
 
-    print(f"Number of changes: {nb_changes} out of {len(labels)} ({nb_changes / len(labels) * 100:.2f}%)")
-    print(f"Changes count from true label: {changes_count_from_true_label}")
-    print(
+    logger.debug(f"Number of changes: {nb_changes} out of {len(labels)} ({nb_changes / len(labels) * 100:.2f}%)")
+    logger.debug(f"Changes count from true label: {changes_count_from_true_label}")
+    logger.debug(
         f"Distances distribution between true label and true label closest to time prediction: {changes_count_by_dist}"
     )
 
@@ -762,18 +838,18 @@ def plot_histograms_distances_to_true_labels(
         ax.set_ylabel("Count")
         ax.set_xlim(0, 1)
 
-    plt.suptitle(f"Distances to true label histograms for {basename}", fontsize=16)
+    plt.suptitle(f"Distances to true label histograms for {dataset_name}", fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
-    save_path = base_save_path / f"{basename}_{viz_name}_distances_to_true_labels_histogram.png"
+    save_path = base_save_path / f"continuous_time_predictions_distances_to_true_labels_{viz_name}_histogram.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
-    print(f"Saved histogram of distances to true labels to {save_path}")
+    logger.debug(f"Saved histogram of distances to true labels to {save_path}")
 
 
 def fit_spline_project_time_plots(
     projection_type: Literal["base embedding space", "LDA embedding space"],
-    centroids_in_base_embedding_space: np.ndarray,
+    sorted_centroids_in_base_embedding_space: np.ndarray,
     sorted_unique_labels: list[str],
     sorted_unique_label_times: list[float],
     params: Params,
@@ -794,25 +870,28 @@ def fit_spline_project_time_plots(
     pca_explained_variance: np.ndarray,
     lda_explained_variance: np.ndarray,
     df: pd.DataFrame,
-):
+    normalization_method: str,
+) -> np.ndarray:
     if projection_type == "base embedding space":
         # Compute spline
-        print(f"Fitting interpolating spline through class centroids of base embedding space of {encoding_scheme}")
-        print(
-            f"Centroids shape: {centroids_in_base_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
+        logger.debug(
+            f"Fitting interpolating spline through class centroids of base embedding space of {encoding_scheme}"
         )
-        spline = make_interp_spline(sorted_unique_label_times, centroids_in_base_embedding_space)
+        logger.debug(
+            f"Centroids shape: {sorted_centroids_in_base_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
+        )
+        spline = make_interp_spline(sorted_unique_label_times, sorted_centroids_in_base_embedding_space)
         # Evaluate spline
         assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
         t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
-        print(
+        logger.warning(
             f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
         )
         times_to_eval_spline = np.linspace(t_min, t_max, 1000)
         spline_values = spline(times_to_eval_spline)  # these are in DINO's embedding space
         # Project base embeddings on spline
         continuous_time_predictions = project_to_time(cls_tokens, spline, t_min, t_max)
-        print(
+        logger.debug(
             f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         # Plot spline and projections along with base embeddings
@@ -823,23 +902,23 @@ def fit_spline_project_time_plots(
         )
     elif projection_type == "LDA embedding space":
         # Compute spline
-        print("Fitting interpolating spline through class centroids of LDA embedding space")
-        centroids_in_lda_embedding_space = lda.transform(centroids_in_base_embedding_space)
-        print(
+        logger.debug("Fitting interpolating spline through class centroids of LDA embedding space")
+        centroids_in_lda_embedding_space = lda.transform(sorted_centroids_in_base_embedding_space)
+        logger.debug(
             f"Centroids shape: {centroids_in_lda_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
         )
         spline = make_interp_spline(sorted_unique_label_times, centroids_in_lda_embedding_space)
         # Evaluate spline
         assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
         t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
-        print(
+        logger.warning(
             f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
         )
         times_to_eval_spline = np.linspace(t_min, t_max, 1000)
         spline_values = spline(times_to_eval_spline)  # these are in LDA's embedding space
         # Project lda embeddings on spline
         continuous_time_predictions = project_to_time(lda_embeddings, spline, t_min, t_max)
-        print(
+        logger.debug(
             f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         # Plot spline and projections along with base embeddings
@@ -853,7 +932,7 @@ def fit_spline_project_time_plots(
             f"Unknown projection type: {projection_type}. Expected 'base embedding space' or 'LDA embedding space'."
         )
 
-    vizes_name_suffix = f"{projection_type.replace(' ', '_')}_spline_projection"
+    vizes_name_suffix = f"spline_projection_on_{projection_type.replace(' ', '_')}"
 
     # plot 2D & 3D embeddings with spline and projections for LDA, UMAP and PCA viz
     if projection_type == "base embedding space":
@@ -871,7 +950,7 @@ def fit_spline_project_time_plots(
             ("UMAP 1", "UMAP 2"),
             spline_values,
             projection_pairs,
-            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
             projection_type,
         )
         plot_2D_embeddings(
@@ -891,7 +970,7 @@ def fit_spline_project_time_plots(
             ),
             spline_values,
             projection_pairs,
-            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
             projection_type,
         )
     plot_2D_embeddings(
@@ -911,7 +990,7 @@ def fit_spline_project_time_plots(
         ),
         spline_values,
         projection_pairs,
-        centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+        sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
         projection_type,
     )
     if projection_type == "base embedding space":
@@ -929,7 +1008,7 @@ def fit_spline_project_time_plots(
             ("UMAP 1", "UMAP 2", "UMAP 3"),
             spline_values,
             projection_pairs,
-            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
             projection_type,
         )
         plot_3D_embeddings(
@@ -950,7 +1029,7 @@ def fit_spline_project_time_plots(
             ),
             spline_values,
             projection_pairs,
-            centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+            sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
             projection_type,
         )
     plot_3D_embeddings(
@@ -971,7 +1050,7 @@ def fit_spline_project_time_plots(
         ),
         spline_values,
         projection_pairs,
-        centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
+        sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
         projection_type,
     )
 
@@ -985,7 +1064,12 @@ def fit_spline_project_time_plots(
         ds.name,
     )
     plot_boxplots_continuous_time_preds(
-        this_run_save_path_this_ds, labels, continuous_time_predictions, vizes_name_suffix, len(df) <= 10_000
+        this_run_save_path_this_ds,
+        labels,
+        sorted_unique_labels,
+        continuous_time_predictions,
+        vizes_name_suffix,
+        len(df) <= 10_000,
     )
 
     # plot distances to true labels
@@ -999,14 +1083,25 @@ def fit_spline_project_time_plots(
         vizes_name_suffix,
     )
 
-    # min-max-normalize to [0,1] # TODO: 5-95 percentile?
-    continuous_time_predictions -= continuous_time_predictions.min()
-    continuous_time_predictions /= continuous_time_predictions.max()
+    # normalize to [0,1]
+    match normalization_method:
+        case "min-max":
+            continuous_time_predictions -= continuous_time_predictions.min()
+            continuous_time_predictions /= continuous_time_predictions.max()
+        case "5perc-95perc":
+            perc_5 = np.percentile(continuous_time_predictions, 5)
+            perc_95 = np.percentile(continuous_time_predictions, 95)
+            continuous_time_predictions = np.clip(continuous_time_predictions, perc_5, perc_95)
+            continuous_time_predictions -= perc_5
+            continuous_time_predictions /= perc_95 - perc_5
+        case _:
+            raise ValueError(f"Unknown normalization method: {normalization_method}")
+
     plot_histograms_continuous_time_preds(
         this_run_save_path_this_ds,
         continuous_time_predictions,
         labels,
-        f"{vizes_name_suffix}_min_max_norm",
+        f"{vizes_name_suffix}_{normalization_method}_norm",
         encoding_scheme,
         ds.name,
     )
@@ -1031,26 +1126,29 @@ if __name__ == "__main__":
     ###################################################################################################################
     ################################################### Parameters ####################################################
     ###################################################################################################################
+    sys.path.append(".")
     # Attention: we *might or might not* use our datasets' pipeline as DINO has its own preprocessing pipeline.
     from my_conf.dataset.BBBC021_196_docetaxel_inference import (
         BBBC021_196_docetaxel_inference as bbbc021_ds,  # noqa: E402
     )
     from my_conf.dataset.biotine_png_128_inference import dataset as biotine_ds  # noqa: E402
+    from my_conf.dataset.chromalive6h_3ch_png_inference import dataset as chromalive_ds  # noqa: E402
     from my_conf.dataset.diabetic_retinopathy_inference import (
         diabetic_retinopathy_inference as diabetic_retinopathy_ds,  # noqa: E402
     )
+    from my_conf.dataset.Jurkat_inference import Jurkat_inference as jurkat_ds  # noqa: E402
     from my_conf.dataset.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds  # noqa: E402
     from my_conf.dataset.NASH_steatosis_inference import dataset as NASH_steatosis_ds  # noqa: E402
 
     # fmt: off
     params = Params(
-        datasets               = [NASH_steatosis_ds, diabetic_retinopathy_ds, biotine_ds, bbbc021_ds, NASH_fibrosis_ds],
+        datasets               = [NASH_steatosis_ds, diabetic_retinopathy_ds, biotine_ds, bbbc021_ds, NASH_fibrosis_ds, chromalive_ds, jurkat_ds],
         device                 = "cuda:0",
         model_name             = "facebook/dinov2-with-registers-giant",
         batch_size             = 1024,
         use_model_preprocessor = False,
-        recompute_encodings    = False,
-        save_times             = "no",
+        recompute_encodings    = "no-overwrite",
+        save_times             = "overwrite",
         seed                   = random.randint(0, 2**32 - 1),
         frac_range_delta       = 0.3,
     )
@@ -1065,7 +1163,11 @@ if __name__ == "__main__":
     )
     this_run_save_path = base_save_dir / encoding_scheme
     this_run_save_path.mkdir(parents=True, exist_ok=True)
-    print("\n=> Parameters:")
+    logger = get_logger(this_run_save_path / "logs.log")
+    logger.debug("")
+    logger.info("-" * 120)
+    logger.info("Starting new run")
+    logger.info("=> Parameters:")
     params_print = {
         "Datasets": [ds.name for ds in params.datasets],
         "Base save dir": base_save_dir,
@@ -1076,15 +1178,15 @@ if __name__ == "__main__":
     for param, value in params_print.items():
         label_str = f"{param}:"
         dots = "_" * (label_width - len(label_str))
-        print(f"    {label_str}{dots} {value}")
-    print()
+        logger.info(f"    {label_str}{dots} {value}")
+    print("", flush=True)
     inpt = input("=> Continue? (y/[]) ")
     if inpt != "y":
-        print("Exiting...")
+        logger.info("Exiting...")
         sys.exit(0)
 
     # ruff: noqa: E402
-    print("Loading imports... ", end="", flush=True)
+    logger.info("Loading imports... ")
     # Imports
     from typing import Literal
 
@@ -1117,14 +1219,14 @@ if __name__ == "__main__":
 
     # ruff: enable: E402
     torch.set_grad_enabled(False)
-    print("done", flush=True)
+    logger.info("done")
 
     # Process each dataset iteratively
     for ds in params.datasets:
         print()
-        print("#" * 60)
-        print(f"Processing dataset: {ds.name}")
-        print("#" * 60)
+        logger.info("#" * 60)
+        logger.info(f"Processing dataset: {ds.name}")
+        logger.info("#" * 60)
 
         this_run_save_path_this_ds = this_run_save_path / ds.name
         this_run_save_path_this_ds.mkdir(parents=True, exist_ok=True)
@@ -1133,7 +1235,7 @@ if __name__ == "__main__":
         seed_file_path = this_run_save_path_this_ds / "seed.txt"
         with open(seed_file_path, "w") as f:
             f.write(str(params.seed))
-        print(f"Saved params.seed to {seed_file_path}")
+        logger.debug(f"Saved params.seed to {seed_file_path}")
         # common rng for this run
         rng = np.random.default_rng(seed=params.seed)
 
@@ -1162,7 +1264,7 @@ if __name__ == "__main__":
             load_existing_encodings = True
 
         if load_existing_encodings:
-            print(f"\n=> Reusing existing encodings at {this_run_save_path_this_ds / encodings_filename}")
+            logger.warning(f"=> Reusing existing encodings at {this_run_save_path_this_ds / encodings_filename}")
             df = pd.read_parquet(this_run_save_path_this_ds / encodings_filename)
 
         ###################################################################################################################
@@ -1175,7 +1277,16 @@ if __name__ == "__main__":
         assert len(cls_tokens) == len(labels) == len(file_paths), (
             f"Expected same length for cls_tokens, labels and file_paths, got {len(cls_tokens)}, {len(labels)}, {len(file_paths)}"
         )
-        print(f"cls_tokens.shape: {cls_tokens.shape}, len(labels): {len(labels)}, len(file_paths): {len(file_paths)}")
+        logger.debug(
+            f"cls_tokens.shape: {cls_tokens.shape}, len(labels): {len(labels)}, len(file_paths): {len(file_paths)}"
+        )
+        uniq_labs, counts = np.unique(labels, return_counts=True)
+        logger.info(
+            f"Total number of samples: {len(cls_tokens)} | labels: {uniq_labs} | counts: {counts} | size of encodings: {cls_tokens.shape[1]}"
+        )
+
+        # plot embeddings stats
+        plot_histograms_embeddings_means_vars(cls_tokens, encoding_scheme, ds.name, this_run_save_path_this_ds)
 
         # Get sorted class names
         assert ds.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
@@ -1195,12 +1306,12 @@ if __name__ == "__main__":
 
         # ensure unique labels are strings
         sorted_unique_labels = [str(label) for label in sorted_unique_labels]
-        print(f"\n=> Using sorted unique labels: {sorted_unique_labels}")
+        logger.warning(f"=> Using sorted unique labels: {sorted_unique_labels}")
         sorted_unique_label_times = get_evenly_spaced_timesteps(len(sorted_unique_labels))
-        print(f"Sorted unique label times: {sorted_unique_label_times}")
+        logger.warning(f"Sorted unique label times: {sorted_unique_label_times}")
 
         ### UMAP
-        print("\n=> UMAP")
+        logger.info("=> UMAP")
         # 2D
         umap_2d_reducer = umap.UMAP(random_state=params.seed)
         umap_2d_embeddings: np.ndarray = umap_2d_reducer.fit_transform(cls_tokens)  # pyright: ignore[reportAssignmentType]
@@ -1233,7 +1344,7 @@ if __name__ == "__main__":
         )
 
         ### PCA
-        print("\n=> PCA")
+        logger.info("=> PCA")
         pca = PCA(random_state=params.seed)
         pca_embeddings = pca.fit_transform(cls_tokens)
         pca_explained_variance = pca.explained_variance_ratio_
@@ -1274,7 +1385,7 @@ if __name__ == "__main__":
         )
 
         ### LDA
-        print("\n=> LDA")
+        logger.info("=> LDA")
         lda = LinearDiscriminantAnalysis()
         lda_embeddings = lda.fit_transform(cls_tokens, labels)
         lda_explained_variance = lda.explained_variance_ratio_
@@ -1336,49 +1447,80 @@ if __name__ == "__main__":
         ###################################################################################################################
         ############################################# Derive continuous time ##############################################
         ###################################################################################################################
-        print("\n=> Deriving continuous time predictions from LDA embeddings")
+        logger.info("=> Deriving continuous time predictions from LDA embeddings")
 
         ### From pure proba
-        print("\n-> from pure probabilities")
+        logger.info("-> from pure probabilities")
         proba = lda.predict_proba(cls_tokens)
         lda_class_times = np.array(  # we just do this mapping manually to ensure the order is correct
             [sorted_unique_label_times[sorted_unique_labels.index(str(cls))] for cls in lda.classes_],  # pyright: ignore[reportGeneralTypeIssues]
             dtype=np.float32,
         )
-        print(f"Derived LDA class times: {lda_class_times} from LDA classes: {lda.classes_}")
+        logger.warning(f"Derived LDA class times: {lda_class_times} from LDA classes: {lda.classes_}")
         continuous_time_predictions = proba @ lda_class_times
-        print(
+        logger.debug(
             f"Computed continuous time predictions from LDA probabilities, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         plot_histograms_continuous_time_preds(
-            this_run_save_path_this_ds, continuous_time_predictions, labels, "proba", encoding_scheme, ds.name, True
+            this_run_save_path_this_ds,
+            continuous_time_predictions,
+            labels,
+            "LDA_probabilities",
+            encoding_scheme,
+            ds.name,
+            True,
         )
-        plot_boxplots_continuous_time_preds(this_run_save_path_this_ds, labels, continuous_time_predictions, "proba")
+        plot_boxplots_continuous_time_preds(
+            this_run_save_path_this_ds, labels, sorted_unique_labels, continuous_time_predictions, "LDA_probabilities"
+        )
 
         ### From decision function
         # ie signed distance to the hyperplane
-        print("\n-> from decision function")
+        logger.info("-> from decision function")
         scores = lda.decision_function(cls_tokens)
         continuous_time_predictions = scores @ lda_class_times
-        print(
+        logger.debug(
             f"Computed continuous time predictions from LDA decision function, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         continuous_time_predictions -= continuous_time_predictions.min()
         continuous_time_predictions /= continuous_time_predictions.max()
-        print("Min-max normalized continuous time predictions to [0, 1]")
+        logger.debug("Min-max normalized continuous time predictions to [0, 1]")
         plot_histograms_continuous_time_preds(
-            this_run_save_path_this_ds, continuous_time_predictions, labels, "decision_func", encoding_scheme, ds.name
+            this_run_save_path_this_ds,
+            continuous_time_predictions,
+            labels,
+            "LDA_decision_function",
+            encoding_scheme,
+            ds.name,
         )
         plot_boxplots_continuous_time_preds(
-            this_run_save_path_this_ds, labels, continuous_time_predictions, "decision_func", len(df) <= 10_000
+            this_run_save_path_this_ds,
+            labels,
+            sorted_unique_labels,
+            continuous_time_predictions,
+            "LDA_decision_function",
+            len(df) <= 10_000,
         )
 
         ### From projection on spline going through class centroids
         # of base encoding space (eg DINO's CLS tokens)
-        print("\n-> from projection on spline going through class centroids in base encoding space")
+        # warning: we need to sort the class centroids in the same order as the unique times/labels!
+        lda_classes_in_default_order = [str(cl) for cl in lda.classes_]  # pyright: ignore[reportGeneralTypeIssues]
+        lda_classes_sorting_idxes = [lda_classes_in_default_order.index(label) for label in sorted_unique_labels]
+        assert np.all(
+            (sorted_lda_classes := [str(lda.classes_[idx]) for idx in lda_classes_sorting_idxes])  # pyright: ignore[reportIndexIssue, reportArgumentType, reportCallIssue]
+            == sorted_unique_labels
+        ), (
+            f"Expected lda.classes_= {lda.classes_} sorted with {lda_classes_sorting_idxes} to be equal to {sorted_unique_labels}, got {sorted_lda_classes}"
+        )
+        sorted_lda_centroids: np.ndarray = lda.means_[lda_classes_sorting_idxes]  # pyright: ignore[reportIndexIssue, reportArgumentType, reportCallIssue, reportAssignmentType]
+        logger.info("-> from projection on spline going through class centroids in base encoding space")
+        logger.debug(
+            f"Centroids shape: {sorted_lda_centroids.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
+        )
         continuous_time_predictions = fit_spline_project_time_plots(
             "base embedding space",
-            lda.means_,  # pyright: ignore[reportArgumentType]
+            sorted_lda_centroids,
             sorted_unique_labels,
             sorted_unique_label_times,
             params,
@@ -1399,12 +1541,13 @@ if __name__ == "__main__":
             pca_explained_variance,
             lda_explained_variance,
             df,
+            "min-max",
         )
         # of LDA embeddings
-        print("\n-> from projection on spline going through class centroids in LDA encoding space")
+        logger.info("-> from projection on spline going through class centroids in LDA encoding space")
         continuous_time_predictions = fit_spline_project_time_plots(
             "LDA embedding space",
-            lda.means_,  # pyright: ignore[reportArgumentType]
+            sorted_lda_centroids,
             sorted_unique_labels,
             sorted_unique_label_times,
             params,
@@ -1425,40 +1568,46 @@ if __name__ == "__main__":
             pca_explained_variance,
             lda_explained_variance,
             df,
+            "min-max",
         )
 
         ### Save new continuous time label
         new_ds_file_save_path = (
             Path(ds.path).parent / f"{ds.name}__continuous_time_predictions__{encoding_scheme}.parquet"
         )
-        print(f"Original dataset path:                        {ds.path}")
-        print(f"Saving continuous time predictions dataset to {new_ds_file_save_path}")
+        logger.info(f"Original dataset path:                        {ds.path}")
+        logger.info(f"Saving continuous time predictions dataset to {new_ds_file_save_path}")
 
         data = []
-        for sample_file_path, sample_continuous_time in zip(file_paths, continuous_time_predictions, strict=True):
-            data.append({"time": sample_continuous_time, "file_path": sample_file_path})
+        for sample_file_path, true_time_label, continuous_time_pred in zip(
+            file_paths, labels, continuous_time_predictions, strict=True
+        ):
+            data.append(
+                {"time": continuous_time_pred, "file_path": sample_file_path, "true_label": str(true_time_label)}
+            )
         df = pd.DataFrame(data)
 
         if params.save_times != "no":
             write_times = True
             if new_ds_file_save_path.exists():
                 if params.save_times == "no-overwrite":
-                    print(f"File {new_ds_file_save_path} already exists, skipping saving")
+                    logger.info(f"File {new_ds_file_save_path} already exists, skipping saving")
                     write_times = False
                 elif params.save_times == "overwrite":
-                    print(f"File {new_ds_file_save_path} already exists, overwriting")
+                    logger.info(f"File {new_ds_file_save_path} already exists, overwriting")
                     write_times = True
                 elif params.save_times == "ask-before-overwrite":
                     inpt = input(f"Delete existing file at {new_ds_file_save_path}? (y/n)")
+                    print("", flush=True)
                     if inpt == "y":
                         write_times = True
                     else:
-                        print("Refusing to continue")
+                        logger.info("Refusing to continue")
                         write_times = False
                 else:
                     raise ValueError(f"Unknown params.save_times value: {params.save_times}")
             if write_times:
                 df.to_parquet(new_ds_file_save_path, index=False)
-                print(f"Saved continuous time predictions dataset to {new_ds_file_save_path}")
+                logger.info(f"Saved continuous time predictions dataset to {new_ds_file_save_path}")
         else:
-            print("No times saving")
+            logger.warning("No times saving")
