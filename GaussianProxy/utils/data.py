@@ -3,6 +3,7 @@ import pickle
 import random
 import re
 from collections.abc import Callable
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TypeVar
 
@@ -116,6 +117,9 @@ class BaseContinuousTimeDatasetReturnValue:
     tensor: Tensor
 
 
+CONTINUOUS_DF_COLUMNS = ["time", "file_path", "true_label"]
+
+
 class BaseContinuousTimeDataset(Dataset[BaseContinuousTimeDatasetReturnValue]):
     """Just a dataset for continuous time data."""
 
@@ -137,14 +141,14 @@ class BaseContinuousTimeDataset(Dataset[BaseContinuousTimeDatasetReturnValue]):
         # check that we indeed have sample
         # (# we use __str__ in the error message, so any attribute assigned below this line cannot be used by __str__)
         assert len(df) > 0, f"Got 0 samples in {self}"
-        assert df.columns.isin(["time", "file_path"]).all(), (
-            f"Expected columns ['time', 'file_path'], got {df.columns.tolist()}"
+        assert df.columns.isin(CONTINUOUS_DF_COLUMNS).all(), (
+            f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {df.columns.tolist()}"
         )
         # common base path for the dataset
         # Create train dataloader
-        base_path = df.iloc[0].file_path.parents[1]
+        base_path = Path(df.iloc[0].file_path).parents[1]
         assert all(  # TODO: this check might take a while...
-            (this_sample_base_path := f.parents[1]) == base_path for f in df.file_path
+            (this_sample_base_path := Path(f).parents[1]) == base_path for f in df.file_path
         ), (
             f"All files should be under the same directory, got base_path={base_path} and sample_base_path={this_sample_base_path}"
         )
@@ -372,20 +376,28 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
-        case "NASH_steatosis_fully_ordered_dinov2_s":
+        case "NASH_steatosis_fully_ordered_dinov2_regs_giant_ds_preproc":
             ds_params = DatasetParams(
                 file_extension="png",
                 key_transform=int,
                 sorting_func=lambda subdir: int(subdir.name),
-                dataset_class=ImageDataset,
+                dataset_class=ContinuousTimeImageDataset,
             )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
+    if issubclass(ds_params.dataset_class, BaseContinuousTimeDataset):
+        logger.warning(
+            "Loaded a fully ordered config; forcefully passing *ImageDataset* for the discrete datasets instantiation (it might not suit!)"
+        )
+        ds_params_discrete = dataclass_replace(ds_params, dataset_class=ImageDataset)
+    else:
+        ds_params_discrete = ds_params
+
     train_dataloaders_dict, test_dataloaders_dict, dataset_params = _dataset_builder(
         cfg,
         accelerator,
-        ds_params,
+        ds_params_discrete,
         num_workers,
         logger,
         this_run_folder,
@@ -822,7 +834,9 @@ def _build_train_test_splits_fully_ordered(
     logger.debug(f"Found {len(data)} files in total in parquet file")
 
     # checks
-    assert (data.columns == ["time", "file_path"]).all(), f"Expected columns ['time', 'file_path'], got {data.columns}"
+    assert (data.columns == CONTINUOUS_DF_COLUMNS).all(), (
+        f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {data.columns}"
+    )
     if cfg.training.unpaired_data:
         raise NotImplementedError("TODO?")
     if cfg.training.as_many_samples_as_unpaired:
@@ -882,11 +896,11 @@ def load_train_test_splits_fully_ordered(this_run_folder: Path, logger: MultiPro
     test_data = pd.read_parquet(this_run_folder / "test_samples.parquet")
 
     # checks
-    assert (train_data.columns == ["time", "file_path"]).all(), (
-        f"Expected columns ['time', 'file_path'], got {train_data.columns}"
+    assert (train_data.columns == CONTINUOUS_DF_COLUMNS).all(), (
+        f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {train_data.columns}"
     )
-    assert (test_data.columns == ["time", "file_path"]).all(), (
-        f"Expected columns ['time', 'file_path'], got {test_data.columns}"
+    assert (test_data.columns == CONTINUOUS_DF_COLUMNS).all(), (
+        f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {test_data.columns}"
     )
 
     logger.info(

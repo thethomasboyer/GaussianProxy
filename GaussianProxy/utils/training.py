@@ -38,7 +38,7 @@ from GaussianProxy.conf.training_conf import (
     MetricsComputation,
     SimpleGeneration,
 )
-from GaussianProxy.utils.data import BaseContinuousTimeDatasetReturnValue, BaseDataset, TimeKey
+from GaussianProxy.utils.data import CONTINUOUS_DF_COLUMNS, BaseContinuousTimeDatasetReturnValue, BaseDataset, TimeKey
 from GaussianProxy.utils.misc import (
     StateLogger,
     get_evenly_spaced_timesteps,
@@ -417,10 +417,10 @@ class TimeDiffusion:
             assert all_train_files is not None and all_test_files is not None, (
                 "Expecting all_train_files and all_test_files to be set when using fully_ordered dataset"
             )
-            assert all_train_files.columns.isin(["times", "file_path", "true_label"]) and all_test_files.columns.isin(
-                ["times", "file_path", "true_label"]
-            ), (
-                f"Expected columns ['times', 'file_path', 'true_label'], got {all_train_files.columns} and {all_test_files.columns}"
+            assert (all_train_files.columns == CONTINUOUS_DF_COLUMNS).all() and (
+                all_test_files.columns == CONTINUOUS_DF_COLUMNS
+            ).all(), (
+                f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {all_train_files.columns} and {all_test_files.columns}"
             )
         self.all_train_files = all_train_files
         self.all_test_files = all_test_files
@@ -671,12 +671,13 @@ class TimeDiffusion:
         self.optimizer.zero_grad(set_to_none=True)
 
         # Log to wandb
+        time_to_log = time if isinstance(time, float) else time.tolist()  # TODO: manual histogram
         self.accelerator.log(
             {
                 "training/loss": loss.item(),
                 "training/lr": self.lr_scheduler.get_last_lr()[0],
                 "training/step": self.global_optimization_step,
-                "training/time": time,
+                "training/time": time_to_log,
                 "training/L2 gradient norm": grad_norm,
             },
             step=self.global_optimization_step,
@@ -705,7 +706,12 @@ class TimeDiffusion:
         video_time_codes: Tensor,
         net: UNet2DConditionModel | None = None,
     ):
-        # allow providing evaluation net
+        """
+        Wrapper around `net.forward` allowing to provide evaluation `net` instead of `self.net` (training one)
+
+        Passed `video_time_codes` are expected to be of shape `(batch_size, encoder_hidden_states_dim)`,
+        and will be unsqueezed to `(batch_size, 1, encoder_hidden_states_dim)`.
+        """
         _net: UNet2DConditionModel = self.net if net is None else net  # pyright: ignore[reportAssignmentType]
         return _net.forward(
             noisy_batch,
@@ -1501,11 +1507,13 @@ class TimeDiffusion:
         if self.accelerator.is_main_process:
             video_times_pbar.refresh()
 
-        for video_time_idx in video_times_pbar(enumerate(true_labels_times)):
+        for video_time_idx in video_times_pbar(range(len(true_labels_times))):
+            video_time_idx: int
             # if using continuous datasets: use the time preds on ground truths as video time encodings (later)
             if self.cfg.dataset.fully_ordered:
+                true_label = eval_base_video_times_true_labels[video_time_idx]
                 # many batches in here!
-                video_time_enc = eval_video_time_enc[eval_base_video_times_true_labels[video_time_idx]]  # pyright: ignore[reportPossiblyUnboundVariable]
+                video_time_enc = eval_video_time_enc[true_label]  # pyright: ignore[reportPossiblyUnboundVariable]
             # if using discrete datasets: simply repeat the ground truth
             else:
                 # same for all batches
@@ -1532,19 +1540,37 @@ class TimeDiffusion:
             if self.accelerator.is_main_process:
                 batches_pbar.refresh()
 
+            # only for fully ordered:
+            # these are all the indexes of the video time encodings that* this process* will generate
+            this_proc_idxes = list(
+                range(self.accelerator.process_index, len(video_time_enc), self.accelerator.num_processes)
+            )  # not used for discrete datasets
+
             # loop over generation batches
             for batch_idx, batch_size in batches_pbar(enumerate(this_proc_gen_batches)):
                 if self.cfg.dataset.fully_ordered:
-                    start = batch_idx * eval_strat.batch_size
-                    end = start + eval_strat.batch_size
-                    this_batch_video_time_enc = video_time_enc[start:end]
+                    # each process generates times at indexes that are modulo 0 their process index (stridding),
+                    # and on this batch it generates batch_size of them
+                    start_on_this_proc_idxes = sum(  # this proc has already generated this many samples
+                        this_proc_gen_batches[:batch_idx]
+                    )
+                    end_on_this_proc_idxes = start_on_this_proc_idxes + batch_size
+                    # these are the true start and end indexes of the whole video time encodings
+                    idxes_on_this_batch_video_time_enc = this_proc_idxes[
+                        start_on_this_proc_idxes:end_on_this_proc_idxes
+                    ]
+                    this_batch_video_time_enc = video_time_enc[idxes_on_this_batch_video_time_enc]
                     if batch_idx % 9 == 0:
                         self.logger.debug(
-                            f"At generation batch index {batch_idx}: using time preds between {start} and {end}: (15 first) {this_batch_video_time_enc[:15]}"
+                            f"At generation batch index {batch_idx}: using time preds at index between {start_on_this_proc_idxes} and {end_on_this_proc_idxes} resulting in video time encodings of shape {this_batch_video_time_enc.shape}"
                         )
                 else:
                     # truncate to actual batch size
                     this_batch_video_time_enc = video_time_enc[:batch_size]
+                    if batch_idx % 9 == 0:
+                        self.logger.debug(
+                            f"At generation batch index {batch_idx}: using video time encodings of shape {this_batch_video_time_enc.shape}"
+                        )
 
                 gen_pbar = pbar_manager.counter(
                     total=len(inference_scheduler.timesteps),
