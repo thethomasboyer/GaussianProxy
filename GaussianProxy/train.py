@@ -32,7 +32,7 @@ from GaussianProxy.utils.training import TimeDiffusion, load_resuming_args
 from my_conf.my_training_conf import config
 
 # nice tracebacks
-install()
+install(width=200)
 
 
 # stop DEBUG log pollution

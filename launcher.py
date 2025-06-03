@@ -48,7 +48,7 @@ cs = ConfigStore.instance()
 cs.store(name=DEFAULT_CONFIG_NAME, node=config)
 
 # nice tracebacks
-install()
+install(width=200)
 
 # wait for this amount of seconds before automatically launching the job when debug flag is set
 CONFIRMATION_TIME_LAUNCH_DEBUG_SEC = 5
