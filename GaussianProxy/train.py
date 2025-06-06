@@ -330,6 +330,7 @@ def main(cfg: Config) -> None:
 
     # ----------------------------------- The End  -----------------------------------
     logger.info("Ending training")
+    torch.cuda.empty_cache()
     accelerator.end_training()
 
 
