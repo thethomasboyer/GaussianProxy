@@ -702,34 +702,7 @@ def plot_3D_embeddings(
     logger.debug(f"Saved 3D plot to {png_save_path}")
 
 
-# def project_to_time(points: np.ndarray, spline: BSpline, t_min: float, t_max: float) -> np.ndarray:
-#     """
-#     ## Arguments:
-#     - `points`: `ndarray` of shape (n_samples, n_features)
-#     - `spline`: `BSpline`
-#     - `t_min`: minimum time value
-#     - `t_max`: maximum time value
-
-#     ## Returns:
-#     - `times`: `ndarray`, continuous times array of shape (n_samples,)
-#     """
-#     assert spline(0).shape == points[0].shape, (
-#         f"Expected spline to output the same shape as points, got {spline(0).shape} and {points[0].shape}"
-#     )
-
-#     def find_t(pt: np.ndarray) -> float:
-#         obj = lambda t: np.sum((spline(t) - pt) ** 2)
-#         res: OptimizeResult = minimize_scalar(obj, bounds=(t_min, t_max), method="bounded")  # pyright: ignore[reportAssignmentType]
-#         assert res.success, f"Optimization failed for point {pt} with message: {res.message}"
-#         return res.x
-
-#     times = np.array([find_t(p) for p in points])
-
-#     return times
-
-
 # TODO:maybe: use a hybrid approach: cdist on gross grid, then minimize_scalar?
-# or just use fastdist if huge spline...
 def project_to_time(
     points: np.ndarray, spline_values: np.ndarray, times_of_spline_evaluation: np.ndarray
 ) -> np.ndarray:
@@ -742,7 +715,11 @@ def project_to_time(
     assert spline_values.shape[1] == points.shape[1], (
         f"Expected same number of features, got {spline_values.shape[1]} and {points.shape[1]}"
     )
-    dist_matrix = cdist(points, spline_values, metric="euclidean")
+    # torch cdist is much faster than scipy cdist; move to GPU if it's still too slow
+    dist_matrix = cdist(
+        torch.tensor(points, dtype=torch.float32), torch.tensor(spline_values, dtype=torch.float32), p=2
+    )
+    dist_matrix = dist_matrix.numpy()
     assert dist_matrix.shape == (points.shape[0], spline_values.shape[0])
     closest_indices = np.argmin(dist_matrix, axis=1)
     assert closest_indices.shape == (points.shape[0],)
@@ -1219,10 +1196,9 @@ if __name__ == "__main__":
     from numpy.random import Generator
     from PIL import Image
     from scipy.interpolate import make_interp_spline
-    from scipy.spatial.distance import cdist
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-    from torch import Tensor
+    from torch import Tensor, cdist
     from torch.utils.data import DataLoader
     from torchvision.transforms import Compose, RandomCrop, RandomHorizontalFlip, RandomVerticalFlip
     from tqdm.auto import tqdm
@@ -1576,17 +1552,6 @@ if __name__ == "__main__":
         new_ds_file_save_path = (
             Path(ds.path).parent / f"{ds.name}__continuous_time_predictions__{encoding_scheme}.parquet"
         )
-        logger.info(f"Original dataset path:                        {ds.path}")
-        logger.info(f"Saving continuous time predictions dataset to {new_ds_file_save_path}")
-
-        data = []
-        for sample_file_path, true_time_label, continuous_time_pred in zip(
-            file_paths, labels, continuous_time_predictions, strict=True
-        ):
-            data.append(
-                {"time": continuous_time_pred, "file_path": sample_file_path, "true_label": str(true_time_label)}
-            )
-        df = pd.DataFrame(data)
 
         if params.save_times != "no":
             write_times = True
@@ -1608,6 +1573,22 @@ if __name__ == "__main__":
                 else:
                     raise ValueError(f"Unknown params.save_times value: {params.save_times}")
             if write_times:
+                logger.info(f"Original dataset path:                        {ds.path}")
+                logger.info(f"Saving continuous time predictions dataset to {new_ds_file_save_path}")
+
+                data = []
+                for sample_file_path, true_time_label, continuous_time_pred in zip(
+                    file_paths, labels, continuous_time_predictions, strict=True
+                ):
+                    data.append(
+                        {
+                            "time": continuous_time_pred,
+                            "file_path": sample_file_path,
+                            "true_label": str(true_time_label),
+                        }
+                    )
+                df = pd.DataFrame(data)
+
                 df.to_parquet(new_ds_file_save_path, index=False)
                 logger.info(f"Saved continuous time predictions dataset to {new_ds_file_save_path}")
         else:
