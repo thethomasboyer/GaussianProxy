@@ -49,6 +49,7 @@ dependencies = [
     "umap-learn>=0.5.7",
     "transformers>=4.51.3",
     "kaleido==0.2.1",
+    "timm>=1.0.15",
 ]
 
 [tool.ruff]
@@ -76,7 +77,18 @@ lint.select = [
 ]
 
 [tool.pylint]
-MASTER.ignore = [".venv", "src"]
+MASTER.ignore = [
+    ".venv",
+    "src",
+    ".github",
+    ".ruff_cache",
+    "**/.vscode",
+    "experiments",
+    "**/experiments",
+    "**/__pycache__",
+    "**/.vscode-server",
+    "**/.ipynb_checkpoints",
+]
 MESSAGES_CONTROL.disable = ["E0401", "E0611", "C0301"]
 # E0401 - Import error (unable to import module)
 # E0611 - No name in module (cannot import name from module)
@@ -88,11 +100,12 @@ exclude = [
     ".venv",
     ".ruff_cache",
     "src",
+    "experiments",
     "**/experiments",
     "**/__pycache__",
     "**/.local/share/uv/python",
-    "**/.vscode-server/extensions",
-    "**/.vscode/extensions",
+    "**/.vscode-server",
+    "**/.vscode",
     "**/.ipynb_checkpoints",
 ]
 

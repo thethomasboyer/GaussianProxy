@@ -1,4 +1,9 @@
+# pylint: disable=too-many-lines
 # pylint: disable=possibly-used-before-assignment
+# pylint: disable=logging-fstring-interpolation
+# pylint: disable=missing-module-docstring
+# pylint: disable=redefined-outer-name
+# pylint: disable=missing-function-docstring
 
 # Most imports are made after the parameters printing section because Python imports are just so fucking slow
 from __future__ import annotations
@@ -113,7 +118,7 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
         num_workers=4,
         pin_memory=True,
         collate_fn=collate_with_paths,
-        prefetch_factor=1,
+        prefetch_factor=2,
         persistent_workers=True,
     )
 
@@ -128,7 +133,7 @@ def save_encodings(
     base_save_path: Path,
     save_name: str,
     batch_size: int,
-    recompute_encodings: Literal[True] | Literal["no-overwrite"],
+    recompute_encodings: Literal["no-overwrite"] | Literal["force-overwrite"],
 ):
     # Checks
     assert dataset.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
@@ -150,13 +155,13 @@ def save_encodings(
     # Model
     logger.info(f"Loading model {model_name} on device {device}...")
     processor = AutoImageProcessor.from_pretrained(model_name)
-    model = Dinov2WithRegistersModel.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
+    model = AutoModel.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
 
     # Run
     rows: list[dict] = []
 
     for batch in tqdm(iter(dataloader), total=len(dataloader), desc="Processing batches"):
-        # `tensors` is only used if use_DINO_preprocessor is `False`!
+        # `tensors` is only used if use_model_preprocessor is `False`!
         tensors, paths = batch["tensors"], batch["paths"]
 
         # images
@@ -171,8 +176,6 @@ def save_encodings(
 
         # get the [CLS] token
         cls_tokens = outputs.pooler_output.cpu().numpy()
-        # check because it's never *really* clear where is the [CLS] token in the output....
-        assert (cls_tokens == outputs.last_hidden_state.cpu().numpy()[:, 0, :]).all()
 
         # labels
         labels: list[int] | list[str] = [dataset.dataset_params.key_transform(p.parent.name) for p in paths]
@@ -233,7 +236,7 @@ def plot_2D_embeddings(
     ylim = plt.gca().get_ylim()
 
     plt.gca().set_aspect("equal", "datalim")
-    plt.suptitle(f"{viz_name.split('_')[0]} projection of CLS tokens of {encoding_scheme} on {dataset.name} dataset")
+    plt.suptitle(f"{viz_name.split('_')[0]} projection of CLS tokens of {encoding_scheme} on {dataset.name}")
     if subtitle is not None:
         plt.title(subtitle)
     if xy_labels is not None:
@@ -535,67 +538,6 @@ def plot_boxplots_continuous_time_preds(
     logger.debug(f"Saved boxplots of continuous time predictions to {save_path}")
 
 
-# def plot_ellipse(mean: np.ndarray, cov: np.ndarray, color: str, ax: plt.Axes) -> None:
-#     # draw a 2-sigma ellipse from a mean & covariance
-#     v, w = np.linalg.eigh(cov)
-#     u = w[0] / np.linalg.norm(w[0])
-#     angle = np.degrees(np.arctan2(u[1], u[0]))
-#     ell = mpl.patches.Ellipse(
-#         xy=mean,
-#         width=2 * np.sqrt(v[0]),
-#         height=2 * np.sqrt(v[1]),
-#         angle=180 + angle,
-#         facecolor=color,
-#         edgecolor="black",
-#         linewidth=2,
-#         alpha=0.4,
-#     )
-#     ell.set_clip_box(ax.bbox)
-#     ax.add_artist(ell)
-
-
-# def plot_result(estimator: LinearDiscriminantAnalysis, X: np.ndarray, y: np.ndarray, ax: plt.Axes) -> None:
-#     # prepare a viridis palette for N classes
-#     classes = estimator.classes_
-#     palette = sns.color_palette("viridis", n_colors=len(classes))
-#     cmap = colors.ListedColormap(palette)
-
-#     # decision‐region background
-#     DecisionBoundaryDisplay.from_estimator(
-#         estimator,
-#         X,
-#         response_method="predict",
-#         plot_method="pcolormesh",
-#         ax=ax,
-#         cmap=cmap,
-#         alpha=0.3,
-#     )
-
-#     # scatter the points
-#     scatter = ax.scatter(X[:, 0], X[:, 1], c=y, cmap=cmap, s=40)
-#     ax.legend(*scatter.legend_elements(), title="Class")
-
-#     # class means
-#     ax.scatter(  # this is incorrect: we should project the means to the 2D space
-#         estimator.means_[:, 0],
-#         estimator.means_[:, 1],
-#         c="yellow",
-#         s=200,
-#         marker="*",
-#         edgecolor="black",
-#     )
-
-#     # plot ellipses (LDA uses a shared covariance)
-#     covs = [estimator.covariance_] * len(classes)
-#     for mean, cov, col in zip(estimator.means_, covs, palette):
-#         plot_ellipse(mean, cov, col, ax)
-
-#     ax.set_box_aspect(1)
-#     for sp in ax.spines.values():
-#         sp.set_visible(False)
-#     ax.set(xticks=[], yticks=[])
-
-
 def plot_3D_embeddings(
     labels: np.ndarray,
     sorted_unique_labels: list[str],
@@ -760,29 +702,52 @@ def plot_3D_embeddings(
     logger.debug(f"Saved 3D plot to {png_save_path}")
 
 
-def project_to_time(points: np.ndarray, spline: BSpline, t_min: float, t_max: float) -> np.ndarray:
-    """
-    ## Arguments:
-    - `points`: `ndarray` of shape (n_samples, n_features)
-    - `spline`: `BSpline`
-    - `t_min`: minimum time value
-    - `t_max`: maximum time value
+# def project_to_time(points: np.ndarray, spline: BSpline, t_min: float, t_max: float) -> np.ndarray:
+#     """
+#     ## Arguments:
+#     - `points`: `ndarray` of shape (n_samples, n_features)
+#     - `spline`: `BSpline`
+#     - `t_min`: minimum time value
+#     - `t_max`: maximum time value
 
-    ## Returns:
-    - `times`: `ndarray`, continuous times array of shape (n_samples,)
+#     ## Returns:
+#     - `times`: `ndarray`, continuous times array of shape (n_samples,)
+#     """
+#     assert spline(0).shape == points[0].shape, (
+#         f"Expected spline to output the same shape as points, got {spline(0).shape} and {points[0].shape}"
+#     )
+
+#     def find_t(pt: np.ndarray) -> float:
+#         obj = lambda t: np.sum((spline(t) - pt) ** 2)
+#         res: OptimizeResult = minimize_scalar(obj, bounds=(t_min, t_max), method="bounded")  # pyright: ignore[reportAssignmentType]
+#         assert res.success, f"Optimization failed for point {pt} with message: {res.message}"
+#         return res.x
+
+#     times = np.array([find_t(p) for p in points])
+
+#     return times
+
+
+# TODO:maybe: use a hybrid approach: cdist on gross grid, then minimize_scalar?
+# or just use fastdist if huge spline...
+def project_to_time(
+    points: np.ndarray, spline_values: np.ndarray, times_of_spline_evaluation: np.ndarray
+) -> np.ndarray:
     """
-    assert spline(0).shape == points[0].shape, (
-        f"Expected spline to output the same shape as points, got {spline(0).shape} and {points[0].shape}"
+    Projection of points to time using the spline already computed values at `times_of_spline_evaluation`.
+    Simply returns the closest time value for each point.
+    """
+    assert times_of_spline_evaluation.ndim == 1
+    assert spline_values.ndim == points.ndim == 2, f"Expected 2D arrays, got {spline_values.ndim}D and {points.ndim}D"
+    assert spline_values.shape[1] == points.shape[1], (
+        f"Expected same number of features, got {spline_values.shape[1]} and {points.shape[1]}"
     )
-
-    def find_t(pt: np.ndarray) -> float:
-        obj = lambda t: np.sum((spline(t) - pt) ** 2)
-        res: OptimizeResult = minimize_scalar(obj, bounds=(t_min, t_max), method="bounded")  # pyright: ignore[reportAssignmentType]
-        assert res.success, f"Optimization failed for point {pt} with message: {res.message}"
-        return res.x
-
-    times = np.array([find_t(p) for p in points])
-
+    dist_matrix = cdist(points, spline_values, metric="euclidean")
+    assert dist_matrix.shape == (points.shape[0], spline_values.shape[0])
+    closest_indices = np.argmin(dist_matrix, axis=1)
+    assert closest_indices.shape == (points.shape[0],)
+    times = times_of_spline_evaluation[closest_indices]
+    assert times.shape == (points.shape[0],)
     return times
 
 
@@ -798,9 +763,7 @@ def plot_histograms_distances_to_true_labels(
     dists_to_true_label: list[float] = []
     nb_changes = 0
     changes_count_from_true_label = dict.fromkeys(sorted_unique_labels, 0)
-    possible_diffs = sorted(
-        set(abs(a - b) for i, a in enumerate(sorted_unique_label_times) for b in sorted_unique_label_times[i:])
-    )
+    possible_diffs = sorted(set(a - b for a in sorted_unique_label_times for b in sorted_unique_label_times))
     changes_count_by_dist = dict.fromkeys(possible_diffs, 0)
 
     for true_label, time in zip(labels, continuous_times, strict=True):
@@ -812,32 +775,32 @@ def plot_histograms_distances_to_true_labels(
         closest_label_time = min(sorted_unique_label_times, key=lambda x: abs(x - time))
         closest_label = sorted_unique_labels[sorted_unique_label_times.index(closest_label_time)]
 
-        if closest_label != true_label:
+        if closest_label != str(true_label):
             nb_changes += 1
             changes_count_from_true_label[str(true_label)] += 1
 
-        changes_count_by_dist[abs(true_label_time - closest_label_time)] += 1
+        changes_count_by_dist[true_label_time - closest_label_time] += 1
 
     logger.debug(f"Number of changes: {nb_changes} out of {len(labels)} ({nb_changes / len(labels) * 100:.2f}%)")
     logger.debug(f"Changes count from true label: {changes_count_from_true_label}")
-    logger.debug(
-        f"Distances distribution between true label and true label closest to time prediction: {changes_count_by_dist}"
-    )
 
     n_labels = len(sorted_unique_labels)
     n_cols = min(4, n_labels)
-    n_rows = (n_labels + n_cols - 1) // n_cols
+    n_rows_middle_plot = (n_labels + n_cols - 1) // n_cols
+    n_rows = n_rows_middle_plot + 2  # top hist, per-label hists, changes hist
 
-    fig = plt.figure(figsize=(4 * n_cols, 4 * (n_rows + 1)))
-    gs = gridspec.GridSpec(nrows=n_rows + 1, ncols=n_cols, height_ratios=[1.2] + [1] * n_rows)
+    fig = plt.figure(figsize=(4 * n_cols, 4 * n_rows_middle_plot + 6))
+    gs = gridspec.GridSpec(nrows=n_rows, ncols=n_cols, height_ratios=[1.2] + [1] * n_rows_middle_plot + [1.2])
+
+    max_dist_to_true_label = max(dists_to_true_label)
 
     # Top: combined histogram spanning all columns
     ax_top = fig.add_subplot(gs[0, :])
     ax_top.hist(dists_to_true_label, bins=256)
-    ax_top.set_title("Histogram of distances to true label")
+    ax_top.set_title("Histogram of distances between continuous time pred and true original label")
     ax_top.set_xlabel("Distance to true label")
     ax_top.set_ylabel("Count")
-    ax_top.set_xlim(0, 1)
+    ax_top.set_xlim(0, max_dist_to_true_label)
 
     # Grid of per-label histograms
     for idx, label in enumerate(sorted_unique_labels):
@@ -849,15 +812,44 @@ def plot_histograms_distances_to_true_labels(
         ax.set_title(label)
         ax.set_xlabel("Distance to true label")
         ax.set_ylabel("Count")
-        ax.set_xlim(0, 1)
+        ax.set_xlim(0, max_dist_to_true_label)
 
-    plt.suptitle(f"Distances to true label histograms for {dataset_name}", fontsize=16)
+    # Histogram of changes_count_by_dist
+    ax_changes = fig.add_subplot(gs[-1, :])
+    diffs = list(changes_count_by_dist.keys())
+    counts = list(changes_count_by_dist.values())
+    sns.barplot(x=diffs, y=counts, ax=ax_changes)
+    # Limit the number of x-tick labels for readability
+    max_ticks = 10
+    # show up to max_ticks evenly spaced labels at bar positions
+    n = len(diffs)
+    step = max(1, n // max_ticks)
+    positions = list(range(0, n, step))
+    xticklabels = [f"{diffs[i]:.2g}" for i in positions]
+    ax_changes.set_xticks(positions)
+    ax_changes.set_xticklabels(xticklabels, rotation=45, ha="right")
+
+    ax_changes.set_title("Histogram of distances between true original label and true label closest to time prediction")
+    ax_changes.set_xlabel("(time of true original label) - (time of new closest label)")
+    ax_changes.set_ylabel("Count")
+
+    plt.suptitle(f"Distances to true label histograms for {dataset_name} with {viz_name}", fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     save_path = base_save_path / f"continuous_time_predictions_distances_to_true_labels_{viz_name}_histogram.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
     logger.debug(f"Saved histogram of distances to true labels to {save_path}")
+
+
+def get_stratified_random_indices(labels: np.ndarray, n_per_class: int, rng: np.random.Generator):
+    idxs = []
+    unique_labels = np.unique(labels)
+    for label in unique_labels:
+        label_idxs = np.where(labels == label)[0]
+        n = min(n_per_class, len(label_idxs))
+        idxs.extend(rng.choice(label_idxs, size=n, replace=False))
+    return np.array(idxs)
 
 
 def fit_spline_project_time_plots(
@@ -884,6 +876,7 @@ def fit_spline_project_time_plots(
     lda_explained_variance: np.ndarray,
     df: pd.DataFrame,
     normalization_method: str,
+    nb_times_spline_eval: int,
 ) -> np.ndarray:
     if projection_type == "base embedding space":
         # Compute spline
@@ -898,17 +891,18 @@ def fit_spline_project_time_plots(
         assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
         t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
         logger.warning(
-            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
+            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline with {nb_times_spline_eval} evaluation points"
         )
-        times_to_eval_spline = np.linspace(t_min, t_max, 1000)
+        times_to_eval_spline = np.linspace(t_min, t_max, nb_times_spline_eval)
         spline_values = spline(times_to_eval_spline)  # these are in DINO's embedding space
         # Project base embeddings on spline
-        continuous_time_predictions = project_to_time(cls_tokens, spline, t_min, t_max)
+        logger.debug(f"projecting embeddings of shape {cls_tokens.shape} on spline of shape {spline_values.shape}")
+        continuous_time_predictions = project_to_time(cls_tokens, spline_values, times_to_eval_spline)
         logger.debug(
             f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         # Plot spline and projections along with base embeddings
-        random_idx_to_plot_projections = rng.choice(len(cls_tokens), size=50, replace=False)
+        random_idx_to_plot_projections = get_stratified_random_indices(labels, 10, rng)
         projection_pairs = (
             cls_tokens[random_idx_to_plot_projections],
             spline(continuous_time_predictions[random_idx_to_plot_projections]),
@@ -925,17 +919,18 @@ def fit_spline_project_time_plots(
         assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
         t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
         logger.warning(
-            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline"
+            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline with {nb_times_spline_eval} evaluation points"
         )
-        times_to_eval_spline = np.linspace(t_min, t_max, 1000)
+        times_to_eval_spline = np.linspace(t_min, t_max, nb_times_spline_eval)
         spline_values = spline(times_to_eval_spline)  # these are in LDA's embedding space
         # Project lda embeddings on spline
-        continuous_time_predictions = project_to_time(lda_embeddings, spline, t_min, t_max)
+        logger.debug(f"projecting embeddings of shape {lda_embeddings.shape} on spline of shape {spline_values.shape}")
+        continuous_time_predictions = project_to_time(lda_embeddings, spline_values, times_to_eval_spline)
         logger.debug(
             f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
         # Plot spline and projections along with base embeddings
-        random_idx_to_plot_projections = rng.choice(len(cls_tokens), size=50, replace=False)
+        random_idx_to_plot_projections = get_stratified_random_indices(labels, 10, rng)
         projection_pairs = (
             lda.transform(cls_tokens[random_idx_to_plot_projections]),
             spline(continuous_time_predictions[random_idx_to_plot_projections]),
@@ -1129,10 +1124,11 @@ class Params:
     model_name: str
     batch_size: int
     use_model_preprocessor: bool
-    recompute_encodings: bool | Literal["no-overwrite"]
+    recompute_encodings: Literal["force-overwrite"] | Literal["no-overwrite"] | Literal["no"]
     save_times: Literal["no-overwrite"] | Literal["overwrite"] | Literal["ask-before-overwrite"] | Literal["no"]
     seed: int
     frac_range_delta: float  # fraction of the true time range to use for t_min, t_max parametrization
+    nb_times_spline_eval: int
 
 
 if __name__ == "__main__":
@@ -1141,29 +1137,36 @@ if __name__ == "__main__":
     ###################################################################################################################
     sys.path.append(".")
     # Attention: we *might or might not* use our datasets' pipeline as DINO has its own preprocessing pipeline.
+    # ruff: noqa: F401
+    # pylint: disable=unused-import
     from my_conf.dataset.BBBC021_196_docetaxel_inference import (
-        BBBC021_196_docetaxel_inference as bbbc021_ds,  # noqa: E402
+        BBBC021_196_docetaxel_inference as bbbc021_ds,
     )
-    from my_conf.dataset.biotine_png_128_inference import dataset as biotine_ds  # noqa: E402
-    from my_conf.dataset.chromalive6h_3ch_png_inference import dataset as chromalive_ds  # noqa: E402
+    from my_conf.dataset.biotine_png_128_inference import dataset as biotine_ds
+    from my_conf.dataset.chromalive6h_3ch_png_inference import dataset as chromalive_ds
     from my_conf.dataset.diabetic_retinopathy_inference import (
-        diabetic_retinopathy_inference as diabetic_retinopathy_ds,  # noqa: E402
+        diabetic_retinopathy_inference as diabetic_retinopathy_ds,
     )
-    from my_conf.dataset.Jurkat_inference import Jurkat_inference as jurkat_ds  # noqa: E402
-    from my_conf.dataset.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds  # noqa: E402
-    from my_conf.dataset.NASH_steatosis_inference import dataset as NASH_steatosis_ds  # noqa: E402
+    from my_conf.dataset.ependymal_context_inference import dataset as ependymal_context_ds
+    from my_conf.dataset.ependymal_cutout_inference import dataset as ependymal_cutout_ds
+    from my_conf.dataset.Jurkat_inference import Jurkat_inference as jurkat_ds
+    from my_conf.dataset.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds
+    from my_conf.dataset.NASH_steatosis_inference import dataset as NASH_steatosis_ds
+    # pylint: enable=unused-import
+    # ruff: enable=F401
 
     # fmt: off
     params = Params(
-        datasets               = [NASH_steatosis_ds, diabetic_retinopathy_ds, biotine_ds, bbbc021_ds, NASH_fibrosis_ds, chromalive_ds, jurkat_ds],
-        device                 = "cuda:0",
-        model_name             = "facebook/dinov2-with-registers-giant",
-        batch_size             = 1024,
+        datasets               = [bbbc021_ds, biotine_ds, chromalive_ds, diabetic_retinopathy_ds, ependymal_context_ds, ependymal_cutout_ds, jurkat_ds, NASH_fibrosis_ds, NASH_steatosis_ds],
+        device                 = "cuda:2",
+        model_name             = "timm/convnextv2_large.fcmae",
+        batch_size             = 512,
         use_model_preprocessor = False,
         recompute_encodings    = "no-overwrite",
         save_times             = "overwrite",
         seed                   = random.randint(0, 2**32 - 1),
         frac_range_delta       = 0.3,
+        nb_times_spline_eval   = 10_000
     )
     # fmt: on
 
@@ -1215,8 +1218,8 @@ if __name__ == "__main__":
     import umap
     from numpy.random import Generator
     from PIL import Image
-    from scipy.interpolate import BSpline, make_interp_spline
-    from scipy.optimize import OptimizeResult, minimize_scalar
+    from scipy.interpolate import make_interp_spline
+    from scipy.spatial.distance import cdist
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
     from torch import Tensor
@@ -1224,7 +1227,7 @@ if __name__ == "__main__":
     from torchvision.transforms import Compose, RandomCrop, RandomHorizontalFlip, RandomVerticalFlip
     from tqdm.auto import tqdm
     from transformers.models.auto.image_processing_auto import AutoImageProcessor
-    from transformers.models.dinov2_with_registers import Dinov2WithRegistersModel
+    from transformers.models.auto.modeling_auto import AutoModel
 
     from GaussianProxy.conf.training_conf import DataSet
     from GaussianProxy.utils.data import ImageDataset, RandomRotationSquareSymmetry
@@ -1258,7 +1261,7 @@ if __name__ == "__main__":
         encodings_filename = f"{encoding_scheme}_encodings.parquet"
         load_existing_encodings = False
         df: pd.DataFrame = pd.DataFrame()  # pylance is idiotic
-        if params.recompute_encodings is not False:
+        if params.recompute_encodings != "no":
             df_or_None = save_encodings(
                 params.device,
                 params.model_name,
@@ -1420,23 +1423,6 @@ if __name__ == "__main__":
             ),
             centroids_in_base_embedding_space=lda.means_,  # pyright: ignore[reportArgumentType]
         )
-        # TODO: decision boundaries
-        # # 1) take your 3‐dim LDA embedding and slice to 2D
-        # X2 = embeddings[:, :2]
-        # y = np.array(labels)
-        # # 2) fit a fresh 2D LDA (so the estimator n_features_in_ matches X2.shape[1])
-        # lda_viz = LinearDiscriminantAnalysis(solver="svd", store_covariance=True)
-        # lda_viz.fit(X2, y)
-        # # 3) plot
-        # fig, ax = plt.subplots(figsize=(10, 10))
-        # plot_result(lda_viz, X2, y, ax)
-        # ax.set_title(
-        #     f"LDA projection of CLS tokens of {params.model_name} on {ds.name}\n"
-        #     f"Total explained variance: {np.sum(explained_variance[:2]) * 100:.1f}% | decision boundaries based on separatly fitted 2D LDA"
-        # )
-        # ax.set_xlabel(f"LDA 1 ({explained_variance[0] * 100:.1f}% var)")
-        # ax.set_ylabel(f"LDA 2 ({explained_variance[1] * 100:.1f}% var)")
-        # plt.show()
         # 3D
         plot_3D_embeddings(
             labels,
@@ -1516,7 +1502,6 @@ if __name__ == "__main__":
         )
 
         ### From projection on spline going through class centroids
-        # of base encoding space (eg DINO's CLS tokens)
         # warning: we need to sort the class centroids in the same order as the unique times/labels!
         lda_classes_in_default_order = [str(cl) for cl in lda.classes_]  # pyright: ignore[reportGeneralTypeIssues]
         lda_classes_sorting_idxes = [lda_classes_in_default_order.index(label) for label in sorted_unique_labels]
@@ -1527,6 +1512,7 @@ if __name__ == "__main__":
             f"Expected lda.classes_= {lda.classes_} sorted with {lda_classes_sorting_idxes} to be equal to {sorted_unique_labels}, got {sorted_lda_classes}"
         )
         sorted_lda_centroids: np.ndarray = lda.means_[lda_classes_sorting_idxes]  # pyright: ignore[reportIndexIssue, reportArgumentType, reportCallIssue, reportAssignmentType]
+        # of base encoding space (eg DINO's CLS tokens)
         logger.info("-> from projection on spline going through class centroids in base encoding space")
         logger.debug(
             f"Centroids shape: {sorted_lda_centroids.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
@@ -1555,6 +1541,7 @@ if __name__ == "__main__":
             lda_explained_variance,
             df,
             "min-max",
+            params.nb_times_spline_eval,
         )
         # of LDA embeddings
         logger.info("-> from projection on spline going through class centroids in LDA encoding space")
@@ -1582,6 +1569,7 @@ if __name__ == "__main__":
             lda_explained_variance,
             df,
             "min-max",
+            params.nb_times_spline_eval,
         )
 
         ### Save new continuous time label
