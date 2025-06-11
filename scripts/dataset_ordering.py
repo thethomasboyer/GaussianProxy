@@ -185,7 +185,7 @@ def save_encodings(
             row_data = {
                 "encodings": this_cls_token,
                 "labels": this_label,
-                "file_paths": str(this_path),  # Optional: save file paths for reference
+                "file_paths": str(this_path),
             }
             rows.append(row_data)
 
@@ -218,11 +218,29 @@ def plot_2D_embeddings(
     projection_pairs: tuple[np.ndarray, np.ndarray] | None = None,
     centroids_in_base_embedding_space: np.ndarray | None = None,
     projection_type: Literal["base embedding space", "LDA embedding space"] = "base embedding space",
+    projector_embeddings_test: np.ndarray | None = None,
+    labels_test: np.ndarray | None = None,
 ):
     plt.figure(figsize=(10, 10))
     # Use a sequential color palette with as many colors as unique labels
     palette = sns.color_palette("viridis", n_colors=len(unique_labels))
     label_to_color = {label: palette[i] for i, label in enumerate(unique_labels)}
+
+    # concatenate test data with main one if present
+    if projector_embeddings_test is not None or labels_test is not None:
+        assert projector_embeddings_test is not None and labels_test is not None, (
+            f"Both projector_embeddings_test and labels_test must be provided if one of them is provided, got {type(projector_embeddings_test)} and {type(labels_test)}"
+        )
+        projector_embeddings = np.concatenate((projector_embeddings, projector_embeddings_test), axis=0)
+        labels = np.concatenate((labels, labels_test), axis=0)
+        is_test_data = np.array([False] * len(labels) + [True] * len(labels_test), dtype=bool)
+    else:
+        is_test_data = np.array([False] * len(labels), dtype=bool)
+
+    # checks
+    assert len(labels) == len(projector_embeddings), (
+        f"Expected labels and embeddings to have the same length, got {len(labels)} and {projector_embeddings.shape}"
+    )
 
     # Make the plot order random
     indices = np.arange(len(labels))
@@ -230,8 +248,22 @@ def plot_2D_embeddings(
     shuffled_embeddings = projector_embeddings[indices]
     shuffled_labels = [labels[i] for i in indices]
     shuffled_colors = [label_to_color[str(label)] for label in shuffled_labels]
+    is_test_data = is_test_data[indices]
 
-    plt.scatter(shuffled_embeddings[:, 0], shuffled_embeddings[:, 1], c=shuffled_colors, s=10, alpha=0.5)
+    # 1. Plot points
+    plt.scatter(
+        shuffled_embeddings[~is_test_data, 0], shuffled_embeddings[~is_test_data, 1], c=shuffled_colors, s=10, alpha=0.5
+    )
+    if np.any(is_test_data):
+        plt.scatter(
+            shuffled_embeddings[is_test_data, 0],
+            shuffled_embeddings[is_test_data, 1],
+            c=np.array(shuffled_colors)[is_test_data],
+            s=10,
+            alpha=0.5,
+            marker="^",
+            edgecolor="black",
+        )
     xlim = plt.gca().get_xlim()
     ylim = plt.gca().get_ylim()
 
@@ -354,7 +386,7 @@ def plot_2D_embeddings(
 def plot_histograms_embeddings_means_vars(
     tokens: np.ndarray, encoding_scheme: str, dataset_name: str, base_save_path: Path
 ):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+    _, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
 
     # Top: means
     sns.histplot(x=tokens.mean(axis=0), bins=100, ax=ax1, color="skyblue")
@@ -554,6 +586,8 @@ def plot_3D_embeddings(
     projection_pairs: tuple[np.ndarray, np.ndarray] | None = None,
     centroids_in_base_embedding_space: np.ndarray | None = None,
     projection_type: Literal["base embedding space", "LDA embedding space"] = "base embedding space",
+    projector_embeddings_test: np.ndarray | None = None,
+    labels_test: np.ndarray | None = None,
 ):
     """
     Plot 3D embeddings of some projector (e.g. PCA, LDA) with time labels.
@@ -566,11 +600,24 @@ def plot_3D_embeddings(
     color_discrete_map = {
         str(label): f"rgb{tuple(int(255 * c) for c in palette[i])}" for i, label in enumerate(sorted_unique_labels)
     }
+
+    # concatenate test data with main one if present
+    if projector_embeddings_test is not None or labels_test is not None:
+        assert projector_embeddings_test is not None and labels_test is not None, (
+            f"Both projector_embeddings_test and labels_test must be provided if one of them is provided, got {type(projector_embeddings_test)} and {type(labels_test)}"
+        )
+        projector_embeddings = np.concatenate((projector_embeddings, projector_embeddings_test), axis=0)
+        labels = np.concatenate((labels, labels_test), axis=0)
+        is_test_data = np.array([False] * len(labels) + [True] * len(labels_test), dtype=bool)
+    else:
+        is_test_data = np.array([False] * len(labels), dtype=bool)
+
     # Make the plot order random
     indices = np.arange(len(labels))
     rng.shuffle(indices)
     shuffled_projector_embeddings = projector_embeddings[indices]
     shuffled_labels = [labels[i] for i in indices]
+    is_test_data = is_test_data[indices]
 
     if xyz_labels is None:
         xyz_labels = (f"{viz_name} 1", f"{viz_name} 2", f"{viz_name} 3")
@@ -579,6 +626,7 @@ def plot_3D_embeddings(
     if subtitle is not None:
         title += f"<br><sub>{subtitle}</sub>"
 
+    # 1. Plot points
     fig = px.scatter_3d(
         x=shuffled_projector_embeddings[:, 0],
         y=shuffled_projector_embeddings[:, 1],
@@ -589,6 +637,7 @@ def plot_3D_embeddings(
         labels={"x": xyz_labels[0], "y": xyz_labels[1], "z": xyz_labels[2], "color": "Label"},
         title=title,
         opacity=0.5,
+        symbol=np.where(is_test_data, "diamond", "circle"),
     )
     fig.update_traces(marker=dict(size=2))
     # Enforce 1:1:1 aspect ratio
@@ -801,8 +850,8 @@ def plot_histograms_distances_to_true_labels(
     # show up to max_ticks evenly spaced labels at bar positions
     n = len(diffs)
     step = max(1, n // max_ticks)
-    positions = list(range(0, n, step))
-    xticklabels = [f"{diffs[i]:.2g}" for i in positions]
+    positions = diffs[::step]
+    xticklabels = [f"{p:.2g}" for p in positions]
     ax_changes.set_xticks(positions)
     ax_changes.set_xticklabels(xticklabels, rotation=45, ha="right")
 
@@ -816,7 +865,7 @@ def plot_histograms_distances_to_true_labels(
     save_path = base_save_path / f"continuous_time_predictions_distances_to_true_labels_{viz_name}_histogram.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
-    logger.debug(f"Saved histogram of distances to true labels to {save_path}")
+    logger.debug(f"Saved histograms of distances to true labels to {save_path}")
 
 
 def get_stratified_random_indices(labels: np.ndarray, n_per_class: int, rng: np.random.Generator):
@@ -854,7 +903,26 @@ def fit_spline_project_time_plots(
     df: pd.DataFrame,
     normalization_method: str,
     nb_times_spline_eval: int,
+    labels_test: np.ndarray | None = None,
+    umap_2d_embeddings_test: np.ndarray | None = None,
+    umap_3d_embeddings_test: np.ndarray | None = None,
+    pca_embeddings_test: np.ndarray | None = None,
+    lda_embeddings_test: np.ndarray | None = None,
 ) -> np.ndarray:
+    # Checks
+    vals_check = [
+        labels_test is None,
+        umap_2d_embeddings_test is None,
+        umap_3d_embeddings_test is None,
+        pca_embeddings_test is None,
+        lda_embeddings_test is None,
+    ]
+    if any(vals_check):
+        assert all(vals_check), f"Expected all test embeddings to be None, got {vals_check}"
+
+    # init
+    continuous_time_predictions_test = None
+
     if projection_type == "base embedding space":
         # Compute spline
         logger.debug(
@@ -903,6 +971,8 @@ def fit_spline_project_time_plots(
         # Project lda embeddings on spline
         logger.debug(f"projecting embeddings of shape {lda_embeddings.shape} on spline of shape {spline_values.shape}")
         continuous_time_predictions = project_to_time(lda_embeddings, spline_values, times_to_eval_spline)
+        if lda_embeddings_test is not None:
+            continuous_time_predictions_test = project_to_time(lda_embeddings_test, spline_values, times_to_eval_spline)
         logger.debug(
             f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
         )
@@ -977,6 +1047,8 @@ def fit_spline_project_time_plots(
         projection_pairs,
         sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
         projection_type,
+        projector_embeddings_test=lda_embeddings_test,
+        labels_test=labels_test,
     )
     if projection_type == "base embedding space":
         plot_3D_embeddings(
@@ -1037,6 +1109,8 @@ def fit_spline_project_time_plots(
         projection_pairs,
         sorted_centroids_in_base_embedding_space,  # pyright: ignore[reportArgumentType]
         projection_type,
+        projector_embeddings_test=lda_embeddings_test,
+        labels_test=labels_test,
     )
 
     # Plot histograms and boxplots of continuous time predictions
@@ -1056,6 +1130,24 @@ def fit_spline_project_time_plots(
         vizes_name_suffix,
         len(df) <= 10_000,
     )
+    if continuous_time_predictions_test is not None:
+        assert labels_test is not None
+        plot_histograms_continuous_time_preds(
+            this_run_save_path_this_ds,
+            continuous_time_predictions_test,
+            labels_test,
+            vizes_name_suffix + "_test",
+            encoding_scheme,
+            ds.name,
+        )
+        plot_boxplots_continuous_time_preds(
+            this_run_save_path_this_ds,
+            labels_test,
+            sorted_unique_labels,
+            continuous_time_predictions_test,
+            vizes_name_suffix + "_test",
+            len(df) <= 10_000,
+        )
 
     # plot distances to true labels
     plot_histograms_distances_to_true_labels(
@@ -1067,6 +1159,32 @@ def fit_spline_project_time_plots(
         labels,
         vizes_name_suffix,
     )
+    if continuous_time_predictions_test is not None:
+        assert labels_test is not None
+        plot_histograms_distances_to_true_labels(
+            sorted_unique_label_times,
+            sorted_unique_labels,
+            continuous_time_predictions_test,
+            ds.name,
+            this_run_save_path_this_ds,
+            labels_test,
+            vizes_name_suffix + "_test",
+        )
+
+    if continuous_time_predictions_test is not None:
+        assert labels_test is not None
+        logger.info(
+            f"Concatenating continuous time predictions for train set (shape: {continuous_time_predictions.shape}) and test set (shape: {continuous_time_predictions_test.shape})"
+        )
+        continuous_time_predictions = np.concatenate(
+            [continuous_time_predictions, continuous_time_predictions_test], axis=0
+        )
+        logger.info(f"Concatenated continuous time predictions shape: {continuous_time_predictions.shape}")
+        logger.info(
+            f"Concatenating labels for train set (shape: {labels.shape}) and test set (shape: {labels_test.shape})"
+        )
+        labels = np.concatenate([labels, labels_test], axis=0)
+        logger.info(f"Concatenated labels shape: {labels.shape}")
 
     # normalize to [0,1]
     match normalization_method:
@@ -1106,6 +1224,9 @@ class Params:
     seed: int
     frac_range_delta: float  # fraction of the true time range to use for t_min, t_max parametrization
     nb_times_spline_eval: int
+    test_split_frac: float | None = (
+        None  # if None, no test split is performed, otherwise the sampling is stratified by labels
+    )
 
 
 if __name__ == "__main__":
@@ -1134,16 +1255,17 @@ if __name__ == "__main__":
 
     # fmt: off
     params = Params(
-        datasets               = [bbbc021_ds, biotine_ds, chromalive_ds, diabetic_retinopathy_ds, ependymal_context_ds, ependymal_cutout_ds, jurkat_ds, NASH_fibrosis_ds, NASH_steatosis_ds],
+        datasets               = [biotine_ds],
         device                 = "cuda:2",
-        model_name             = "timm/convnextv2_large.fcmae",
-        batch_size             = 512,
+        model_name             = "facebook/dinov2-with-registers-giant",
+        batch_size             = 256,
         use_model_preprocessor = False,
-        recompute_encodings    = "no-overwrite",
-        save_times             = "overwrite",
+        recompute_encodings    = "no",
+        save_times             = "no",
         seed                   = random.randint(0, 2**32 - 1),
         frac_range_delta       = 0.3,
-        nb_times_spline_eval   = 10_000
+        nb_times_spline_eval   = 10_000,
+        test_split_frac        = 0.1,
     )
     # fmt: on
 
@@ -1259,12 +1381,35 @@ if __name__ == "__main__":
             logger.warning(f"=> Reusing existing encodings at {this_run_save_path_this_ds / encodings_filename}")
             df = pd.read_parquet(this_run_save_path_this_ds / encodings_filename)
 
+        if params.test_split_frac is not None:
+            # stratify the sampling by label
+            weights = 1 / df["labels"].value_counts(normalize=True)
+            weights_series = df["labels"].map(weights)
+            df_test = df.sample(frac=params.test_split_frac, random_state=params.seed, weights=weights_series)
+            logger.info(
+                f"Created true label stratified test split with {len(df_test)} samples; normalized composition (%):\n{df_test['labels'].value_counts(normalize=True).sort_index() * 100}"
+            )
+            df = df.drop(df_test.index)
+            logger.info(
+                f"Remaining training set has {len(df)} samples; normalized composition (%):\n{df['labels'].value_counts(normalize=True).sort_index() * 100}"
+            )
+        else:
+            df_test = None
+            logger.info("No test split performed, using all samples for fitting")
+
         ###################################################################################################################
         ############################################### Visualize encodings ###############################################
         ###################################################################################################################
         cls_tokens = np.stack(df["encodings"].to_numpy())  # pyright: ignore[reportCallIssue, reportArgumentType]
         labels = df["labels"].to_numpy()
         file_paths = df["file_paths"]
+
+        if df_test is not None:
+            cls_tokens_test = np.stack(df_test["encodings"].to_numpy())  # pyright: ignore[reportCallIssue, reportArgumentType]
+            labels_test = df_test["labels"].to_numpy()
+            file_paths_test = df_test["file_paths"]
+        else:
+            cls_tokens_test, labels_test, file_paths_test = None, None, None
 
         assert len(cls_tokens) == len(labels) == len(file_paths), (
             f"Expected same length for cls_tokens, labels and file_paths, got {len(cls_tokens)}, {len(labels)}, {len(file_paths)}"
@@ -1302,11 +1447,19 @@ if __name__ == "__main__":
         sorted_unique_label_times = get_evenly_spaced_timesteps(len(sorted_unique_labels))
         logger.warning(f"Sorted unique label times: {sorted_unique_label_times}")
 
+        # get class centroids in base embedding space
+        class_means = np.array(
+            [cls_tokens[labels.astype("str") == label].mean(axis=0) for label in sorted_unique_labels]
+        )
+
         ### UMAP
         logger.info("=> UMAP")
         # 2D
         umap_2d_reducer = umap.UMAP(random_state=params.seed)
         umap_2d_embeddings: np.ndarray = umap_2d_reducer.fit_transform(cls_tokens)  # pyright: ignore[reportAssignmentType]
+        umap_2d_embeddings_test: np.ndarray = (
+            umap_2d_reducer.transform(cls_tokens_test) if cls_tokens_test is not None else None  # pyright: ignore[reportAssignmentType]
+        )
         plot_2D_embeddings(
             sorted_unique_labels,
             labels,
@@ -1318,10 +1471,16 @@ if __name__ == "__main__":
             "UMAP",
             this_run_save_path_this_ds,
             f"Seed={params.seed}",
+            projector_embeddings_test=umap_2d_embeddings_test,
+            labels_test=labels_test,
+            centroids_in_base_embedding_space=class_means,
         )
         # 3D
         umap_3d_reducer = umap.UMAP(random_state=params.seed, n_components=3)
         umap_3d_embeddings: np.ndarray = umap_3d_reducer.fit_transform(cls_tokens)  # pyright: ignore[reportAssignmentType]
+        umap_3d_embeddings_test: np.ndarray = (
+            umap_3d_reducer.transform(cls_tokens_test) if cls_tokens_test is not None else None  # pyright: ignore[reportAssignmentType]
+        )
         plot_3D_embeddings(
             labels,
             sorted_unique_labels,
@@ -1333,6 +1492,9 @@ if __name__ == "__main__":
             "UMAP",
             encoding_scheme,
             f"Seed={params.seed}",
+            projector_embeddings_test=umap_3d_embeddings_test,
+            labels_test=labels_test,
+            centroids_in_base_embedding_space=class_means,
         )
 
         ### PCA
@@ -1340,6 +1502,7 @@ if __name__ == "__main__":
         pca = PCA(random_state=params.seed)
         pca_embeddings = pca.fit_transform(cls_tokens)
         pca_explained_variance = pca.explained_variance_ratio_
+        pca_embeddings_test = pca.transform(cls_tokens_test) if cls_tokens_test is not None else None
         # 2D
         plot_2D_embeddings(
             sorted_unique_labels,
@@ -1356,6 +1519,9 @@ if __name__ == "__main__":
                 f"PCA 1 ({pca_explained_variance[0] * 100:.1f}% of explained variance)",
                 f"PCA 2 ({pca_explained_variance[1] * 100:.1f}% of explained variance)",
             ),
+            projector_embeddings_test=pca_embeddings_test,
+            labels_test=labels_test,
+            centroids_in_base_embedding_space=class_means,
         )
         # 3D
         plot_3D_embeddings(
@@ -1374,6 +1540,9 @@ if __name__ == "__main__":
                 f"PCA 2 ({pca_explained_variance[1] * 100:.1f}% of explained variance)",
                 f"PCA 3 ({pca_explained_variance[2] * 100:.1f}% of explained variance)",
             ),
+            projector_embeddings_test=pca_embeddings_test,
+            labels_test=labels_test,
+            centroids_in_base_embedding_space=class_means,
         )
 
         ### LDA
@@ -1381,6 +1550,7 @@ if __name__ == "__main__":
         lda = LinearDiscriminantAnalysis()
         lda_embeddings = lda.fit_transform(cls_tokens, labels)
         lda_explained_variance = lda.explained_variance_ratio_
+        lda_embeddings_test = lda.transform(cls_tokens_test) if cls_tokens_test is not None else None
         ## 2D
         plot_2D_embeddings(
             sorted_unique_labels,
@@ -1398,6 +1568,8 @@ if __name__ == "__main__":
                 f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
             ),
             centroids_in_base_embedding_space=lda.means_,  # pyright: ignore[reportArgumentType]
+            projector_embeddings_test=lda_embeddings_test,
+            labels_test=labels_test,
         )
         # 3D
         plot_3D_embeddings(
@@ -1417,6 +1589,8 @@ if __name__ == "__main__":
                 f"LDA 3 ({lda_explained_variance[2] * 100:.1f}% of explained variance)",
             ),
             centroids_in_base_embedding_space=lda.means_,  # pyright: ignore[reportArgumentType]
+            projector_embeddings_test=lda_embeddings_test,
+            labels_test=labels_test,
         )
 
         ###################################################################################################################
@@ -1546,6 +1720,11 @@ if __name__ == "__main__":
             df,
             "min-max",
             params.nb_times_spline_eval,
+            labels_test,
+            umap_2d_embeddings_test,
+            umap_3d_embeddings_test,
+            pca_embeddings_test,
+            lda_embeddings_test,
         )
 
         ### Save new continuous time label
