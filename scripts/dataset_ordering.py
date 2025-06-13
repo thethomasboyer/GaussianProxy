@@ -1171,6 +1171,7 @@ def fit_spline_project_time_plots(
             vizes_name_suffix + "_test",
         )
 
+    # Concatenate train and test predictions
     if continuous_time_predictions_test is not None:
         assert labels_test is not None
         logger.info(
@@ -1255,7 +1256,7 @@ if __name__ == "__main__":
 
     # fmt: off
     params = Params(
-        datasets               = [biotine_ds],
+        datasets               = [bbbc021_ds, biotine_ds, chromalive_ds, diabetic_retinopathy_ds, ependymal_context_ds, ependymal_cutout_ds, jurkat_ds, NASH_fibrosis_ds, NASH_steatosis_ds],
         device                 = "cuda:2",
         model_name             = "facebook/dinov2-with-registers-giant",
         batch_size             = 256,
@@ -1303,7 +1304,8 @@ if __name__ == "__main__":
     # ruff: noqa: E402
     logger.info("Loading imports... ")
     # Imports
-    from typing import Literal
+    from functools import partial
+    from typing import Literal, cast
 
     import matplotlib.gridspec as gridspec
     import matplotlib.lines as mlines
@@ -1320,6 +1322,7 @@ if __name__ == "__main__":
     from scipy.interpolate import make_interp_spline
     from sklearn.decomposition import PCA
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.model_selection import train_test_split
     from torch import Tensor, cdist
     from torch.utils.data import DataLoader
     from torchvision.transforms import Compose, RandomCrop, RandomHorizontalFlip, RandomVerticalFlip
@@ -1381,20 +1384,54 @@ if __name__ == "__main__":
             logger.warning(f"=> Reusing existing encodings at {this_run_save_path_this_ds / encodings_filename}")
             df = pd.read_parquet(this_run_save_path_this_ds / encodings_filename)
 
+        # get the real sorting function
+        def get_sort_key(ds, label):
+            class LabelWrapper:
+                def __init__(self, name):
+                    self.name = name
+
+            if isinstance(label, pd.Index):
+                index_list = label.tolist()
+                try:
+                    sorted_index = sorted(index_list, key=ds.dataset_params.sorting_func)  # pyright: ignore[reportOptionalMemberAccess]
+                except AttributeError:
+                    # Wrap plain labels in a dummy class with `.name` attribute
+                    sorted_index = sorted(index_list, key=lambda x: ds.dataset_params.sorting_func(LabelWrapper(x)))  # pyright: ignore[reportOptionalMemberAccess]
+                return sorted_index
+            else:
+                try:
+                    return ds.dataset_params.sorting_func(label)  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
+                except AttributeError:
+                    # Wrap plain labels in a dummy class with `.name` attribute
+                    return ds.dataset_params.sorting_func(LabelWrapper(label))  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
+
+        df_test: pd.DataFrame | None = None
         if params.test_split_frac is not None:
             # stratify the sampling by label
-            weights = 1 / df["labels"].value_counts(normalize=True)
-            weights_series = df["labels"].map(weights)
-            df_test = df.sample(frac=params.test_split_frac, random_state=params.seed, weights=weights_series)
-            logger.info(
-                f"Created true label stratified test split with {len(df_test)} samples; normalized composition (%):\n{df_test['labels'].value_counts(normalize=True).sort_index() * 100}"
+            splits = train_test_split(
+                df,
+                test_size=params.test_split_frac,
+                random_state=params.seed,
+                stratify=df["labels"],
             )
-            df = df.drop(df_test.index)
+            df: pd.DataFrame = splits[0]
+            df_test = cast(pd.DataFrame, splits[1])
+            proportions_to_print = (
+                pd.concat(
+                    [
+                        df["labels"].value_counts(normalize=True),
+                        df_test["labels"].value_counts(normalize=True),
+                    ],
+                    axis=1,
+                )
+                .set_axis(["train", "test"], axis=1)
+                .sort_index(key=partial(get_sort_key, ds))  # pyright: ignore[reportArgumentType]
+                * 100
+            )
             logger.info(
-                f"Remaining training set has {len(df)} samples; normalized composition (%):\n{df['labels'].value_counts(normalize=True).sort_index() * 100}"
+                f"Created stratified train/test splits with {len(df)}/{len(df_test)} samples; normalized composition (%):\n{proportions_to_print}"
             )
         else:
-            df_test = None
             logger.info("No test split performed, using all samples for fitting")
 
         ###################################################################################################################
@@ -1428,18 +1465,7 @@ if __name__ == "__main__":
         # Get sorted class names
         assert ds.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
 
-        def get_sort_key(label):
-            try:
-                return ds.dataset_params.sorting_func(label)  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
-            except AttributeError:
-                # Wrap plain labels in a dummy class with `.name` attribute
-                class LabelWrapper:
-                    def __init__(self, name):
-                        self.name = name
-
-                return ds.dataset_params.sorting_func(LabelWrapper(label))  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
-
-        sorted_unique_labels = sorted(set(labels), key=get_sort_key)
+        sorted_unique_labels = sorted(set(labels), key=partial(get_sort_key, ds))
 
         # ensure unique labels are strings
         sorted_unique_labels = [str(label) for label in sorted_unique_labels]
