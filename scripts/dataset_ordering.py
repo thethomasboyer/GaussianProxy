@@ -906,7 +906,7 @@ def fit_spline_project_time_plots(
     umap_3d_embeddings_test: np.ndarray | None = None,
     pca_embeddings_test: np.ndarray | None = None,
     lda_embeddings_test: np.ndarray | None = None,
-) -> np.ndarray:
+):
     # Checks
     vals_check = [
         labels_test is None,
@@ -1190,7 +1190,7 @@ def fit_spline_project_time_plots(
         ds.name,
     )
 
-    return continuous_time_predictions
+    return continuous_time_predictions, labels
 
 
 def get_sort_func(ds, label):
@@ -1278,7 +1278,7 @@ if __name__ == "__main__":
         batch_size                = 256,
         use_model_preprocessor    = False,
         recompute_encodings       = "no",
-        save_times                = "no",
+        save_times                = "overwrite",
         seed                      = random.randint(0, 2**32 - 1),
         spline_continuation_range = 0.1,
         nb_times_spline_eval      = 10_000,
@@ -1688,7 +1688,7 @@ if __name__ == "__main__":
         logger.debug(
             f"Centroids shape: {sorted_lda_centroids.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
         )
-        continuous_time_predictions = fit_spline_project_time_plots(
+        continuous_time_predictions, labels = fit_spline_project_time_plots(
             "base embedding space",
             sorted_lda_centroids,
             sorted_unique_labels,
@@ -1716,7 +1716,7 @@ if __name__ == "__main__":
         )
         # of LDA embeddings
         logger.info("-> from projection on spline going through class centroids in LDA encoding space")
-        continuous_time_predictions = fit_spline_project_time_plots(
+        continuous_time_predictions, labels = fit_spline_project_time_plots(
             "LDA embedding space",
             sorted_lda_centroids,
             sorted_unique_labels,
@@ -1777,6 +1777,14 @@ if __name__ == "__main__":
                 logger.info(f"Saving continuous time predictions dataset to {new_ds_file_save_path}")
 
                 data = []
+
+                if params.test_split_frac is not None:
+                    # still nee to concatenate train and test for file_paths only
+                    assert len(continuous_time_predictions) == len(labels) > len(file_paths), (
+                        f"Expected len(continuous_time_predictions) == len(labels) > len(file_paths), got {len(continuous_time_predictions)}, {len(labels)}, {len(file_paths)}"
+                    )
+                    file_paths = pd.concat([file_paths, file_paths_test], axis=0)
+
                 for sample_file_path, true_time_label, continuous_time_pred in zip(
                     file_paths, labels, continuous_time_predictions, strict=True
                 ):
