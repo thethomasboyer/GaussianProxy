@@ -17,8 +17,6 @@ import attrs
 import colorlog
 from rich.traceback import install
 
-install(show_locals=True, width=200)
-
 
 # Logging
 def get_logger(log_file_path: Path) -> logging.Logger:
@@ -133,7 +131,7 @@ def save_encodings(
     base_save_path: Path,
     save_name: str,
     batch_size: int,
-    recompute_encodings: Literal["no-overwrite"] | Literal["force-overwrite"],
+    recompute_encodings: Literal["no-overwrite", "force-overwrite"],
 ):
     # Checks
     assert dataset.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
@@ -923,69 +921,51 @@ def fit_spline_project_time_plots(
     # init
     continuous_time_predictions_test = None
 
+    # Compute spline
+    logger.debug(f"Fitting interpolating spline through class centroids of {projection_type} of {encoding_scheme}")
     if projection_type == "base embedding space":
-        # Compute spline
-        logger.debug(
-            f"Fitting interpolating spline through class centroids of base embedding space of {encoding_scheme}"
-        )
-        logger.debug(
-            f"Centroids shape: {sorted_centroids_in_base_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
-        )
-        spline = make_interp_spline(sorted_unique_label_times, sorted_centroids_in_base_embedding_space)
-        # Evaluate spline
-        assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
-        t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
-        logger.warning(
-            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline with {nb_times_spline_eval} evaluation points"
-        )
-        times_to_eval_spline = np.linspace(t_min, t_max, nb_times_spline_eval)
-        spline_values = spline(times_to_eval_spline)  # these are in DINO's embedding space
-        # Project base embeddings on spline
-        logger.debug(f"projecting embeddings of shape {cls_tokens.shape} on spline of shape {spline_values.shape}")
-        continuous_time_predictions = project_to_time(cls_tokens, spline_values, times_to_eval_spline)
-        logger.debug(
-            f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
-        )
-        # Plot spline and projections along with base embeddings
-        random_idx_to_plot_projections = get_stratified_random_indices(labels, 10, rng)
-        projection_pairs = (
-            cls_tokens[random_idx_to_plot_projections],
-            spline(continuous_time_predictions[random_idx_to_plot_projections]),
-        )
+        centroids_to_use_to_fit = sorted_centroids_in_base_embedding_space
+        embeddings_to_project = cls_tokens
     elif projection_type == "LDA embedding space":
-        # Compute spline
-        logger.debug("Fitting interpolating spline through class centroids of LDA embedding space")
         centroids_in_lda_embedding_space = lda.transform(sorted_centroids_in_base_embedding_space)
-        logger.debug(
-            f"Centroids shape: {centroids_in_lda_embedding_space.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
-        )
-        spline = make_interp_spline(sorted_unique_label_times, centroids_in_lda_embedding_space)
-        # Evaluate spline
-        assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
-        t_min, t_max = -params.frac_range_delta, 1 + params.frac_range_delta
-        logger.warning(
-            f"Using {params.frac_range_delta} of the 0-1 time range for t_min, t_max = {t_min}, {t_max} parametrization of the spline with {nb_times_spline_eval} evaluation points"
-        )
-        times_to_eval_spline = np.linspace(t_min, t_max, nb_times_spline_eval)
-        spline_values = spline(times_to_eval_spline)  # these are in LDA's embedding space
-        # Project lda embeddings on spline
-        logger.debug(f"projecting embeddings of shape {lda_embeddings.shape} on spline of shape {spline_values.shape}")
-        continuous_time_predictions = project_to_time(lda_embeddings, spline_values, times_to_eval_spline)
-        if lda_embeddings_test is not None:
-            continuous_time_predictions_test = project_to_time(lda_embeddings_test, spline_values, times_to_eval_spline)
-        logger.debug(
-            f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
-        )
-        # Plot spline and projections along with base embeddings
-        random_idx_to_plot_projections = get_stratified_random_indices(labels, 10, rng)
-        projection_pairs = (
-            lda.transform(cls_tokens[random_idx_to_plot_projections]),
-            spline(continuous_time_predictions[random_idx_to_plot_projections]),
-        )
+        centroids_to_use_to_fit = centroids_in_lda_embedding_space
+        embeddings_to_project = lda_embeddings
     else:
         raise ValueError(
             f"Unknown projection type: {projection_type}. Expected 'base embedding space' or 'LDA embedding space'."
         )
+    logger.debug(
+        f"Centroids shape: {centroids_to_use_to_fit.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
+    )
+    # Fit spline
+    spline = make_interp_spline(sorted_unique_label_times, centroids_to_use_to_fit)
+    # Evaluate spline
+    assert (sorted_unique_label_times[0], sorted_unique_label_times[-1]) == (0, 1)
+    t_min, t_max = -params.spline_continuation_range, 1 + params.spline_continuation_range
+    logger.warning(
+        f"Using additional range {params.spline_continuation_range} for t_min, t_max = {t_min}, {t_max} parametrization of the spline with {nb_times_spline_eval} evaluation points"
+    )
+    times_to_eval_spline = np.linspace(t_min, t_max, nb_times_spline_eval)
+    spline_values = spline(times_to_eval_spline)
+    # Project embeddings on spline
+    logger.debug(
+        f"projecting embeddings of shape {embeddings_to_project.shape} on spline of shape {spline_values.shape}"
+    )
+    continuous_time_predictions = project_to_time(embeddings_to_project, spline_values, times_to_eval_spline)
+    if lda_embeddings_test is not None:
+        assert projection_type == "LDA embedding space", (
+            f"Expected projection_type to be 'LDA embedding space', got {projection_type}"
+        )
+        continuous_time_predictions_test = project_to_time(lda_embeddings_test, spline_values, times_to_eval_spline)
+    logger.debug(
+        f"Computed continuous time predictions from spline projection, shape: {continuous_time_predictions.shape}, excerpt: {continuous_time_predictions[:5]}"
+    )
+    # Plot spline and projections along with base embeddings
+    random_idx_to_plot_projections = get_stratified_random_indices(labels, 10, rng)
+    projection_pairs = (
+        embeddings_to_project[random_idx_to_plot_projections],
+        spline(continuous_time_predictions[random_idx_to_plot_projections]),
+    )
 
     vizes_name_suffix = f"spline_projection_on_{projection_type.replace(' ', '_')}"
 
@@ -1001,7 +981,7 @@ def fit_spline_project_time_plots(
             rng,
             f"UMAP_{vizes_name_suffix}",
             this_run_save_path_this_ds,
-            f"Seed={params.seed} | params.frac_range_delta={params.frac_range_delta}",
+            f"Seed={params.seed} | params.spline_continuation_range={params.spline_continuation_range}",
             ("UMAP 1", "UMAP 2"),
             spline_values,
             projection_pairs,
@@ -1061,7 +1041,7 @@ def fit_spline_project_time_plots(
             ds,
             f"UMAP_{vizes_name_suffix}",
             encoding_scheme,
-            f"Seed={params.seed} | params.frac_range_delta={params.frac_range_delta}",
+            f"Seed={params.seed} | params.spline_continuation_range={params.spline_continuation_range}",
             ("UMAP 1", "UMAP 2", "UMAP 3"),
             spline_values,
             projection_pairs,
@@ -1078,7 +1058,7 @@ def fit_spline_project_time_plots(
             ds,
             f"PCA_{vizes_name_suffix}",
             encoding_scheme,
-            f"Total explained variance: {np.sum(pca_explained_variance[:3]) * 100:.1f}% | seed={params.seed} | params.frac_range_delta={params.frac_range_delta}",
+            f"Total explained variance: {np.sum(pca_explained_variance[:3]) * 100:.1f}% | seed={params.seed} | params.spline_continuation_range={params.spline_continuation_range}",
             (
                 f"PCA 1 ({pca_explained_variance[0] * 100:.1f}% of explained variance)",
                 f"PCA 2 ({pca_explained_variance[1] * 100:.1f}% of explained variance)",
@@ -1099,7 +1079,7 @@ def fit_spline_project_time_plots(
         ds,
         f"LDA_{vizes_name_suffix}",
         encoding_scheme,
-        f"Total explained variance: {np.sum(lda_explained_variance[:3]) * 100:.1f}% | params.frac_range_delta={params.frac_range_delta}",
+        f"Total explained variance: {np.sum(lda_explained_variance[:3]) * 100:.1f}% | params.spline_continuation_range={params.spline_continuation_range}",
         (
             f"LDA 1 ({lda_explained_variance[0] * 100:.1f}% of explained variance)",
             f"LDA 2 ({lda_explained_variance[1] * 100:.1f}% of explained variance)",
@@ -1213,27 +1193,63 @@ def fit_spline_project_time_plots(
     return continuous_time_predictions
 
 
+def get_sort_func(ds, label):
+    """
+    Gets the right sorting function for the given dataset and label.
+    """
+    import pandas as pd
+
+    class LabelWrapper:
+        def __init__(self, name):
+            self.name = name
+
+    if isinstance(label, pd.Index):
+        index_list = label.tolist()
+        try:
+            sorted_index = sorted(index_list, key=ds.dataset_params.sorting_func)  # pyright: ignore[reportOptionalMemberAccess]
+        except AttributeError:
+            # Wrap plain labels in a dummy class with `.name` attribute
+            sorted_index = sorted(index_list, key=lambda x: ds.dataset_params.sorting_func(LabelWrapper(x)))  # pyright: ignore[reportOptionalMemberAccess]
+        return sorted_index
+    else:
+        try:
+            return ds.dataset_params.sorting_func(label)  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
+        except AttributeError:
+            # Wrap plain labels in a dummy class with `.name` attribute
+            return ds.dataset_params.sorting_func(LabelWrapper(label))  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
+
+
 @attrs.define
 class Params:
+    """
+    - `test_split_frac`: if None, no test split is performed, otherwise the sampling is stratified by labels
+    - `spline_continuation_range`: time range to use for t_min, t_max parametrization of the spline
+    beyond the [0;1] time range defined by the extremal class centroids.
+    - `border_centroids`: if True, 2 additional extremal centroids are computed: the centroids of the points
+    which projection on the spline is the first or last class centroid. These point act as "extremal" subclasses,
+    and are used to continue the spline beyond the [0;1] time range in a "principled" way. The spline is then continued on a
+    `spline_continuation_range` range before/after these *new* extremal centroids.
+
+    """
+
     datasets: list[DataSet]
     device: str
     model_name: str
     batch_size: int
     use_model_preprocessor: bool
-    recompute_encodings: Literal["force-overwrite"] | Literal["no-overwrite"] | Literal["no"]
-    save_times: Literal["no-overwrite"] | Literal["overwrite"] | Literal["ask-before-overwrite"] | Literal["no"]
+    recompute_encodings: Literal["force-overwrite", "no-overwrite", "no"]
+    save_times: Literal["no-overwrite", "overwrite", "ask-before-overwrite", "no"]
     seed: int
-    frac_range_delta: float  # fraction of the true time range to use for t_min, t_max parametrization
+    spline_continuation_range: float
     nb_times_spline_eval: int
-    test_split_frac: float | None = (
-        None  # if None, no test split is performed, otherwise the sampling is stratified by labels
-    )
+    test_split_frac: float | None = None
 
 
 if __name__ == "__main__":
     ###################################################################################################################
     ################################################### Parameters ####################################################
     ###################################################################################################################
+    install(show_locals=True, width=200)
     sys.path.append(".")
     # Attention: we *might or might not* use our datasets' pipeline as DINO has its own preprocessing pipeline.
     # ruff: noqa: F401
@@ -1256,17 +1272,17 @@ if __name__ == "__main__":
 
     # fmt: off
     params = Params(
-        datasets               = [bbbc021_ds, biotine_ds, chromalive_ds, diabetic_retinopathy_ds, ependymal_context_ds, ependymal_cutout_ds, jurkat_ds, NASH_fibrosis_ds, NASH_steatosis_ds],
-        device                 = "cuda:2",
-        model_name             = "facebook/dinov2-with-registers-giant",
-        batch_size             = 256,
-        use_model_preprocessor = False,
-        recompute_encodings    = "no",
-        save_times             = "no",
-        seed                   = random.randint(0, 2**32 - 1),
-        frac_range_delta       = 0.3,
-        nb_times_spline_eval   = 10_000,
-        test_split_frac        = 0.1,
+        datasets                  = [bbbc021_ds, biotine_ds, chromalive_ds, diabetic_retinopathy_ds, ependymal_context_ds, ependymal_cutout_ds, jurkat_ds, NASH_fibrosis_ds, NASH_steatosis_ds],
+        device                    = "cuda:2",
+        model_name                = "facebook/dinov2-with-registers-giant",
+        batch_size                = 256,
+        use_model_preprocessor    = False,
+        recompute_encodings       = "no",
+        save_times                = "no",
+        seed                      = random.randint(0, 2**32 - 1),
+        spline_continuation_range = 0.1,
+        nb_times_spline_eval      = 10_000,
+        test_split_frac           = 0.1,
     )
     # fmt: on
 
@@ -1384,27 +1400,6 @@ if __name__ == "__main__":
             logger.warning(f"=> Reusing existing encodings at {this_run_save_path_this_ds / encodings_filename}")
             df = pd.read_parquet(this_run_save_path_this_ds / encodings_filename)
 
-        # get the real sorting function
-        def get_sort_key(ds, label):
-            class LabelWrapper:
-                def __init__(self, name):
-                    self.name = name
-
-            if isinstance(label, pd.Index):
-                index_list = label.tolist()
-                try:
-                    sorted_index = sorted(index_list, key=ds.dataset_params.sorting_func)  # pyright: ignore[reportOptionalMemberAccess]
-                except AttributeError:
-                    # Wrap plain labels in a dummy class with `.name` attribute
-                    sorted_index = sorted(index_list, key=lambda x: ds.dataset_params.sorting_func(LabelWrapper(x)))  # pyright: ignore[reportOptionalMemberAccess]
-                return sorted_index
-            else:
-                try:
-                    return ds.dataset_params.sorting_func(label)  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
-                except AttributeError:
-                    # Wrap plain labels in a dummy class with `.name` attribute
-                    return ds.dataset_params.sorting_func(LabelWrapper(label))  # pyright: ignore[reportOptionalMemberAccess] # noqa: B023
-
         df_test: pd.DataFrame | None = None
         if params.test_split_frac is not None:
             # stratify the sampling by label
@@ -1425,7 +1420,7 @@ if __name__ == "__main__":
                     axis=1,
                 )
                 .set_axis(["train", "test"], axis=1)
-                .sort_index(key=partial(get_sort_key, ds))  # pyright: ignore[reportArgumentType]
+                .sort_index(key=partial(get_sort_func, ds))  # pyright: ignore[reportArgumentType]
                 * 100
             )
             logger.info(
@@ -1465,7 +1460,7 @@ if __name__ == "__main__":
         # Get sorted class names
         assert ds.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
 
-        sorted_unique_labels = sorted(set(labels), key=partial(get_sort_key, ds))
+        sorted_unique_labels = sorted(set(labels), key=partial(get_sort_func, ds))
 
         # ensure unique labels are strings
         sorted_unique_labels = [str(label) for label in sorted_unique_labels]
