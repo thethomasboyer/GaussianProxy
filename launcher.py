@@ -256,8 +256,19 @@ class Task:
             Path(self.cfg.tmpdir_location).mkdir(parents=True, exist_ok=True)
             env_vars["TMPDIR"] = self.cfg.tmpdir_location
 
+        accelerate_cfg += "--no_python"  # manually use python or scalene to launch the script
+        if self.cfg.profile:
+            if launch_args.num_processes > 1 or len(launch_args.gpu_ids.split(",")) > 2:
+                self.logger.error(  # TODO: scalene seems to always make the code crash for some multiprocessing/threading reason...
+                    f"Profiling with multiple processes (num_processes={launch_args.num_processes} and/or gpu_ids={launch_args.gpu_ids}): processes will overwrite each other's profiling data. Refusing to continue."
+                )
+                sys.exit(1)
+            python_cmd = "scalene --cpu --gpu --cli --json --outfile=profiling_scalene.json"
+        else:
+            python_cmd = "python"
+
         # Launched command
-        final_cmd = f"accelerate launch {accelerate_cfg} {self.code_and_config_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
+        final_cmd = f"accelerate launch {accelerate_cfg} {python_cmd} {self.code_and_config_parent_folder.as_posix()}/GaussianProxy/{self.script_name}.py --config-path {self.task_config_path} --config-name {self.task_config_name}"
 
         for override in self.overrides:
             final_cmd += f" {override}"

@@ -50,6 +50,7 @@ dependencies = [
     "transformers>=4.51.3",
     "kaleido==0.2.1",
     "timm>=1.0.15",
+    "scalene>=1.5.51",
 ]
 
 [tool.ruff]
