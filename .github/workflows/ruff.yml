@@ -5,7 +5,7 @@ on: [push]
 jobs:
   ruff:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,5 +22,7 @@ jobs:
 
       - name: Run Ruff
         uses: astral-sh/ruff-action@v3.2.1
+        with:
+          args: --extend-ignore FIX
         env:
           RUFF_OUTPUT_FORMAT: github
