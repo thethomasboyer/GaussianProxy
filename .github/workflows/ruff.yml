@@ -23,6 +23,6 @@ jobs:
       - name: Run Ruff
         uses: astral-sh/ruff-action@v3
         with:
-          args: "--extend-ignore FIX"
+          args: "check --extend-ignore FIX"
         env:
           RUFF_OUTPUT_FORMAT: github
