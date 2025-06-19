@@ -241,9 +241,6 @@ class ContinuousTimeImageDataset(BaseContinuousTimeDataset):
 class RandomRotationSquareSymmetry(Transform):
     """Randomly rotate the input by a multiple of π/2."""
 
-    def __init__(self):
-        super().__init__()
-
     def transform(self, inpt: Tensor, params) -> Tensor:
         rot = 90 * np.random.randint(4)
         return tf.rotate(inpt, rot)
@@ -387,7 +384,7 @@ def setup_dataloaders(
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
     if issubclass(ds_params.dataset_class, BaseContinuousTimeDataset):
-        logger.warning(
+        logger.error(
             "Loaded a fully ordered config; forcefully passing *ImageDataset* for the discrete datasets instantiation (it might not suit!)"
         )
         ds_params_discrete = dataclass_replace(ds_params, dataset_class=ImageDataset)
@@ -427,7 +424,7 @@ def compute_continuous_time_weights(logger: MultiProcessAdapter, times: np.ndarr
     assert times.ndim == 1, f"Expected 1D array of times, got {times.ndim}D"
     # Compute histogram of times
     counts, bin_edges = np.histogram(times, bins=n_bins)
-    logger.info(f"Computed histogram with {n_bins} bins, counts: {counts}, bin edges: {bin_edges}")
+    logger.debug(f"Computed histogram with {n_bins} bins, counts: {counts}, bin edges: {bin_edges}")
     # Put times inbetween bins
     # such that returned index i satisfies bins[i-1] <= x < bins[i]
     # exclude last bin edge so that samples at time=1 are in the [t=0.99, t=1.0) bin
@@ -445,8 +442,18 @@ def compute_continuous_time_weights(logger: MultiProcessAdapter, times: np.ndarr
     weighted_counts = np.zeros(n_bins)
     for idx, w in zip(bin_indices, weights, strict=True):
         weighted_counts[idx - 1] += w
-    logger.info(f"Computed weights, resulting in 'weighted counts': {weighted_counts} (should be allclose to 1)")
+    msg = f"Computed weights, resulting in 'weighted counts': {weighted_counts} (should be allclose to 1)"
+    if not np.allclose(weighted_counts, 1.0):
+        logger.error(msg)
+    else:
+        logger.debug(msg)
     return weights
+
+
+def continuous_ds_collate_fn(batch: list[BaseContinuousTimeDatasetReturnValue]):
+    times = [sample.time for sample in batch]
+    tensors = [sample.tensor for sample in batch]
+    return {"images": torch.stack(tensors), "times": torch.tensor(times)}
 
 
 def _dataset_builder_fully_ordered(
@@ -501,7 +508,7 @@ def _dataset_builder_fully_ordered(
     )
     logger.warning(f"Using test transforms: {test_transforms}")
     if debug:
-        logger.warning("Ignoring Debug mode (TODO)")
+        logger.error("Ignoring Debug mode in _dataset_builder_fully_ordered (TODO)")
 
     # 3. Save train/test split to disk if new
     if build_new_train_test_split:
@@ -528,12 +535,6 @@ def _dataset_builder_fully_ordered(
     sampler = WeightedRandomSampler(weights, len(weights))
 
     # 7. Build the train dataloader
-    def continuous_ds_collate_fn(batch: list[BaseContinuousTimeDatasetReturnValue]):
-        times = [sample.time for sample in batch]
-        tensors = [sample.tensor for sample in batch]
-        # Convert times to a tensor if you want
-        return {"images": torch.stack(tensors), "times": torch.tensor(times)}
-
     train_dl = DataLoader(
         train_ds,
         batch_size=cfg.training.train_batch_size,

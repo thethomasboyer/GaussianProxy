@@ -1,4 +1,4 @@
-# Copyright 2024 Thomas Boyer
+# Copyright 2024-2025 Thomas Boyer
 
 import logging
 from datetime import timedelta
@@ -15,7 +15,6 @@ from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from hydra.core.config_store import ConfigStore
-from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 from rich.traceback import install
 from termcolor import colored
@@ -57,9 +56,6 @@ cs.store(name=DEFAULT_CONFIG_NAME, node=config)
     config_name=DEFAULT_CONFIG_NAME,
 )
 def main(cfg: Config) -> None:
-    # --------------------------------- Hydra Config ---------------------------------
-    hydra_cfg = HydraConfig.get()
-
     # ------------------------------------ Logging -----------------------------------
     logger: MultiProcessAdapter = get_logger(Path(__file__).stem)
 
@@ -299,6 +295,7 @@ def main(cfg: Config) -> None:
         video_time_encoding,
         accelerator,
         dataset_params,
+        cfg.debug,
     )
 
     # ----------------------------- Resume Training State ----------------------------
@@ -316,13 +313,11 @@ def main(cfg: Config) -> None:
         optimizer,
         lr_scheduler,
         logger,
-        hydra_cfg.run.dir,
         models_save_folder,
         saved_artifacts_folder,
         chckpt_save_path,
         this_run_folder,
         resuming_args,
-        cfg.profile,
         fully_ordered_dataloader,
         all_train_files,
         all_test_files,

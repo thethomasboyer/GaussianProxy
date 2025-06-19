@@ -74,33 +74,35 @@ lint.select = [
     "SIM",
     # isort
     "I",
+    # flake8-fixme
+    "FIX",
 ]
 
 [tool.pylint]
 MASTER.ignore = [
-    ".venv",
-    "src",
-    ".github",
-    ".ruff_cache",
+    "**/.venv",
+    "**/src",
+    "**/.github",
+    "**/.ruff_cache",
     "**/.vscode",
-    "experiments",
     "**/experiments",
     "**/__pycache__",
     "**/.vscode-server",
     "**/.ipynb_checkpoints",
 ]
-MESSAGES_CONTROL.disable = ["E0401", "E0611", "C0301"]
+MESSAGES_CONTROL.disable = ["E0401", "E0611", "C0301", "W0611"]
 # E0401 - Import error (unable to import module)
 # E0611 - No name in module (cannot import name from module)
 # C0301 - Line too long
+# W0611 - Unused import (ruff already handles this well)
 
 [tool.pyright]
 include = ["GaussianProxy", "my_conf", "notebooks", "scripts", "./*.py"]
 exclude = [
-    ".venv",
-    ".ruff_cache",
-    "src",
-    "experiments",
+    "**/.venv",
+    "**/.ruff_cache",
+    "**/src",
+    "**/.github",
     "**/experiments",
     "**/__pycache__",
     "**/.local/share/uv/python",
@@ -108,6 +110,7 @@ exclude = [
     "**/.vscode",
     "**/.ipynb_checkpoints",
 ]
+reportMissingImports = false
 
 [tool.uv.sources]
 torch-fidelity = { git = "https://github.com/thethomasboyer/torch-fidelity-symlinks" }

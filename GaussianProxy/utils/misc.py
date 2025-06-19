@@ -1,14 +1,11 @@
-import time
+import random
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
-from functools import wraps
 from logging import Logger
 from pathlib import Path
 from typing import Literal, overload
 
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
 import torch
 import wandb
 from accelerate import Accelerator
@@ -133,7 +130,7 @@ def modify_args_for_debug(
             "evaluation",
             "every_n_opt_steps",
         ): 30,
-        ("evaluation", "nb_video_timesteps"): 5,
+        ("evaluation", "nb_video_timesteps"): 3,
     }
     # now actually change the configuration,
     # updating the registered wandb config accordingly
@@ -143,20 +140,31 @@ def modify_args_for_debug(
         for level in param_name_tuple[:-1]:
             cfg_level = getattr(cfg_level, level)
             param_name = param_name_tuple[-1]
-            logger.warning(f"{param_name}: {getattr(cfg_level, param_name)} -> {new_param_value}")
+            logger.warning(f"   {param_name}: {getattr(cfg_level, param_name)} -> {new_param_value}")
             setattr(cfg_level, param_name, new_param_value)
             if is_main_process:
                 wandb_tracker.config.update({"/".join(param_name_tuple): new_param_value}, allow_val_change=True)
     # now change the evaluation strategies' configurations
     for strat in cfg.evaluation.strategies:
-        logger.warning(f"{strat.name}.nb_diffusion_timesteps: {strat.nb_diffusion_timesteps} -> 5")
-        strat.nb_diffusion_timesteps = 5
-        if hasattr(strat, "nb_samples_to_gen_per_time"):  # TODO move this check to the dedicated "checks" function?
+        logger.warning(f"   {strat.name}.nb_diffusion_timesteps: {strat.nb_diffusion_timesteps} -> 3")
+        strat.nb_diffusion_timesteps = 3
+        if hasattr(strat, "nb_samples_to_gen_per_time"):
+            # TODO move this check below to the dedicated "checks" function?
             assert hasattr(strat, "batch_size"), "Expected batch_size to be present"
-            # only change it it's a hard-coded value
-            if isinstance(strat.nb_samples_to_gen_per_time, int):
-                strat.nb_samples_to_gen_per_time = 2 * strat.batch_size
-    # TODO: update registered wandb config
+            # change nb_samples_to_gen_per_time, but only if it's a hard-coded value,
+            # (to keep checking the 'adapt'/'half' code paths)
+            # (will be changed later in the training loop anyway)
+            if isinstance(strat.nb_samples_to_gen_per_time, int):  # pyright: ignore[reportAttributeAccessIssue]
+                logger.warning(
+                    f"   {strat.name}.nb_samples_to_gen_per_time: {strat.nb_samples_to_gen_per_time} -> {2 * strat.batch_size}"  # pyright: ignore[reportAttributeAccessIssue]
+                )
+                strat.nb_samples_to_gen_per_time = 2 * strat.batch_size  # pyright: ignore[reportAttributeAccessIssue]
+        if hasattr(strat, "selected_times"):
+            # subsample selected times to 2
+            chosen_times = random.sample(strat.selected_times, 2)  # pyright: ignore[reportAttributeAccessIssue]
+            logger.warning(f"   {strat.name}.selected_times: {strat.selected_times} -> {chosen_times}")  # pyright: ignore[reportAttributeAccessIssue]
+            strat.selected_times = chosen_times  # pyright: ignore[reportAttributeAccessIssue]
+    # TODO: update registered wandb config for evaluation strategies' configurations
 
 
 def get_evenly_spaced_timesteps(nb_empirical_dists: int) -> list[float]:
@@ -240,6 +248,7 @@ def save_eval_artifacts_log_to_wandb(
             / split_name
             / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
         )
+        split_name_str_repr_for_logging = split_name.split("_")[0]
     else:
         file_path = (
             save_folder
@@ -247,6 +256,7 @@ def save_eval_artifacts_log_to_wandb(
             / artifact_name
             / f"step_{global_optimization_step}_proc_{accelerator.process_index}.pt"
         )
+        split_name_str_repr_for_logging = ""
     file_path.parent.mkdir(exist_ok=True, parents=True)
     if file_path.exists():  # might exist if resuming
         file_path.unlink()  # must manually remove it as it's most probably read-only
@@ -294,7 +304,7 @@ def save_eval_artifacts_log_to_wandb(
                 artifact_path = f"{eval_strat}/Generated videos/{norm_method} normalized"
             accelerator.log({artifact_path: videos}, step=global_optimization_step)
             logger.debug(
-                f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized trajectories to W&B at step {global_optimization_step}",
+                f"Logged {len(sel_to_save)} {eval_strat}, {norm_method} normalized {split_name_str_repr_for_logging} trajectories to W&B at step {global_optimization_step}",
             )
 
     # images case
@@ -331,7 +341,7 @@ def save_eval_artifacts_log_to_wandb(
                 step=global_optimization_step,
             )
         logger.info(
-            f"Logged {len(sel_to_save)} {wandb_title[0].lower() + wandb_title[1:]} to W&B at step {global_optimization_step}",
+            f"Logged {len(sel_to_save)} {split_name_str_repr_for_logging} {wandb_title[0].lower() + wandb_title[1:]} to W&B at step {global_optimization_step}",
         )
 
 
@@ -388,106 +398,6 @@ def normalize_elements_for_logging(elems: Tensor, logging_normalization: list[st
 
 def bold(s: str | int) -> str:
     return colored(s, None, None, ["bold"])
-
-
-class StateLogger:
-    def __init__(self):
-        self.states: list[tuple[str, float, float]] = []
-        self.start_time = time.time()
-        self.color_mapping: dict[str, str] = {}
-        self.last_color_index: int = -1
-        self._cmap = px.colors.sequential.Viridis
-
-    def log_state(self, state: str, start: float, end: float):
-        self.states.append((state, start, end))
-
-    def create_gantt_chart(self):
-        fig = go.Figure()
-
-        unique_states = list(set(state for state, _, _ in self.states))
-        for state in unique_states:
-            if state not in self.color_mapping:
-                self.color_mapping[state] = self._generate_new_color()
-
-        func_names_in_legend = set()
-
-        prev_state = self.states[0][0]
-        current_bar_start = self.states[0][1]
-        current_bar_end = self.states[0][2]
-        for state, start, end in self.states:
-            if state == prev_state:
-                current_bar_end = end  # accumulate identical states into one single bar
-            else:
-                fig.add_trace(
-                    go.Bar(
-                        x=[current_bar_end - current_bar_start],
-                        y=["state_timeline"],
-                        orientation="h",
-                        name=prev_state,
-                        hoverinfo="text",
-                        hovertext=f"{prev_state}: {current_bar_end - current_bar_start:.2f}s",
-                        marker_color=self.color_mapping[prev_state],
-                        showlegend=prev_state not in func_names_in_legend,
-                    )
-                )
-                prev_state = state
-                current_bar_start = start
-                current_bar_end = end
-                func_names_in_legend.add(prev_state)
-
-        # add the last bar
-        fig.add_trace(
-            go.Bar(
-                x=[current_bar_end - current_bar_start],
-                y=["state_timeline"],
-                orientation="h",
-                name=prev_state,
-                hoverinfo="text",
-                hovertext=f"{prev_state}: {current_bar_end - current_bar_start:.2f}s",
-                marker_color=self.color_mapping[prev_state],
-                showlegend=prev_state not in func_names_in_legend,
-            )
-        )
-
-        fig.update_layout(
-            title="ML Training State Timeline",
-            xaxis_title="Time (s)",
-            yaxis_title="",
-            barmode="stack",
-            height=100,
-            showlegend=True,
-            legend_traceorder="reversed",
-        )
-
-        # Remove y-axis ticks and labels
-        fig.update_yaxes(showticklabels=False, showgrid=False)
-
-        return fig
-
-    def _generate_new_color(self):
-        self.last_color_index = (self.last_color_index + 1) % len(self._cmap)
-        selected_color = self._cmap[self.last_color_index]
-        r, g, b = (
-            int(selected_color[1:3], 16),
-            int(selected_color[3:5], 16),
-            int(selected_color[5:], 16),
-        )
-        return f"rgb({r},{g},{b})"
-
-
-def log_state(state_logger: StateLogger):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time() - state_logger.start_time
-            result = func(*args, **kwargs)
-            end_time = time.time() - state_logger.start_time
-            state_logger.log_state(func.__name__, start_time, end_time)
-            return result
-
-        return wrapper
-
-    return decorator
 
 
 def warn_about_dtype_conv(

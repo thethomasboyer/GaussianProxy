@@ -1,9 +1,17 @@
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from warnings import warn
 
 from omegaconf import MISSING
+
+
+def custom_showwarning(message, category, filename, lineno, _file=None, _line=None):
+    print(f"{filename}:{lineno}: {category.__name__}: {message}")
+
+
+warnings.showwarning = custom_showwarning
+warnings.simplefilter("once")
 
 
 @dataclass(kw_only=True)
@@ -147,8 +155,8 @@ class SimilarityWithTrainData(EvaluationStrategy):
     nb_generated_samples: int
     batch_size: int
     nb_batches_shown: int
-    metrics: str | list[str] = "cosine"
-    name: str = field(default="CosineSimilarityWithTrainData")
+    metrics: Any = "cosine"  # should be Literal["cosine", "L2"]
+    name: str = field(default="SimilarityWithTrainData")
     n_rows_displayed: int
 
 
@@ -271,7 +279,7 @@ class TimeEncoderConfig:
 @dataclass(kw_only=True)
 class Config:
     # Defaults
-    defaults: list[str]
+    defaults: list
 
     # Model
     dynamic: DDIMSchedulerConfig
@@ -330,7 +338,9 @@ class Config:
     def __post_init__(self):
         # Checks
         if not isinstance(self.dataset, DataSet):
-            warn(f"Cannot check config because dataset is not instantiated yet (is {type(self.dataset)})")
+            warnings.warn(
+                f"Cannot check config because dataset is not instantiated yet (is {type(self.dataset)})", RuntimeWarning
+            )
         else:
             for eval_strat in self.evaluation.strategies:
                 if isinstance(eval_strat, MetricsComputation):
@@ -340,6 +350,7 @@ class Config:
                                 f"MetricsComputation selected_times {eval_strat.selected_times} not in dataset"
                             )
                     else:
-                        warn(
-                            f"Cannot check if MetricsComputation's selected_times {eval_strat.selected_times} are in dataset {self.dataset.name} because no selected_dists were provided"
+                        warnings.warn(
+                            f"Cannot check if MetricsComputation's selected_times {eval_strat.selected_times} are in dataset {self.dataset.name} because no selected_dists were provided",
+                            RuntimeWarning,
                         )

@@ -1,14 +1,18 @@
+import gc
 import json
 import pickle
 import random
 import shutil
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import ClassVar
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import seaborn as sns
 import torch
 import torch_fidelity
 import wandb
@@ -21,13 +25,12 @@ from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
 from PIL import Image
 from torch import IntTensor, Tensor
+from torch.nn import CosineSimilarity, PairwiseDistance
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
-from torch.profiler import profile as torch_profile
-from torch.profiler import schedule, tensorboard_trace_handler
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.transforms.transforms import Compose, ConvertImageDtype, Normalize
+from torchvision.transforms.transforms import Compose, ConvertImageDtype, Normalize, RandomCrop
 
 from GaussianProxy.conf.training_conf import (
     Config,
@@ -36,21 +39,27 @@ from GaussianProxy.conf.training_conf import (
     InvertedRegeneration,
     IterativeInvertedRegeneration,
     MetricsComputation,
+    SimilarityWithTrainData,
     SimpleGeneration,
 )
-from GaussianProxy.utils.data import CONTINUOUS_DF_COLUMNS, BaseContinuousTimeDatasetReturnValue, BaseDataset, TimeKey
+from GaussianProxy.utils.data import (
+    CONTINUOUS_DF_COLUMNS,
+    BaseContinuousTimeDatasetReturnValue,
+    BaseDataset,
+    ContinuousTimeImageDataset,
+    ImageDataset,
+    TimeKey,
+    continuous_ds_collate_fn,
+    remove_flips_and_rotations_from_transforms,
+)
 from GaussianProxy.utils.misc import (
-    StateLogger,
+    generate_all_augs,
     get_evenly_spaced_timesteps,
     hard_augment_dataset_all_square_symmetries,
-    log_state,
     save_eval_artifacts_log_to_wandb,
     save_images_for_metrics_compute,
 )
 from GaussianProxy.utils.models import VideoTimeEncoding
-
-# State logger to track time spent in some functions
-state_logger = StateLogger()
 
 TORCH_DTYPES = {
     "float32": torch.float32,
@@ -118,15 +127,19 @@ class TimeDiffusion:
     video_time_encoding: VideoTimeEncoding
     accelerator: Accelerator
     dataset_params: DatasetParams  # TODO: remove this when the DatasetParams TODO is done
+    debug: bool
+    # arguments populated after init
+    log_hist_every_n_optim_steps: int = field(init=False)
     # populated arguments when calling .fit
     chckpt_save_path: Path = field(init=False)
     this_run_folder: Path = field(init=False)
     optimizer: Optimizer = field(init=False)
     lr_scheduler: LRScheduler = field(init=False)
     logger: MultiProcessAdapter = field(init=False)
-    output_dir: str = field(init=False)
     model_save_folder: Path = field(init=False)
     saved_artifacts_folder: Path = field(init=False)
+    all_train_files: pd.DataFrame | None = field(init=False)
+    all_test_files: pd.DataFrame | None = field(init=False)
     # inferred constant attributes
     _nb_empirical_dists: int = field(init=False)
     _empirical_dists_timesteps: list[float] = field(init=False)
@@ -141,7 +154,10 @@ class TimeDiffusion:
     # WARNING: best_metric_to_date will only be updated on the main process!
     best_metric_to_date: float = field(init=False)
     first_metrics_eval: bool = True  # always reset to True even if resuming from a checkpoint
-    eval_on_start: bool = False
+    eval_on_start: bool = True
+    time_histogram: tuple[np.ndarray, np.ndarray] = field(init=False)  # (bins, counts) for times seen during training
+    time_hist_nb_bins: int = 100
+    time_hist_range: tuple[float, float] = (-0.1, 1.1)
     # constant evaluation starting states
     _eval_noise: Tensor = field(init=False)
     _eval_video_times: Tensor = field(init=False)
@@ -208,6 +224,11 @@ class TimeDiffusion:
             self._net_pred = self._unet2d_condition_pred
         else:
             raise ValueError(f"Expecting UNet2DModel or UNet2DConditionModel, got {self.net_type}")
+        # Set log_hist_every_n_optim_steps
+        if self.debug:
+            self.log_hist_every_n_optim_steps = 10
+        else:
+            self.log_hist_every_n_optim_steps = 1000
 
     def fit(
         self,
@@ -216,13 +237,11 @@ class TimeDiffusion:
         optimizer: Optimizer,
         lr_scheduler: LRScheduler,
         logger: MultiProcessAdapter,
-        output_dir: str,
         model_save_folder: Path,
         saved_artifacts_folder: Path,
         chckpt_save_path: Path,
         this_run_folder: Path,
         resuming_args: ResumingArgs | None = None,
-        profile: bool = False,
         fully_ordered_dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue] | None = None,
         all_train_files: pd.DataFrame | None = None,
         all_test_files: pd.DataFrame | None = None,
@@ -270,26 +289,12 @@ class TimeDiffusion:
 
         pbar_manager: Manager = get_manager()  # pyright: ignore[reportAssignmentType]
 
-        # profiling # TODO: move to train.py
-        if profile:
-            profiler = torch_profile(
-                schedule=schedule(skip_first=1, wait=1, warmup=3, active=20, repeat=3),
-                on_trace_ready=tensorboard_trace_handler(Path(output_dir, "profile").as_posix()),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-            )
-            profiler.start()
-        else:
-            profiler = None
-
         init_count = self.resuming_args.start_global_optimization_step
         batches_pbar = pbar_manager.counter(
             total=self.cfg.training.nb_time_samplings,
             position=1,
             desc="Training batches" + 10 * " ",
             enable=self.accelerator.is_main_process,
-            leave=False,
             count=init_count,
         )
         if self.accelerator.is_main_process:
@@ -335,21 +340,12 @@ class TimeDiffusion:
             ### Then train for one gradient step
             # gradient step here
             self._fit_one_batch(batch, time_or_times)
-            # take one profiler step
-            if profiler is not None:
-                profiler.step()
 
             ### Finally update global opt step and pbar at very end of everything
             self.global_optimization_step += 1
             batches_pbar.update()
 
         batches_pbar.close(clear=True)
-        # update timeline & save it # TODO: broken since epochs removal; to update every n steps (and to fix...)
-        # gantt_chart = state_logger.create_gantt_chart()
-        # self.accelerator.log({"state_timeline/": wandb.Plotly(gantt_chart)}, step=self.global_optimization_step)
-
-        if profiler is not None:
-            profiler.stop()
 
     def _fit_init(
         self,
@@ -424,6 +420,10 @@ class TimeDiffusion:
             )
         self.all_train_files = all_train_files
         self.all_test_files = all_test_files
+        # initalize histogram
+        # this is just to get the bins
+        bins = np.histogram(np.zeros(6666), bins=self.time_hist_nb_bins, range=self.time_hist_range)[1]
+        self.time_histogram = (bins, np.zeros(self.time_hist_nb_bins))  # bins/range is fixed a priori!
 
     def _yield_data_batches(
         self,
@@ -441,7 +441,6 @@ class TimeDiffusion:
             return self._yield_data_batches_discrete_timestamps(dataloaders, nb_time_samplings)
 
     @torch.no_grad()
-    @log_state(state_logger)
     def _yield_data_batches_fully_ordered(
         self,
         dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue],
@@ -476,7 +475,6 @@ class TimeDiffusion:
             yield times, images
 
     @torch.no_grad()
-    @log_state(state_logger)
     def _yield_data_batches_discrete_timestamps(
         self,
         dataloaders: dict[float, DataLoader],
@@ -572,7 +570,6 @@ class TimeDiffusion:
 
             yield t, batch
 
-    @log_state(state_logger)
     def _fit_one_batch(
         self,
         batch: Tensor,
@@ -607,7 +604,7 @@ class TimeDiffusion:
         noisy_batch = self.dynamic.add_noise(batch, noise, diff_timesteps)  # pyright: ignore[reportArgumentType]
 
         # Encode time
-        if isinstance(time, float):
+        if isinstance(time, (float, int)):
             video_time_codes = self.video_time_encoding.forward(time, batch.shape[0])
         else:
             video_time_codes = self.video_time_encoding.forward(time)
@@ -671,15 +668,31 @@ class TimeDiffusion:
         self.optimizer.zero_grad(set_to_none=True)
 
         # Log to wandb
-        time_to_log = time if isinstance(time, float) else time.tolist()  # TODO: manual histogram
+        values_to_log = {
+            "training/loss": loss.item(),
+            "training/lr": self.lr_scheduler.get_last_lr()[0],
+            "training/step": self.global_optimization_step,
+            "training/L2 gradient norm": grad_norm,
+        }
+        if isinstance(time, (float, int)):
+            time_to_log = time
+            values_to_log["training/time"] = time_to_log
+        else:  # histogram
+            new_vals = np.histogram(  # beware: bins and range are fixed a priori!
+                time.cpu().numpy(),
+                bins=self.time_hist_nb_bins,
+                range=self.time_hist_range,
+            )[0]
+            self.time_histogram[1][:] += new_vals  # add new counts to former ones
+            # log histogram only every some steps to not slow down training
+            if self.global_optimization_step % self.log_hist_every_n_optim_steps == 0:
+                bins = self.time_histogram[0]
+                counts = self.time_histogram[1]
+                bin_centers = 0.5 * (bins[:-1] + bins[1:])
+                time_to_log = go.Figure(data=[go.Bar(x=bin_centers, y=counts, width=(bins[1] - bins[0]))])
+                values_to_log["training/time"] = wandb.Plotly(time_to_log)
         self.accelerator.log(
-            {
-                "training/loss": loss.item(),
-                "training/lr": self.lr_scheduler.get_last_lr()[0],
-                "training/step": self.global_optimization_step,
-                "training/time": time_to_log,
-                "training/L2 gradient norm": grad_norm,
-            },
+            values_to_log,
             step=self.global_optimization_step,
         )
 
@@ -789,6 +802,10 @@ class TimeDiffusion:
 
         # 3. Run through evaluation strategies
         for eval_strat in self.cfg.evaluation.strategies:  # TODO: match on type when config is updated
+            # clear cuda memory between each eval
+            gc.collect()
+            torch.cuda.empty_cache()
+
             if eval_strat.name == "SimpleGeneration":
                 self._simple_gen(
                     pbar_manager,
@@ -860,13 +877,20 @@ class TimeDiffusion:
                     test_dataloaders,
                     file_extension=self.dataset_params.file_extension,
                 )
+            elif eval_strat.name == "SimilarityWithTrainData":
+                self._similarity_with_train_data(
+                    eval_strat,  # pyright: ignore[reportArgumentType]
+                    pbar_manager,
+                    tmp_save_folder,
+                    raw_train_dataloaders[0].dataset.transforms,  # pyright: ignore[reportAttributeAccessIssue]
+                )
+
             else:
                 raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
             # wait for everyone between each eval
             self.accelerator.wait_for_everyone()
 
-    @log_state(state_logger)
     @torch.inference_mode()
     def _simple_gen(
         self,
@@ -925,27 +949,277 @@ class TimeDiffusion:
 
         gen_pbar.close(clear=True)
 
-    @log_state(state_logger)
     @torch.inference_mode()
-    def _cosine_sim_with_train(
+    def _similarity_with_train_data(
         self,
-        _: dict[float, DataLoader],
+        eval_strat: SimilarityWithTrainData,
         pbar_manager: Manager,
-        eval_strat: SimpleGeneration,
-        eval_net: UNet2DModel | UNet2DConditionModel,
-        inference_video_time_encoding: VideoTimeEncoding,
+        tmp_save_folder: Path,
+        data_transforms: Compose,
     ):
         """
         Test model memorization by:
 
-        - generating n samples (from random noise)
-        - computing the closest (generated, true) pair by Euclidean cosine similarity, for each generated image
-        - plotting the distribution of these n closest cosine similarities
-        - showing the p < n closest pairs
-        """
-        raise NotImplementedError("TODO: Not implemented yet")
+        - resuing generated samples from `_metrics_computation`
+        - computing the closest (generated, true) pair by similarity, for each generated image
+        - plotting the distribution of these n closest similarities
+        - TODO: showing the p < n closest pairs
 
-    @log_state(state_logger)
+        All computations are forcefully performed on fp32 for numerical precision.
+
+        Similarities can be Euclidean cosine, L2, or both.
+
+        Everything is distributed.
+        """
+        # Checks
+        assert self.all_train_files is not None and self.all_test_files is not None, (
+            f"Expected all_train_files and all_test_files to be set, got {self.all_train_files} and {self.all_test_files}"
+        )  # this func is only adapted for fully ordered datasets although it has nothing to do with it
+
+        ##### 0. Preparations
+        # Set precision flags
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
+
+        # Misc.
+        self.logger.info(f"Starting {eval_strat.name}: {eval_strat}")
+        self.logger.debug(
+            f"Starting {eval_strat.name} on process ({self.accelerator.process_index})",
+            main_process_only=False,
+        )
+        metrics_computation_folder = tmp_save_folder / f"metrics_computation_step_{self.global_optimization_step}"
+        assert metrics_computation_folder.exists(), (
+            f"Expected {metrics_computation_folder} to exist to reuse existing generated samples"
+        )
+
+        ##### 1. Setup the dataset of all true images
+        all_samples = pd.concat([self.all_train_files, self.all_test_files], ignore_index=True)
+        self.logger.debug(f"Reusing {len(all_samples)} true samples in total from all_train_files and all_test_files")
+        kept_transforms, removed_transforms = remove_flips_and_rotations_from_transforms(data_transforms)
+        self.logger.debug(
+            f"Kept transforms: {kept_transforms}, removed transforms: {removed_transforms}",
+        )
+        self.logger.warning(
+            "Forcefully using a `ContinuousTimeImageDataset` for the true dataset in `_similarity_with_train_data`"
+        )
+        true_ds = ContinuousTimeImageDataset(
+            all_samples,
+            kept_transforms,  # no augs, they will be manually performed
+            self.cfg.dataset.expected_initial_data_range,
+        )
+        self.logger.debug(f"Built all-times true dataset:\n{true_ds}")
+
+        ##### 2. Setup the dataset of generated images
+        all_gen_samples = [
+            f
+            for f in metrics_computation_folder.rglob(f"*.{self.dataset_params.file_extension}")
+            if "few_true_samples_for_processing_check" not in f.parts
+        ]
+        tot_nb_generated_samples = len(all_gen_samples)
+        self.logger.debug(
+            f"Reusing {tot_nb_generated_samples} generated samples in total from {metrics_computation_folder}"
+        )
+        # split the all_gen_samples between processes
+        this_proc_all_gen_samples = all_gen_samples[self.accelerator.process_index :: self.accelerator.num_processes]
+        this_proc_nb_generated_samples = len(this_proc_all_gen_samples)
+        # remove RandomCrop for gen images as they "have already been cropped" (gives size error otherwise)
+        kept_transforms_for_gen = Compose([t for t in kept_transforms.transforms if not isinstance(t, RandomCrop)])
+        self.logger.debug(f"Using transforms for generated images: {kept_transforms_for_gen}")
+        gen_ds = ImageDataset(
+            this_proc_all_gen_samples,
+            kept_transforms_for_gen,  # no augs, they will be manually performed
+            self.cfg.dataset.expected_initial_data_range,
+        )
+        self.logger.debug(
+            f"Built all-times gen dataset:\n{gen_ds} on process {self.accelerator.process_index}",
+            main_process_only=False,
+        )
+
+        # TODO(maybe): Compute the average image of the dataset (to remove it afterwards?
+
+        ##### 3. Compute closest similarities
+        # instantiate similarities structs for this process
+        if isinstance(eval_strat.metrics, str):
+            eval_strat.metrics = [eval_strat.metrics]
+        metrics: dict[str, Callable] = dict.fromkeys(eval_strat.metrics)  # pyright: ignore[reportAssignmentType]
+        for metric in eval_strat.metrics:
+            if metric == "cosine":
+                metrics[metric] = CosineSimilarity(dim=1, eps=1e-9)
+            elif metric == "L2":
+                metrics[metric] = PairwiseDistance(p=2, eps=1e-9)
+            else:
+                raise ValueError(f"Unsupported metric {metric}; expected 'cosine' or 'L2'")
+
+        all_sims = {  # all_sims[metric_name][gen_img_idx, true_img_idx, aug_true_img_idx] = similarity_value
+            metric_name: torch.full(
+                (this_proc_nb_generated_samples, len(true_ds), 8),  # 8 is the number of augmentations
+                float("NaN"),
+                device=self.accelerator.device,
+                dtype=torch.float32,
+            )
+            for metric_name in metrics
+        }
+        BEST_VAL = {"cosine": 0, "L2": float("inf")}
+        MAX_OR_MIN = {
+            "cosine": torch.maximum,
+            "L2": torch.minimum,
+        }
+        worst_values = {
+            metric_name: torch.full(
+                (this_proc_nb_generated_samples,),
+                BEST_VAL[metric_name],
+                device=self.accelerator.device,
+                dtype=torch.float32,
+            )
+            for metric_name in metrics
+        }
+
+        gen_dl = DataLoader(
+            gen_ds,
+            batch_size=eval_strat.batch_size,
+            num_workers=1,  # only 1 worker because we are already distributed here!
+            pin_memory=True,
+            prefetch_factor=2,
+            shuffle=False,
+        )
+
+        gen_pbar = pbar_manager.counter(
+            total=len(gen_dl),
+            position=2,
+            desc="Iterating over gen images ",
+            leave=False,
+            enable=self.accelerator.is_main_process,
+        )
+        gen_pbar.refresh()
+
+        # loop over gen samples
+        for gen_img_idx, gen_img in enumerate(gen_dl):
+            start = gen_img_idx * eval_strat.batch_size
+            end = start + len(gen_img)
+
+            gen_img = gen_img.to(self.accelerator.device)
+
+            true_dl = DataLoader(
+                true_ds,
+                batch_size=eval_strat.batch_size,
+                num_workers=1,
+                pin_memory=True,
+                prefetch_factor=2,
+                collate_fn=continuous_ds_collate_fn,
+                shuffle=False,
+            )
+
+            true_pbar = pbar_manager.counter(
+                total=len(true_dl),
+                position=3,
+                desc="Iterating over true images",
+                leave=False,
+                enable=self.accelerator.is_main_process,
+            )
+            true_pbar.refresh()
+
+            for true_img_batch_idx, true_img_batch_output in enumerate(true_dl):
+                true_img_batch = true_img_batch_output["images"]  # times is useless here
+                true_img_batch = true_img_batch.to(self.accelerator.device)
+
+                for true_img_idx, true_img in enumerate(true_img_batch):
+                    augmented_true_imgs = generate_all_augs(
+                        true_img, removed_transforms
+                    )  # also take into account the augmentations!
+
+                    for aug_idx, aug_true_img in enumerate(augmented_true_imgs):
+                        tiled_true_aug_img = aug_true_img.unsqueeze(0).tile(len(gen_img), 1, 1, 1)
+                        for metric_name, metric in metrics.items():
+                            value = metric(tiled_true_aug_img.flatten(1), gen_img.flatten(1))
+                            # record all similarities
+                            all_sims[metric_name][
+                                start:end, true_img_batch_idx * eval_strat.batch_size + true_img_idx, aug_idx
+                            ] = value
+                            # update worst found similarities
+                            new_worst_values = MAX_OR_MIN[metric_name](worst_values[metric_name][start:end], value)
+                            worst_values[metric_name][start:end] = new_worst_values
+
+                true_pbar.update()
+
+            true_pbar.close()
+            gen_pbar.update()
+
+        gen_pbar.close()
+
+        base_save_path = tmp_save_folder / f"{eval_strat.name}_step_{self.global_optimization_step}"
+        base_save_path.mkdir(parents=True, exist_ok=True)
+
+        # save the raw data per process
+        torch.save(
+            {
+                "all_sims": {k: t.cpu() for k, t in all_sims.items()},
+                "worst_values": {k: t.cpu() for k, t in worst_values.items()},
+            },
+            base_save_path
+            / f"similarity_with_train_data_step_{self.global_optimization_step}_proc_{self.accelerator.process_index}.pt",
+        )
+        self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            # retreive processes' data on main
+            all_sims = []
+            worst_values = []
+            for proc_idx in range(self.accelerator.num_processes):
+                data = torch.load(
+                    base_save_path
+                    / f"similarity_with_train_data_step_{self.global_optimization_step}_proc_{proc_idx}.pt"
+                )
+                all_sims.append(data["all_sims"])
+                worst_values.append(data["worst_values"])
+            # these are dicts so we need to cat their values
+            all_sims = {
+                metric_name: torch.cat([d[metric_name] for d in all_sims], dim=0) for metric_name in all_sims[0]
+            }
+            worst_values = {
+                metric_name: torch.cat([d[metric_name] for d in worst_values], dim=0) for metric_name in worst_values[0]
+            }
+
+            # log the histogram of all similarities, for each metric
+            for metric_name in metrics:
+                this_metric_all_sims = all_sims[metric_name]
+                fig = plt.figure(figsize=(10, 6), dpi=150)
+                plt.grid()
+                sns.histplot(x=this_metric_all_sims.flatten().numpy(), bins=300)
+                plt.title(
+                    f"nb_samples_generated × nb_train_samples × augment_factor = {tot_nb_generated_samples} × {len(true_ds)} × 8 = {this_metric_all_sims.numel():,}"
+                )
+                plt.suptitle(f"Distribution of all {metric_name} similarities")
+                plt.xlim(-1, 1)
+                plt.tight_layout()
+                self.accelerator.log(
+                    {f"evaluation/{eval_strat.name}/all_{metric_name}_hist": wandb.Image(fig)},
+                    step=self.global_optimization_step,
+                )
+
+            # log the histogram of each per-generated-image worst similarity, for each metric
+            for metric_name in metrics:
+                fig = plt.figure(figsize=(10, 6), dpi=150)
+                plt.grid()
+                sns.histplot(x=worst_values[metric_name].flatten().numpy(), bins=300)
+                plt.title(f"nb_samples_generated = {tot_nb_generated_samples} = {worst_values[metric_name].numel():,}")
+                plt.suptitle(f"Distribution of *worst* {metric_name} similarities")
+                plt.xlim(0, 1)
+                plt.tight_layout()
+                self.accelerator.log(
+                    {f"evaluation/{eval_strat.name}/worst_{metric_name}_hist": wandb.Image(fig)},
+                    step=self.global_optimization_step,
+                )
+
+            # TODO: also log closest pairs!
+
+        self.accelerator.wait_for_everyone()
+
+        ##### 5. Set back precision flags
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
     @torch.inference_mode()
     def _inv_regen(
         self,
@@ -1105,7 +1379,6 @@ class TimeDiffusion:
             main_process_only=False,
         )
 
-    @log_state(state_logger)
     @torch.inference_mode()
     def _iter_inv_regen(
         self,
@@ -1259,7 +1532,6 @@ class TimeDiffusion:
             main_process_only=False,
         )
 
-    @log_state(state_logger)
     @torch.inference_mode()
     def _forward_noising(
         self,
@@ -1409,7 +1681,6 @@ class TimeDiffusion:
             main_process_only=False,
         )
 
-    @log_state(state_logger)
     @torch.inference_mode()
     def _metrics_computation(
         self,
@@ -1470,7 +1741,7 @@ class TimeDiffusion:
                 for true_time_label in eval_base_video_times_true_labels
             }
             self.logger.info(
-                f"Selected video times for metrics computation corresponding to continuous predictions from {eval_strat.selected_times}"
+                f"Selected video times for metrics computation corresponding to continuous predictions from times {eval_strat.selected_times}"
             )
             for true_time_label, time_preds in eval_video_time_preds.items():
                 self.logger.debug(
@@ -1511,13 +1782,13 @@ class TimeDiffusion:
             video_time_idx: int
             # if using continuous datasets: use the time preds on ground truths as video time encodings (later)
             if self.cfg.dataset.fully_ordered:
-                true_label = eval_base_video_times_true_labels[video_time_idx]
+                true_label = eval_base_video_times_true_labels[video_time_idx]  # pyright: ignore[reportPossiblyUnboundVariable]
                 # many batches in here!
-                video_time_enc = eval_video_time_enc[true_label]  # pyright: ignore[reportPossiblyUnboundVariable]
+                video_time_enc = eval_video_time_enc[true_label]  # pyright: ignore[reportPossiblyUnboundVariable, reportArgumentType]
             # if using discrete datasets: simply repeat the ground truth
             else:
                 # same for all batches
-                video_time_enc = eval_video_time_enc[video_time_idx].unsqueeze(0).repeat(eval_strat.batch_size, 1)
+                video_time_enc = eval_video_time_enc[video_time_idx].unsqueeze(0).repeat(eval_strat.batch_size, 1)  # pyright: ignore[reportArgumentType]
 
             # get timestep name
             video_time_name = str(eval_strat.selected_times[video_time_idx])
@@ -1707,7 +1978,11 @@ class TimeDiffusion:
                 batch_size=eval_strat.batch_size * 4,  # TODO: optimize
                 isc=False,
                 fid=True,
-                prc=False,
+                prc=True,
+                kid=True,
+                kid_subset_size=min(
+                    1_000, len(true_datasets_to_compare_with[task]), len(list(gen_samples_input.iterdir()))
+                ),
                 verbose=self.cfg.debug and self.accelerator.is_main_process,
                 cache_root=(self.chckpt_save_path / ".fidelity_caches").as_posix(),
                 input1_cache_name=metrics_caches[task].name,
@@ -1774,13 +2049,7 @@ class TimeDiffusion:
             step=self.global_optimization_step,
         )
 
-        ##### 5. Clean up
-        # pickled metrics can be left without issue
-        if self.accelerator.is_main_process:
-            shutil.rmtree(metrics_computation_folder)
-            self.logger.debug(f"Cleaned up metrics computation folder {metrics_computation_folder}")
-
-        # set back precision flags
+        ##### 5. Set back precision flags
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
@@ -1798,6 +2067,8 @@ class TimeDiffusion:
         - `"adapt"`: generate as many samples as there are in the true data time
         - `"adapt half"`: generate half as many samples as there are in the true data time
         - `"adapt half aug"`: generate half as many samples as there are in the true data time, then 8⨉ augment them (Dih4)
+
+        if `self.debug` is True, then the final this_proc_gen_batches is capped to 2 batches.
         """
         # find total number of samples to generate for this video time
         base_aug_factor = 2 ** len(eval_strat.augmentations_for_metrics_comp)
@@ -1840,13 +2111,16 @@ class TimeDiffusion:
         if this_proc_gen_batches[-1] == 0:
             this_proc_gen_batches.pop()
 
+        if self.debug:
+            self.logger.debug("Capping generated batches to 2 batches for debug")
+            this_proc_gen_batches = this_proc_gen_batches[:2]
+
         self.logger.debug(
             f"Process {self.accelerator.process_index} will generate batches of sizes: {this_proc_gen_batches} for time {true_data_class_path.name}",
             main_process_only=False,
         )
         return this_proc_gen_batches
 
-    @log_state(state_logger)
     def _get_true_datasets_for_metrics_computation(
         self,
         eval_strat: MetricsComputation,
@@ -1971,7 +2245,6 @@ class TimeDiffusion:
 
         return true_datasets_to_compare_with
 
-    @log_state(state_logger)
     def _save_pipeline(self, called_on_main_process_only: bool = False):
         """
         Save the net, time encoder, and dynamic config to disk as an independent pretrained pipeline.
@@ -2007,7 +2280,6 @@ class TimeDiffusion:
             f"Saved net, video time encoder, dynamic config, and resuming args to {self.model_save_folder}"
         )
 
-    @log_state(state_logger)
     def _checkpoint(self):
         """
         Save the current state of the models, optimizers, schedulers, and dataloaders.
@@ -2065,7 +2337,6 @@ class TimeDiffusion:
 
         self.accelerator.wait_for_everyone()
 
-    @log_state(state_logger)
     def load_checkpoint(self, resuming_path: str, logger: MultiProcessAdapter):
         """
         Load a checkpoint saved with `save_state`.
