@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import pickle
 import random
 import sys
 from pathlib import Path
@@ -749,7 +750,6 @@ def plot_3D_embeddings(
     logger.debug(f"Saved 3D plot to {png_save_path}")
 
 
-# TODO:maybe: use a hybrid approach: cdist on gross grid, then minimize_scalar?
 def project_to_time(
     points: np.ndarray, spline_values: np.ndarray, times_of_spline_evaluation: np.ndarray
 ) -> np.ndarray:
@@ -1157,15 +1157,20 @@ def fit_spline_project_time_plots(
         logger.info(
             f"Concatenating continuous time predictions for train set (shape: {continuous_time_predictions.shape}) and test set (shape: {continuous_time_predictions_test.shape})"
         )
+        # TODO: refit and refit and repredict on full data instead...
         continuous_time_predictions = np.concatenate(
             [continuous_time_predictions, continuous_time_predictions_test], axis=0
         )
         logger.info(f"Concatenated continuous time predictions shape: {continuous_time_predictions.shape}")
+        train_test_labels = np.array(["train"] * len(labels) + ["test"] * len(labels_test))
+        logger.debug(f"Generated train/test split labels of shape: {train_test_labels.shape}")
         logger.info(
             f"Concatenating labels for train set (shape: {labels.shape}) and test set (shape: {labels_test.shape})"
         )
         labels = np.concatenate([labels, labels_test], axis=0)
         logger.info(f"Concatenated labels shape: {labels.shape}")
+    else:
+        train_test_labels = None
 
     # normalize to [0,1]
     match normalization_method:
@@ -1190,7 +1195,7 @@ def fit_spline_project_time_plots(
         ds.name,
     )
 
-    return continuous_time_predictions, labels
+    return continuous_time_predictions, labels, train_test_labels
 
 
 def get_sort_func(ds, label):
@@ -1254,19 +1259,19 @@ if __name__ == "__main__":
     # Attention: we *might or might not* use our datasets' pipeline as DINO has its own preprocessing pipeline.
     # ruff: noqa: F401
     # pylint: disable=unused-import
-    from my_conf.dataset.BBBC021_196_docetaxel_inference import (
+    from my_conf.dataset.BBBC021.BBBC021_196_docetaxel_inference import (
         BBBC021_196_docetaxel_inference as bbbc021_ds,
     )
-    from my_conf.dataset.biotine_png_128_inference import dataset as biotine_ds
-    from my_conf.dataset.chromalive6h_3ch_png_inference import dataset as chromalive_ds
-    from my_conf.dataset.diabetic_retinopathy_inference import (
+    from my_conf.dataset.biotine.biotine_png_128_inference import dataset as biotine_ds
+    from my_conf.dataset.ChromaLive6h.chromalive6h_3ch_png_inference import dataset as chromalive_ds
+    from my_conf.dataset.diabetic_retinopathy.diabetic_retinopathy_inference import (
         diabetic_retinopathy_inference as diabetic_retinopathy_ds,
     )
-    from my_conf.dataset.ependymal_context_inference import dataset as ependymal_context_ds
-    from my_conf.dataset.ependymal_cutout_inference import dataset as ependymal_cutout_ds
-    from my_conf.dataset.Jurkat_inference import Jurkat_inference as jurkat_ds
-    from my_conf.dataset.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds
-    from my_conf.dataset.NASH_steatosis_inference import dataset as NASH_steatosis_ds
+    from my_conf.dataset.ependymal_context.ependymal_context_inference import dataset as ependymal_context_ds
+    from my_conf.dataset.ependymal_cutout.ependymal_cutout_inference import dataset as ependymal_cutout_ds
+    from my_conf.dataset.Jurkat.Jurkat_inference import Jurkat_inference as jurkat_ds
+    from my_conf.dataset.NASH_fibrosis.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds
+    from my_conf.dataset.NASH_steatosis.NASH_steatosis_inference import dataset as NASH_steatosis_ds
     # pylint: enable=unused-import
     # ruff: enable=F401
 
@@ -1289,7 +1294,7 @@ if __name__ == "__main__":
     ###################################################################################################################
     ##################################################### Launch ######################################################
     ###################################################################################################################
-    base_save_dir = Path("ordering_datasets")
+    base_save_dir = Path("/projects/static2dynamic/Thomas/ordering_datasets")
     encoding_scheme = params.model_name.replace("/", "_") + (
         "_model_preproc" if params.use_model_preprocessor else "_dataset_preproc"
     )
@@ -1570,6 +1575,10 @@ if __name__ == "__main__":
         logger.info("=> LDA")
         lda = LinearDiscriminantAnalysis()
         lda_embeddings = lda.fit_transform(cls_tokens, labels)
+        # save the LDA model
+        with open(this_run_save_path_this_ds / "lda.pickle", "wb") as f:
+            pickle.dump(lda, f)
+        logger.info(f"Saved LDA model to {this_run_save_path_this_ds / 'lda.pickle'}")
         lda_explained_variance = lda.explained_variance_ratio_
         lda_embeddings_test = lda.transform(cls_tokens_test) if cls_tokens_test is not None else None
         ## 2D
@@ -1688,7 +1697,7 @@ if __name__ == "__main__":
         logger.debug(
             f"Centroids shape: {sorted_lda_centroids.shape} | true labels: {sorted_unique_labels} | true label times {sorted_unique_label_times}"
         )
-        continuous_time_predictions, labels = fit_spline_project_time_plots(
+        _ = fit_spline_project_time_plots(
             "base embedding space",
             sorted_lda_centroids,
             sorted_unique_labels,
@@ -1716,7 +1725,7 @@ if __name__ == "__main__":
         )
         # of LDA embeddings
         logger.info("-> from projection on spline going through class centroids in LDA encoding space")
-        continuous_time_predictions, labels = fit_spline_project_time_plots(
+        continuous_time_predictions, labels, train_test_labels = fit_spline_project_time_plots(
             "LDA embedding space",
             sorted_lda_centroids,
             sorted_unique_labels,
@@ -1795,9 +1804,26 @@ if __name__ == "__main__":
                             "true_label": str(true_time_label),
                         }
                     )
-                df = pd.DataFrame(data)
-
-                df.to_parquet(new_ds_file_save_path, index=False)
+                continuous_time_predictions_df = pd.DataFrame(data)
+                continuous_time_predictions_df.to_parquet(new_ds_file_save_path, index=False)
                 logger.info(f"Saved continuous time predictions dataset to {new_ds_file_save_path}")
+
+                if train_test_labels is not None:
+                    # train/test split is redone each time this script is run, so save it each time too, with "encoding scheme" info
+                    # also, save it in a separate file because this info has no relation to training
+                    data = []
+                    for sample_file_path, train_test_label in zip(file_paths, train_test_labels, strict=True):
+                        data.append(
+                            {
+                                "file_path": sample_file_path,
+                                "train_test_label": train_test_label,
+                            }
+                        )
+                    train_test_labels_df = pd.DataFrame(data)
+                    save_path = new_ds_file_save_path.with_name(
+                        f"{ds.name}__train_test_labels__{encoding_scheme}.parquet"
+                    )
+                    train_test_labels_df.to_parquet(save_path)
+                    logger.info(f"Saved train/test split labels to {save_path}")
         else:
             logger.warning("No times saving")
