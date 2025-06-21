@@ -154,7 +154,7 @@ class TimeDiffusion:
     # WARNING: best_metric_to_date will only be updated on the main process!
     best_metric_to_date: float = field(init=False)
     first_metrics_eval: bool = True  # always reset to True even if resuming from a checkpoint
-    eval_on_start: bool = True
+    eval_on_start: bool = False  # TODO: pass as arg
     time_histogram: tuple[np.ndarray, np.ndarray] = field(init=False)  # (bins, counts) for times seen during training
     time_hist_nb_bins: int = 100
     time_hist_range: tuple[float, float] = (-0.1, 1.1)

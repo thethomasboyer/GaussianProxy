@@ -511,10 +511,11 @@ def _dataset_builder_fully_ordered(
         logger.error("Ignoring Debug mode in _dataset_builder_fully_ordered (TODO)")
 
     # 3. Save train/test split to disk if new
-    if build_new_train_test_split:
+    if build_new_train_test_split and accelerator.is_main_process:
         all_train_files.to_parquet(this_run_folder / "train_samples.parquet")
         all_test_files.to_parquet(this_run_folder / "test_samples.parquet")
         logger.info("Saved new train & test samples to train_samples.parquet & test_samples.parquet")
+    accelerator.wait_for_everyone()
 
     # 4. Print some info about the datasets
     logger.info(f"Train dataset has {len(all_train_files)} samples")
