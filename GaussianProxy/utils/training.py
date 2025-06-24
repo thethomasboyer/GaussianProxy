@@ -1897,7 +1897,7 @@ class TimeDiffusion:
             # on main process:
             if self.accelerator.is_main_process:
                 # augment
-                extension = "png"  # TODO: remove this hardcoded extension (by moving DatasetParams'params into the base DataSet class used in config, another TODO)
+                extension = self.dataset_params.file_extension
                 subdirs_to_augment = [
                     metrics_computation_folder / str(video_time_name) for video_time_name in eval_strat.selected_times
                 ]
@@ -2241,7 +2241,7 @@ class TimeDiffusion:
                 orig_filename = dataset.samples[few_samples_indexes[sample_idx]].name
                 out_dir = metrics_computation_folder / "few_true_samples_for_processing_check" / time
                 out_dir.mkdir(parents=True, exist_ok=True)
-                pil_img.save(out_dir / f"{orig_filename}_processed.png")
+                pil_img.save(out_dir / f"{orig_filename}_processed.{self.dataset_params.file_extension}")
 
         return true_datasets_to_compare_with
 
