@@ -317,6 +317,23 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: phase_order_dict[subdir.name],
                 dataset_class=ImageDataset,
             )
+        case "Jurkat_fully_ordered_dinov2_regs_giant_ds_preproc":
+            phase_order = (
+                "G1",
+                "S",
+                "G2",
+                "Prophase",
+                "Metaphase",
+                "Anaphase",
+                "Telophase",
+            )
+            phase_order_dict = {phase: index for index, phase in enumerate(phase_order)}
+            ds_params = DatasetParams(
+                file_extension="jpg",
+                key_transform=str,
+                sorting_func=lambda subdir: phase_order_dict[subdir.name],
+                dataset_class=ContinuousTimeImageDataset,
+            )
         case "diabetic_retinopathy":
             ds_params = DatasetParams(
                 file_extension="jpeg",
@@ -365,6 +382,13 @@ def setup_dataloaders(
                 key_transform=int,
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
+            )
+        case "NASH_fibrosis_fully_ordered_dinov2_regs_giant_ds_preproc":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ContinuousTimeImageDataset,
             )
         case "NASH_steatosis":
             ds_params = DatasetParams(
