@@ -970,6 +970,9 @@ class TimeDiffusion:
         Similarities can be Euclidean cosine, L2, or both.
 
         Everything is distributed.
+
+        TODO: remove `CosineSimilarity`, `PairwiseDistance`, and the 2 last nested for loops,
+        and use `torch.cdist` for *much* faster computation!
         """
         # Checks
         assert self.all_train_files is not None and self.all_test_files is not None, (
@@ -1103,7 +1106,7 @@ class TimeDiffusion:
             true_dl = DataLoader(
                 true_ds,
                 batch_size=eval_strat.batch_size,
-                num_workers=1,
+                num_workers=1,  # only 1 worker because we are already distributed here!
                 pin_memory=True,
                 prefetch_factor=2,
                 collate_fn=continuous_ds_collate_fn,
