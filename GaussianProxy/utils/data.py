@@ -569,6 +569,7 @@ def _dataset_builder_fully_ordered(
         pin_memory=cfg.dataloaders.pin_memory,
         persistent_workers=cfg.dataloaders.persistent_workers,
         collate_fn=continuous_ds_collate_fn,
+        drop_last=True,  # "needed" because of a check in training loop that expects a full batch
     )
     # test_dl: TODO and TO USE
 
