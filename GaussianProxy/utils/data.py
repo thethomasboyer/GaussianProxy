@@ -300,6 +300,13 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
+        case "biotine_png_fully_ordered":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ContinuousTimeImageDataset,
+            )
         case "Jurkat":
             phase_order = (
                 "G1",
@@ -375,6 +382,13 @@ def setup_dataloaders(
                 key_transform=str,
                 sorting_func=lambda subdir: int(subdir.name.split("_")[1]),
                 dataset_class=ImageDataset,
+            )
+        case "chromaLive6h_3ch_png_patches_380px_fully_ordered":
+            ds_params = DatasetParams(
+                file_extension="png",
+                key_transform=str,
+                sorting_func=lambda subdir: int(subdir.name.split("_")[1]),
+                dataset_class=ContinuousTimeImageDataset,
             )
         case "NASH_fibrosis":
             ds_params = DatasetParams(
