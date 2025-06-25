@@ -18,7 +18,7 @@ def main(args: argparse.Namespace):
         raise ValueError(
             f"Either both previous and new dataset prefixes should end with '/', or none of them should; got: previous_dataset_prefix={args.previous_dataset_prefix} and new_dataset_prefix={args.new_dataset_prefix}"
         )
-    if "/" not in args.substring_to_remove:
+    if args.substring_to_remove != "" and "/" not in args.substring_to_remove:
         print("WARNING: substring_to_remove has no '/' in it!")
     # misc
     pd.set_option("display.width", 200)
@@ -41,14 +41,16 @@ def main(args: argparse.Namespace):
             print("to:")
             print(new_file_paths)
         print(f"\nChecking that {len(new_file_paths)} files exist...", end="", flush=True)
-        if not new_file_paths.apply(lambda p: Path(p).exists()).all():
+        existing_files = new_file_paths.apply(lambda p: Path(p).exists())
+        if not existing_files.all():
             print("")
-            missing = new_file_paths[~new_file_paths.apply(lambda p: Path(p).exists())]
+            missing = new_file_paths[~existing_files]
             if args.debug:
-                print(f"ERROR: some new file paths do not exist: {missing}")
+                print(f"ERROR: some new file paths do not exist:\n{missing}")
             else:
-                raise ValueError(f"Some new file paths do not exist: {missing}")
-        print(" All good!")
+                raise ValueError(f"Some new file paths do not exist:\n{missing}")
+        else:
+            print(" All good!")
         # save modified parquet
         if not args.debug:
             df["file_path"] = new_file_paths
