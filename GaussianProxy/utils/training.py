@@ -970,6 +970,8 @@ class TimeDiffusion:
         Similarities can be Euclidean cosine, L2, or both.
 
         Everything is distributed.
+
+        TODO: currently this func is *very* dumbly underoptimal as it keeps track of *all* similarities.
         """
         # Checks
         assert self.all_train_files is not None and self.all_test_files is not None, (
@@ -1116,7 +1118,7 @@ class TimeDiffusion:
                 true_img_batch_with_augs = []
                 for true_img in true_img_batch:
                     true_img_batch_with_augs += generate_all_augs(true_img, removed_transforms)
-                true_img_batch_with_augs = torch.cat(true_img_batch_with_augs, dim=0)  # (B_true*8, C, H, W)
+                true_img_batch_with_augs = torch.stack(true_img_batch_with_augs)  # (B_true*8, C, H, W)
 
                 # reshape tensors for comparisons on flattened images
                 true_img_batch_with_augs = true_img_batch_with_augs.flatten(1)  # (B_true*8, C*H*W)
@@ -1145,65 +1147,51 @@ class TimeDiffusion:
 
         gen_pbar.close()
 
-        # compute worst values TODO: opearte on this tensor only if all_sims becomes too large...
+        # compute worst values
         # worst_values[metric_name][gen_img_idx] = worst_similarity_value
+        # TODO: operate on this tensor only and ditch useless all_sims...
         MAX_OR_MIN = {
             "cosine": torch.max,
             "L2": torch.min,
         }
         worst_values = {
-            metric_name: MAX_OR_MIN[metric_name](all_sims[metric_name].flatten(1), dim=1) for metric_name in metrics
+            metric_name: MAX_OR_MIN[metric_name](all_sims[metric_name].flatten(1), dim=1).values
+            for metric_name in metrics
         }
 
         base_save_path = tmp_save_folder / f"{eval_strat.name}_step_{self.global_optimization_step}"
         base_save_path.mkdir(parents=True, exist_ok=True)
 
         # save the raw data per process
+        save_path = (
+            base_save_path
+            / f"similarity_with_train_data_step_{self.global_optimization_step}_proc_{self.accelerator.process_index}.pt"
+        )
         torch.save(
             {
-                "all_sims": {k: t.cpu() for k, t in all_sims.items()},
                 "worst_values": {k: t.cpu() for k, t in worst_values.items()},
             },
-            base_save_path
-            / f"similarity_with_train_data_step_{self.global_optimization_step}_proc_{self.accelerator.process_index}.pt",
+            save_path,
+        )
+        self.logger.debug(
+            f"Saved similarities with train data for process {self.accelerator.process_index} to {save_path}",
+            main_process_only=False,
         )
         self.accelerator.wait_for_everyone()
 
         if self.accelerator.is_main_process:
             # retreive processes' data on main
-            all_sims = []
             worst_values = []
             for proc_idx in range(self.accelerator.num_processes):
                 data = torch.load(
                     base_save_path
                     / f"similarity_with_train_data_step_{self.global_optimization_step}_proc_{proc_idx}.pt"
                 )
-                all_sims.append(data["all_sims"])
                 worst_values.append(data["worst_values"])
             # these are dicts so we need to cat their values
-            all_sims = {
-                metric_name: torch.cat([d[metric_name] for d in all_sims], dim=0) for metric_name in all_sims[0]
-            }
             worst_values = {
                 metric_name: torch.cat([d[metric_name] for d in worst_values], dim=0) for metric_name in worst_values[0]
             }
-
-            # log the histogram of all similarities, for each metric
-            for metric_name in metrics:
-                this_metric_all_sims = all_sims[metric_name]
-                fig = plt.figure(figsize=(10, 6), dpi=150)
-                plt.grid()
-                sns.histplot(x=this_metric_all_sims.flatten().numpy(), bins=300)
-                plt.title(
-                    f"nb_samples_generated × nb_train_samples × augment_factor = {tot_nb_generated_samples} × {len(true_ds)} × 8 = {this_metric_all_sims.numel():,}"
-                )
-                plt.suptitle(f"Distribution of all {metric_name} similarities")
-                plt.xlim(-1, 1)
-                plt.tight_layout()
-                self.accelerator.log(
-                    {f"evaluation/{eval_strat.name}/all_{metric_name}_hist": wandb.Image(fig)},
-                    step=self.global_optimization_step,
-                )
 
             # log the histogram of each per-generated-image worst similarity, for each metric
             for metric_name in metrics:
@@ -1219,7 +1207,7 @@ class TimeDiffusion:
                     step=self.global_optimization_step,
                 )
 
-            # TODO: also log closest pairs!
+            # TODO: also log closest image pairs!
 
         self.accelerator.wait_for_everyone()
 
@@ -1739,6 +1727,9 @@ class TimeDiffusion:
 
         # use training time encodings
         true_labels_times = [self.timesteps_names_to_floats[str(eval_time)] for eval_time in eval_strat.selected_times]
+        self.logger.info(
+            f"Selected true video times for metrics computation: {true_labels_times} from {eval_strat.selected_times}"
+        )
         if self.cfg.dataset.fully_ordered:
             eval_base_video_times_true_labels = [str(eval_time) for eval_time in eval_strat.selected_times]
             all_files = pd.concat([self.all_train_files, self.all_test_files])
@@ -1747,7 +1738,7 @@ class TimeDiffusion:
                 for true_time_label in eval_base_video_times_true_labels
             }
             self.logger.info(
-                f"Selected video times for metrics computation corresponding to continuous predictions from times {eval_strat.selected_times}"
+                f"Fully ordered training: selected continuous video times for metrics computation corresponding to continuous predictions from times {eval_strat.selected_times}"
             )
             for true_time_label, time_preds in eval_video_time_preds.items():
                 self.logger.debug(
@@ -1760,9 +1751,6 @@ class TimeDiffusion:
                 for true_time_label, time_preds in eval_video_time_preds.items()
             }
         else:
-            self.logger.info(
-                f"Selected video times for metrics computation: {true_labels_times} from {eval_strat.selected_times}"
-            )
             eval_video_time_enc = inference_video_time_encoding.forward(
                 torch.tensor(true_labels_times).to(self.accelerator.device, TORCH_DTYPES[eval_strat.dtype])
             )
