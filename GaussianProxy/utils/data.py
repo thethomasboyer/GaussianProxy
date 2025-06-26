@@ -474,14 +474,16 @@ def compute_continuous_time_weights(logger: MultiProcessAdapter, times: np.ndarr
         f"Expected bin indices in [1, {n_bins}], got min={bin_indices.min()}, max={bin_indices.max()}"
     )
     # normalize counts by weights
-    counts = np.maximum(counts, 1)  # avoid division by zero
+    zero_counts = counts == 0
+    # no divide by 0 in weights compute below because count 0 => nobody in that bin!
     weights = [float(1.0 / counts[idx - 1]) for idx in bin_indices]
     # Plot the "weighted counts"
     weighted_counts = np.zeros(n_bins)
     for idx, w in zip(bin_indices, weights, strict=True):
         weighted_counts[idx - 1] += w
     msg = f"Computed weights, resulting in 'weighted counts': {weighted_counts} (should be allclose to 1)"
-    if not np.allclose(weighted_counts, 1.0):
+    # weighted_counts is initialized to 0 and stays 0 for bins with 0 counts
+    if not np.allclose(weighted_counts[~zero_counts], 1.0):
         logger.error(msg)
     else:
         logger.debug(msg)
