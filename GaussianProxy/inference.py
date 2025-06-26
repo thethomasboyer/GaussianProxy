@@ -1434,7 +1434,6 @@ def metrics_computation(
     # Set precision flags
     torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cudnn.benchmark = False
 
     # Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]

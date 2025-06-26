@@ -155,7 +155,7 @@ class SimilarityWithTrainData(EvaluationStrategy):
     nb_generated_samples: int
     batch_size: int
     nb_batches_shown: int
-    metrics: Any = "cosine"  # should be Literal["cosine", "L2"]
+    metrics: Any = "cosine"  # should be list[Literal["cosine", "L2"]]
     name: str = field(default="SimilarityWithTrainData")
     n_rows_displayed: int
 

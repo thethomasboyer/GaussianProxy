@@ -3,7 +3,7 @@ import json
 import pickle
 import random
 import shutil
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import ClassVar
@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import seaborn as sns
 import torch
+import torch.nn.functional as F
 import torch_fidelity
 import wandb
 from accelerate import Accelerator
@@ -25,7 +26,6 @@ from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
 from enlighten import Manager, get_manager
 from PIL import Image
 from torch import IntTensor, Tensor
-from torch.nn import CosineSimilarity, PairwiseDistance
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
@@ -970,9 +970,6 @@ class TimeDiffusion:
         Similarities can be Euclidean cosine, L2, or both.
 
         Everything is distributed.
-
-        TODO: remove `CosineSimilarity`, `PairwiseDistance`, and the 2 last nested for loops,
-        and use `torch.cdist` for *much* faster computation!
         """
         # Checks
         assert self.all_train_files is not None and self.all_test_files is not None, (
@@ -983,7 +980,6 @@ class TimeDiffusion:
         # Set precision flags
         torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.allow_tf32 = False
-        torch.backends.cudnn.benchmark = False
 
         # Misc.
         self.logger.info(f"Starting {eval_strat.name}: {eval_strat}")
@@ -1044,36 +1040,16 @@ class TimeDiffusion:
         ##### 3. Compute closest similarities
         # instantiate similarities structs for this process
         if isinstance(eval_strat.metrics, str):
-            eval_strat.metrics = [eval_strat.metrics]
-        metrics: dict[str, Callable] = dict.fromkeys(eval_strat.metrics)  # pyright: ignore[reportAssignmentType]
-        for metric in eval_strat.metrics:
-            if metric == "cosine":
-                metrics[metric] = CosineSimilarity(dim=1, eps=1e-9)
-            elif metric == "L2":
-                metrics[metric] = PairwiseDistance(p=2, eps=1e-9)
-            else:
-                raise ValueError(f"Unsupported metric {metric}; expected 'cosine' or 'L2'")
+            metrics: list[str] = [eval_strat.metrics]
+        else:
+            metrics: list[str] = eval_strat.metrics
 
         all_sims = {  # all_sims[metric_name][gen_img_idx, true_img_idx, aug_true_img_idx] = similarity_value
             metric_name: torch.full(
                 (this_proc_nb_generated_samples, len(true_ds), 8),  # 8 is the number of augmentations
                 float("NaN"),
                 device=self.accelerator.device,
-                dtype=torch.float32,
-            )
-            for metric_name in metrics
-        }
-        BEST_VAL = {"cosine": 0, "L2": float("inf")}
-        MAX_OR_MIN = {
-            "cosine": torch.maximum,
-            "L2": torch.minimum,
-        }
-        worst_values = {
-            metric_name: torch.full(
-                (this_proc_nb_generated_samples,),
-                BEST_VAL[metric_name],
-                device=self.accelerator.device,
-                dtype=torch.float32,
+                dtype=torch.float32,  # compute in full precision
             )
             for metric_name in metrics
         }
@@ -1081,7 +1057,7 @@ class TimeDiffusion:
         gen_dl = DataLoader(
             gen_ds,
             batch_size=eval_strat.batch_size,
-            num_workers=1,  # only 1 worker because we are already distributed here!
+            num_workers=2,  # not too much because we are already distributed here!
             pin_memory=True,
             prefetch_factor=2,
             shuffle=False,
@@ -1098,15 +1074,20 @@ class TimeDiffusion:
 
         # loop over gen samples
         for gen_img_idx, gen_img in enumerate(gen_dl):
-            start = gen_img_idx * eval_strat.batch_size
-            end = start + len(gen_img)
+            gen_start = gen_img_idx * eval_strat.batch_size
+            gen_end = gen_start + len(gen_img)
 
-            gen_img = gen_img.to(self.accelerator.device)
+            gen_img = gen_img.to(self.accelerator.device)  # (B_gen, C, H, W)
+            B_gen = gen_img.shape[0]
+            # reshape tensors for comparisons on flattened images
+            gen_img = gen_img.flatten(1)  # (B_gen, C*H*W)
+            if "cosine" in metrics:
+                gen_img_normalized = F.normalize(gen_img, dim=1)  # (B_gen, C*H*W)
 
             true_dl = DataLoader(
                 true_ds,
-                batch_size=eval_strat.batch_size,
-                num_workers=1,  # only 1 worker because we are already distributed here!
+                batch_size=eval_strat.batch_size,  # same batch size as gen imgs!
+                num_workers=2,  # not too much because we are already distributed here!
                 pin_memory=True,
                 prefetch_factor=2,
                 collate_fn=continuous_ds_collate_fn,
@@ -1124,24 +1105,38 @@ class TimeDiffusion:
 
             for true_img_batch_idx, true_img_batch_output in enumerate(true_dl):
                 true_img_batch = true_img_batch_output["images"]  # times is useless here
-                true_img_batch = true_img_batch.to(self.accelerator.device)
+                true_img_batch = true_img_batch.to(self.accelerator.device)  # (B_true, C, H, W)
 
-                for true_img_idx, true_img in enumerate(true_img_batch):
-                    augmented_true_imgs = generate_all_augs(
-                        true_img, removed_transforms
-                    )  # also take into account the augmentations!
+                true_start = true_img_batch_idx * eval_strat.batch_size
+                true_end = true_start + len(true_img_batch)
 
-                    for aug_idx, aug_true_img in enumerate(augmented_true_imgs):
-                        tiled_true_aug_img = aug_true_img.unsqueeze(0).tile(len(gen_img), 1, 1, 1)
-                        for metric_name, metric in metrics.items():
-                            value = metric(tiled_true_aug_img.flatten(1), gen_img.flatten(1))
-                            # record all similarities
-                            all_sims[metric_name][
-                                start:end, true_img_batch_idx * eval_strat.batch_size + true_img_idx, aug_idx
-                            ] = value
-                            # update worst found similarities
-                            new_worst_values = MAX_OR_MIN[metric_name](worst_values[metric_name][start:end], value)
-                            worst_values[metric_name][start:end] = new_worst_values
+                B_true = true_img_batch.shape[0]
+
+                # also take into account the augmentations!
+                true_img_batch_with_augs = []
+                for true_img in true_img_batch:
+                    true_img_batch_with_augs += generate_all_augs(true_img, removed_transforms)
+                true_img_batch_with_augs = torch.cat(true_img_batch_with_augs, dim=0)  # (B_true*8, C, H, W)
+
+                # reshape tensors for comparisons on flattened images
+                true_img_batch_with_augs = true_img_batch_with_augs.flatten(1)  # (B_true*8, C*H*W)
+
+                for metric_name in metrics:
+                    if metric_name == "cosine":
+                        true_img_batch_with_augs_normalized = F.normalize(  # (B_true*8, C*H*W)
+                            true_img_batch_with_augs, dim=1
+                        )
+                        cosine_sims_values = (  # (B_gen, B_true*8)
+                            gen_img_normalized @ true_img_batch_with_augs_normalized.T  # pylint: disable=possibly-used-before-assignment
+                        )
+                        cosine_sims_values = cosine_sims_values.view(B_gen, B_true, 8)  # (B_gen, B_true, 8)
+                        all_sims["cosine"][gen_start:gen_end, true_start:true_end, :] = cosine_sims_values
+                    elif metric_name == "L2":
+                        dists = torch.cdist(gen_img, true_img_batch_with_augs)  # (B_gen, B_true*8)
+                        dists = dists.view(B_gen, B_true, 8)  # (B_gen, B_true, 8)
+                        all_sims["L2"][gen_start:gen_end, true_start:true_end, :] = dists
+                    else:
+                        self.logger.error(f"Unknown metric: {metric_name}; continuing")
 
                 true_pbar.update()
 
@@ -1149,6 +1144,16 @@ class TimeDiffusion:
             gen_pbar.update()
 
         gen_pbar.close()
+
+        # compute worst values TODO: opearte on this tensor only if all_sims becomes too large...
+        # worst_values[metric_name][gen_img_idx] = worst_similarity_value
+        MAX_OR_MIN = {
+            "cosine": torch.max,
+            "L2": torch.min,
+        }
+        worst_values = {
+            metric_name: MAX_OR_MIN[metric_name](all_sims[metric_name].flatten(1), dim=1) for metric_name in metrics
+        }
 
         base_save_path = tmp_save_folder / f"{eval_strat.name}_step_{self.global_optimization_step}"
         base_save_path.mkdir(parents=True, exist_ok=True)
@@ -1221,7 +1226,6 @@ class TimeDiffusion:
         ##### 5. Set back precision flags
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
     @torch.inference_mode()
     def _inv_regen(
@@ -1705,7 +1709,6 @@ class TimeDiffusion:
         # Set precision flags
         torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.allow_tf32 = False
-        torch.backends.cudnn.benchmark = False
 
         # duplicate the scheduler to not mess with the training one
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -2055,7 +2058,6 @@ class TimeDiffusion:
         ##### 5. Set back precision flags
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
     def _find_this_proc_this_time_batches_for_metrics_comp(
         self,

@@ -43,7 +43,6 @@ torch.set_grad_enabled(False)
 # Precision
 torch.set_float32_matmul_precision("highest")  # replaces torch.backends.cuda.matmul.allow_tf32
 torch.backends.cudnn.allow_tf32 = False
-torch.backends.cudnn.benchmark = False
 
 ############################################### Conf ##############################################
 # Dataset
