@@ -336,10 +336,12 @@ class Config:
     learning_rate: float
 
     def __post_init__(self):
-        # Checks
+        """Checks"""
+        # dataset
         if not isinstance(self.dataset, DataSet):
             warnings.warn(
-                f"Cannot check config because dataset is not instantiated yet (is {type(self.dataset)})", RuntimeWarning
+                f"Cannot check dataset config because it is not instantiated yet (is {type(self.dataset)})",
+                RuntimeWarning,
             )
         else:
             for eval_strat in self.evaluation.strategies:
@@ -354,3 +356,24 @@ class Config:
                             f"Cannot check if MetricsComputation's selected_times {eval_strat.selected_times} are in dataset {self.dataset.name} because no selected_dists were provided",
                             RuntimeWarning,
                         )
+        # evaluations
+        if any(isinstance(eval_strat, SimilarityWithTrainData) for eval_strat in self.evaluation.strategies):
+            sim_strat_index = next(
+                index
+                for index, strategy in enumerate(self.evaluation.strategies)
+                if isinstance(strategy, SimilarityWithTrainData)
+            )
+            try:
+                metrics_comp_index = next(
+                    index
+                    for index, strategy in enumerate(self.evaluation.strategies)
+                    if isinstance(strategy, MetricsComputation)
+                )
+            except StopIteration as e:
+                raise ValueError(
+                    f"SimilarityWithTrainData strategy requires MetricsComputation strategy to be present in evaluation strategies, got: {[s.name for s in self.evaluation.strategies]}"
+                ) from e
+            if sim_strat_index < metrics_comp_index:
+                raise ValueError(
+                    "SimilarityWithTrainData strategy must come after MetricsComputation strategy in evaluation strategies"
+                )
