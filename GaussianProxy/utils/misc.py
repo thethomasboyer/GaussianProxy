@@ -160,8 +160,8 @@ def modify_args_for_debug(
                 )
                 strat.nb_samples_to_gen_per_time = 2 * strat.batch_size  # pyright: ignore[reportAttributeAccessIssue]
         if hasattr(strat, "selected_times"):
-            # subsample selected times to 2
-            chosen_times = random.sample(strat.selected_times, 2)  # pyright: ignore[reportAttributeAccessIssue]
+            # subsample selected times to 2 (with hardcoded seed to get the same subsampling between processes!)
+            chosen_times = random.Random(42).sample(strat.selected_times, 2)  # pyright: ignore[reportAttributeAccessIssue]
             logger.warning(f"   {strat.name}.selected_times: {strat.selected_times} -> {chosen_times}")  # pyright: ignore[reportAttributeAccessIssue]
             strat.selected_times = chosen_times  # pyright: ignore[reportAttributeAccessIssue]
     # TODO: update registered wandb config for evaluation strategies' configurations
