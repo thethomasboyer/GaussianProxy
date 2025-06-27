@@ -277,7 +277,7 @@ def setup_dataloaders(
     |   |   - ...
     ```
 
-    –with the exception of fully ordered datasets where the data is expected to be found
+    –with the exception of fully ordered datasets where the data is *additionally* expected to be found
     in a single parquet file with a 'time' and 'file_path' columns.
 
     The train/test split that was saved to disk is reused if found
@@ -362,6 +362,8 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: float(subdir.name),
                 dataset_class=ImageDataset,
             )
+            if "fully_ordered" in name:
+                ds_params.dataset_class = ContinuousTimeImageDataset
         case "chromalive_tl_24h_380px":
             ds_params = DatasetParams(
                 file_extension="png",
@@ -441,19 +443,19 @@ def setup_dataloaders(
     )
 
     if cfg.dataset.fully_ordered:
-        fully_ordered_dataloader, all_train_files, all_test_files = _dataset_builder_fully_ordered(
-            cfg, accelerator, logger, this_run_folder, ds_params, num_workers, debug
+        fully_ordered_dataloader, fully_ordered_train_ds, fully_ordered_test_ds = _dataset_builder_fully_ordered(
+            cfg, accelerator, logger, this_run_folder, ds_params, num_workers
         )
     else:
-        fully_ordered_dataloader, all_train_files, all_test_files = None, None, None
+        fully_ordered_dataloader, fully_ordered_train_ds, fully_ordered_test_ds = None, None, None
 
     return (
         train_dataloaders_dict,
         test_dataloaders_dict,
         dataset_params,
         fully_ordered_dataloader,
-        all_train_files,
-        all_test_files,
+        fully_ordered_train_ds,
+        fully_ordered_test_ds,
     )
 
 
@@ -503,7 +505,6 @@ def _dataset_builder_fully_ordered(
     this_run_folder: Path,
     ds_params: DatasetParams,
     num_workers: int,
-    debug: bool = False,
     train_split_frac: float = 0.9,  # TODO: set as config param and add warning if changed vs checkpoint (implies saving it)
 ):
     """Builds the train data loader for fully ordered datasets."""
@@ -514,7 +515,6 @@ def _dataset_builder_fully_ordered(
     assert cfg.dataset.path_to_single_parquet is not None, (
         f"Expected cfg.dataset.path_to_single_parquet to be set, got {cfg.dataset.path_to_single_parquet}"
     )
-    logger.warning("Test split built but not used for now: TODO")  # TODO
 
     # 1. Get train & test splits
     build_new_train_test_split = True
@@ -526,6 +526,7 @@ def _dataset_builder_fully_ordered(
         if not saved_splits_exist:
             logger.warning("No train/test split saved to disk found; building new one")
         else:
+            logger.info("Loading existing train/test splits")
             build_new_train_test_split = False
 
     if build_new_train_test_split:
@@ -547,8 +548,6 @@ def _dataset_builder_fully_ordered(
         f"Using transforms: {transforms} over expected initial data range={cfg.dataset.expected_initial_data_range}"
     )
     logger.warning(f"Using test transforms: {test_transforms}")
-    if debug:
-        logger.error("Ignoring Debug mode in _dataset_builder_fully_ordered (TODO)")
 
     # 3. Save train/test split to disk if new
     if build_new_train_test_split and accelerator.is_main_process:
@@ -567,7 +566,11 @@ def _dataset_builder_fully_ordered(
         transforms=transforms,
         expected_initial_data_range=cfg.dataset.expected_initial_data_range,
     )
-    # test_ds: TODO and TO USE
+    test_ds = ds_params.dataset_class(
+        df=all_test_files,
+        transforms=test_transforms,
+        expected_initial_data_range=cfg.dataset.expected_initial_data_range,
+    )
 
     # 6. Reweight the train dataloader sampling
     times = train_ds.df["time"].to_numpy()
@@ -587,9 +590,8 @@ def _dataset_builder_fully_ordered(
         collate_fn=continuous_ds_collate_fn,
         drop_last=True,  # "needed" because of a check in training loop that expects a full batch
     )
-    # test_dl: TODO and TO USE
 
-    return train_dl, all_train_files, all_test_files
+    return train_dl, train_ds, test_ds
 
 
 def _dataset_builder(
@@ -614,6 +616,7 @@ def _dataset_builder(
         if not saved_splits_exist:
             logger.warning("No train/test split saved to disk found; building new one")
         else:
+            logger.info("Loading existing train/test splits")
             build_new_train_test_split = False
 
     if build_new_train_test_split:
@@ -893,8 +896,8 @@ def _build_train_test_splits_fully_ordered(
     random_seed: Tensor = broadcast(random_seed)  # pyright: ignore[reportAssignmentType]
     logger.debug(f"Broadcasted random seed: {random_seed.item()}")
 
-    train_data = data.sample(frac=train_split_frac, random_state=int(random_seed.item()))
-    test_data = data.drop(train_data.index)
+    train_data = data.sample(frac=train_split_frac, random_state=int(random_seed.item())).reset_index(drop=True)
+    test_data = data.drop(index=train_data.index.to_list()).reset_index(drop=True)
 
     logger.info(f"Built train & test splits with lengths {len(train_data)} and {len(test_data)} respectively")
 
@@ -939,12 +942,12 @@ def load_train_test_splits_fully_ordered(this_run_folder: Path, logger: MultiPro
     test_data = pd.read_parquet(this_run_folder / "test_samples.parquet")
 
     # checks
-    assert (train_data.columns == CONTINUOUS_DF_COLUMNS).all(), (
-        f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {train_data.columns}"
-    )
-    assert (test_data.columns == CONTINUOUS_DF_COLUMNS).all(), (
-        f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {test_data.columns}"
-    )
+    assert (
+        len(train_data.columns) == len(CONTINUOUS_DF_COLUMNS) and (train_data.columns == CONTINUOUS_DF_COLUMNS).all()
+    ), f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {train_data.columns}"
+    assert (
+        len(test_data.columns) == len(CONTINUOUS_DF_COLUMNS) and (test_data.columns == CONTINUOUS_DF_COLUMNS).all()
+    ), f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {test_data.columns}"
 
     logger.info(
         f"Loaded train & test samples from train_samples.parquet & test_samples.parquet with lengths {len(train_data)} and {len(test_data)} respectively"

@@ -44,6 +44,7 @@ from GaussianProxy.conf.training_conf import (
 )
 from GaussianProxy.utils.data import (
     CONTINUOUS_DF_COLUMNS,
+    BaseContinuousTimeDataset,
     BaseContinuousTimeDatasetReturnValue,
     BaseDataset,
     ContinuousTimeImageDataset,
@@ -138,8 +139,8 @@ class TimeDiffusion:
     logger: MultiProcessAdapter = field(init=False)
     model_save_folder: Path = field(init=False)
     saved_artifacts_folder: Path = field(init=False)
-    all_train_files: pd.DataFrame | None = field(init=False)
-    all_test_files: pd.DataFrame | None = field(init=False)
+    fully_ordered_train_ds: BaseContinuousTimeDataset | None = field(init=False)
+    fully_ordered_test_ds: BaseContinuousTimeDataset | None = field(init=False)
     # inferred constant attributes
     _nb_empirical_dists: int = field(init=False)
     _empirical_dists_timesteps: list[float] = field(init=False)
@@ -243,8 +244,8 @@ class TimeDiffusion:
         this_run_folder: Path,
         resuming_args: ResumingArgs | None = None,
         fully_ordered_dataloader: DataLoader[BaseContinuousTimeDatasetReturnValue] | None = None,
-        all_train_files: pd.DataFrame | None = None,
-        all_test_files: pd.DataFrame | None = None,
+        fully_ordered_train_ds: BaseContinuousTimeDataset | None = None,
+        fully_ordered_test_ds: BaseContinuousTimeDataset | None = None,
     ):
         """
         Global high-level fitting method.
@@ -268,8 +269,8 @@ class TimeDiffusion:
             saved_artifacts_folder,
             resuming_args,
             this_run_folder,
-            all_train_files,
-            all_test_files,
+            fully_ordered_train_ds,
+            fully_ordered_test_ds,
         )
 
         # Modify dataloaders dicts to use the empirical distribution timesteps as keys
@@ -358,8 +359,8 @@ class TimeDiffusion:
         saved_artifacts_folder: Path,
         resuming_args: ResumingArgs | None,
         this_run_folder: Path,
-        all_train_files: pd.DataFrame | None,
-        all_test_files: pd.DataFrame | None,
+        fully_ordered_train_ds: BaseContinuousTimeDataset | None,
+        fully_ordered_test_ds: BaseContinuousTimeDataset | None,
     ):
         """
         Fit some remaining attributes before fitting.
@@ -410,16 +411,16 @@ class TimeDiffusion:
         )
         self._eval_video_times = torch.sort(eval_video_times).values  # sort it for better viz
         if self.cfg.dataset.fully_ordered:
-            assert all_train_files is not None and all_test_files is not None, (
-                "Expecting all_train_files and all_test_files to be set when using fully_ordered dataset"
+            assert fully_ordered_train_ds is not None and fully_ordered_test_ds is not None, (
+                "Expecting fully_ordered_train_ds and fully_ordered_test_ds to be set when using fully_ordered dataset"
             )
-            assert (all_train_files.columns == CONTINUOUS_DF_COLUMNS).all() and (
-                all_test_files.columns == CONTINUOUS_DF_COLUMNS
+            assert (fully_ordered_train_ds.df.columns == CONTINUOUS_DF_COLUMNS).all() and (
+                fully_ordered_test_ds.df.columns == CONTINUOUS_DF_COLUMNS
             ).all(), (
-                f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {all_train_files.columns} and {all_test_files.columns}"
+                f"Expected columns {CONTINUOUS_DF_COLUMNS}, got {fully_ordered_train_ds.df.columns} and {fully_ordered_test_ds.df.columns}"
             )
-        self.all_train_files = all_train_files
-        self.all_test_files = all_test_files
+        self.fully_ordered_train_ds = fully_ordered_train_ds
+        self.fully_ordered_test_ds = fully_ordered_test_ds
         # initalize histogram
         # this is just to get the bins
         bins = np.histogram(np.zeros(6666), bins=self.time_hist_nb_bins, range=self.time_hist_range)[1]
@@ -824,29 +825,60 @@ class TimeDiffusion:
                 )
 
             elif eval_strat.name == "InvertedRegeneration":
-                # get first batches of train and test time-0 dataloaders
-                train_dl_time0 = raw_train_dataloaders[0]
-                train_batch_time0: Tensor = next(iter(train_dl_time0))[: self.cfg.training.train_batch_size]
-                while train_batch_time0.shape[0] != self.cfg.training.train_batch_size:
-                    train_batch_time0 = torch.cat([train_batch_time0, next(iter(train_dl_time0))])
-                    train_batch_time0 = train_batch_time0[: self.cfg.training.train_batch_size]
-                train_batch_time0 = train_batch_time0.to(self.accelerator.device)  # train dls are not prepared
+                if self.cfg.dataset.fully_ordered:
+                    # TODO: put this logic (sample images per true time label) into its own BaseContinuousTimeDataset method because it's usefull
+                    # train
+                    assert self.fully_ordered_train_ds is not None
+                    all_train_files_time0 = self.fully_ordered_train_ds.df[
+                        self.fully_ordered_train_ds.df["true_label"] == self.timesteps_floats_to_names[0]
+                    ]
+                    sampled_train_files_time0 = all_train_files_time0.sample(self.cfg.training.train_batch_size)
+                    ds_output = self.fully_ordered_train_ds.__getitems__(sampled_train_files_time0.index.to_list())  # pyright: ignore[reportArgumentType]
+                    train_batch_time0 = torch.stack([out.tensor for out in ds_output]).to(self.accelerator.device)
+                    train_batch_continuous_times = torch.tensor(
+                        [out.time for out in ds_output], device=self.accelerator.device
+                    )
+                    self.logger.debug(f"Using times: {train_batch_continuous_times[:16]} for train starting samples")
+                    # test
+                    assert self.fully_ordered_test_ds is not None
+                    all_test_files_time0 = self.fully_ordered_test_ds.df[
+                        self.fully_ordered_test_ds.df["true_label"] == self.timesteps_floats_to_names[0]
+                    ]
+                    sampled_test_files_time0 = all_test_files_time0.sample(self.cfg.evaluation.batch_size)
+                    ds_output = self.fully_ordered_test_ds.__getitems__(sampled_test_files_time0.index.to_list())  # pyright: ignore[reportArgumentType]
+                    test_batch_time0 = torch.stack([out.tensor for out in ds_output]).to(self.accelerator.device)
+                    test_batch_continuous_times = torch.tensor(
+                        [out.time for out in ds_output], device=self.accelerator.device
+                    )
+                    self.logger.debug(f"Using times: {test_batch_continuous_times[:16]} for test starting samples")
+                else:
+                    # get first batches of train and test time-0 dataloaders
+                    # train
+                    train_dl_time0 = raw_train_dataloaders[0]
+                    train_batch_time0: Tensor = next(iter(train_dl_time0))[: self.cfg.training.train_batch_size]
+                    while train_batch_time0.shape[0] != self.cfg.training.train_batch_size:
+                        train_batch_time0 = torch.cat([train_batch_time0, next(iter(train_dl_time0))])
+                        train_batch_time0 = train_batch_time0[: self.cfg.training.train_batch_size]
+                    train_batch_time0 = train_batch_time0.to(self.accelerator.device)  # train dls are not prepared
+                    # test
+                    test_dl_time0 = list(test_dataloaders.values())[0]
+                    test_batch_time0: Tensor = next(iter(test_dl_time0))
+                    # fully ordered things
+                    train_batch_continuous_times = None
+                    test_batch_continuous_times = None
+                # common checks
                 assert (
                     expected_shape := (
                         self.cfg.training.train_batch_size,
                         *self.data_shape,
                     )
                 ) == train_batch_time0.shape, f"Expected shape {expected_shape}, got {train_batch_time0.shape}"
-
-                test_dl_time0 = list(test_dataloaders.values())[0]
-                test_batch_time0: Tensor = next(iter(test_dl_time0))
                 assert (
                     expected_shape := (
                         self.cfg.evaluation.batch_size,
                         *self.data_shape,
                     )
                 ) == test_batch_time0.shape, f"Expected shape {expected_shape}, got {test_batch_time0.shape}"
-
                 # run the evaluation strategy on theses
                 self._inv_regen(
                     train_batch_time0,
@@ -855,6 +887,8 @@ class TimeDiffusion:
                     eval_strat,  # pyright: ignore[reportArgumentType]
                     inference_net,
                     inference_video_time_encoding,
+                    train_batch_continuous_times,
+                    test_batch_continuous_times,
                 )
 
             elif eval_strat.name == "IterativeInvertedRegeneration":
@@ -974,8 +1008,8 @@ class TimeDiffusion:
         TODO: currently this func is *very* dumbly underoptimal as it keeps track of *all* similarities.
         """
         # Checks
-        assert self.all_train_files is not None and self.all_test_files is not None, (
-            f"Expected all_train_files and all_test_files to be set, got {self.all_train_files} and {self.all_test_files}"
+        assert self.fully_ordered_train_ds is not None and self.fully_ordered_test_ds is not None, (
+            f"Expected fully_ordered_train_ds and fully_ordered_test_ds to be set, got {self.fully_ordered_train_ds} and {self.fully_ordered_test_ds}"
         )  # this func is only adapted for fully ordered datasets although it has nothing to do with it
 
         ##### 0. Preparations
@@ -995,8 +1029,10 @@ class TimeDiffusion:
         )
 
         ##### 1. Setup the dataset of all true images
-        all_samples = pd.concat([self.all_train_files, self.all_test_files], ignore_index=True)
-        self.logger.debug(f"Reusing {len(all_samples)} true samples in total from all_train_files and all_test_files")
+        all_samples = pd.concat([self.fully_ordered_train_ds.df, self.fully_ordered_test_ds.df], ignore_index=True)
+        self.logger.debug(
+            f"Reusing {len(all_samples)} true samples in total from fully_ordered_train_ds and fully_ordered_test_ds"
+        )
         kept_transforms, removed_transforms = remove_flips_and_rotations_from_transforms(data_transforms)
         self.logger.debug(
             f"Kept transforms: {kept_transforms}, removed transforms: {removed_transforms}",
@@ -1129,7 +1165,7 @@ class TimeDiffusion:
                             true_img_batch_with_augs, dim=1
                         )
                         cosine_sims_values = (  # (B_gen, B_true*8)
-                            gen_img_normalized @ true_img_batch_with_augs_normalized.T  # pylint: disable=possibly-used-before-assignment
+                            gen_img_normalized @ true_img_batch_with_augs_normalized.T  # pylint: disable=possibly-used-before-assignment # pyright: ignore[reportPossiblyUnboundVariable]
                         )
                         cosine_sims_values = cosine_sims_values.view(B_gen, B_true, 8)  # (B_gen, B_true, 8)
                         all_sims["cosine"][gen_start:gen_end, true_start:true_end, :] = cosine_sims_values
@@ -1224,6 +1260,8 @@ class TimeDiffusion:
         eval_strat: InvertedRegeneration,
         eval_net: UNet2DModel | UNet2DConditionModel,
         inference_video_time_encoding: VideoTimeEncoding,
+        train_batch_continuous_times: Tensor | None,
+        test_batch_continuous_times: Tensor | None,
     ):
         """
         A quick visualization test that generates a (small) batch of videos, both on train and test starting data.
@@ -1231,7 +1269,7 @@ class TimeDiffusion:
 
         Two steps are performed on the 2 batches:
             1. Perform inversion to obtain the starting Gaussian
-            2. Generate te trajectory from that inverted Gaussian sample
+            2. Generate the trajectory from that inverted Gaussian sample
         """
         # Setup schedulers
         inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -1259,9 +1297,9 @@ class TimeDiffusion:
             eval_batches_pbar.refresh()
 
         # Now generate & evaluate the trajectories
-        for split, batch in [
-            ("train_split", train_batch_time_zero),
-            ("test_split", test_batch_time_zero),
+        for split, batch, batch_continuous_times in [
+            ("train_split", train_batch_time_zero, train_batch_continuous_times),
+            ("test_split", test_batch_time_zero, test_batch_continuous_times),
         ]:
             # 1. Save the to-be inverted images
             save_eval_artifacts_log_to_wandb(
@@ -1277,9 +1315,13 @@ class TimeDiffusion:
             )
 
             # 2. Generate the inverted Gaussians
-            inverted_gauss = batch
-            inversion_video_time = inference_video_time_encoding.forward(0, batch.shape[0])
+            if self.cfg.dataset.fully_ordered:
+                assert batch_continuous_times is not None
+                inversion_video_time = inference_video_time_encoding.forward(batch_continuous_times)
+            else:  # everybody is indeed as video time 0
+                inversion_video_time = inference_video_time_encoding.forward(0, batch.shape[0])
 
+            inverted_gauss = batch
             for t in inverted_scheduler.timesteps.to(self.accelerator.device):
                 model_output = self._net_pred(inverted_gauss, t, inversion_video_time, eval_net)  # pyright: ignore[reportArgumentType]
                 inverted_gauss = inverted_scheduler.step(model_output, int(t), inverted_gauss, return_dict=False)[0]
@@ -1731,8 +1773,9 @@ class TimeDiffusion:
             f"Selected true video times for metrics computation: {true_labels_times} from {eval_strat.selected_times}"
         )
         if self.cfg.dataset.fully_ordered:
+            assert self.fully_ordered_train_ds is not None and self.fully_ordered_test_ds is not None
             eval_base_video_times_true_labels = [str(eval_time) for eval_time in eval_strat.selected_times]
-            all_files = pd.concat([self.all_train_files, self.all_test_files])
+            all_files = pd.concat([self.fully_ordered_train_ds.df, self.fully_ordered_test_ds.df])
             eval_video_time_preds = {
                 true_time_label: all_files.loc[all_files["true_label"] == true_time_label, "time"].to_numpy()
                 for true_time_label in eval_base_video_times_true_labels

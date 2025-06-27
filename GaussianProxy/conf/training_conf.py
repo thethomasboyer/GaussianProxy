@@ -17,7 +17,7 @@ warnings.simplefilter("once")
 @dataclass(kw_only=True)
 class Slurm:
     enabled: bool
-    monitor: bool
+    monitor: bool = False
     total_job_time: int | None = None  # in minutes
     send_timeout_signal_n_minutes_before_end: int = 5  # in minutes
     email: str
@@ -306,7 +306,7 @@ class Config:
 
     # Miscellaneous
     debug: bool
-    profile: bool
+    profile: bool = False
     resume_method: str = "rewind"
     diff_mode: str = "config_only"  # "config_only" or "full"
 
