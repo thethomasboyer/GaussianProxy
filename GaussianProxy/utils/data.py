@@ -348,6 +348,13 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
+        case "diabetic_retinopathy_fully_ordered":
+            ds_params = DatasetParams(
+                file_extension="jpeg",
+                key_transform=int,
+                sorting_func=lambda subdir: int(subdir.name),
+                dataset_class=ContinuousTimeImageDataset,
+            )
         case "ependymal_context" | "ependymal_cutout":
             ds_params = DatasetParams(
                 file_extension="png",
