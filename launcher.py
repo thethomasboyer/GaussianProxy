@@ -92,6 +92,11 @@ def main(cfg: Config) -> None:
 
         if cfg.debug is True:
             qos = "dev"
+            if cfg.slurm.qos != "qos_gpu-dev":
+                logger.warning("debug: setting slurm.qos from %s to 'qos_gpu-dev'", cfg.slurm.qos)
+            if cfg.slurm.total_job_time is not None and cfg.slurm.total_job_time > 2 * 60:
+                logger.warning("debug: setting slurm.total_job_time from %s to 2 * 60 = 120", cfg.slurm.total_job_time)
+                cfg.slurm.total_job_time = 2 * 60
         else:
             qos = cfg.slurm.qos
 
