@@ -14,13 +14,13 @@ from GaussianProxy.utils.misc import generate_all_augs
 
 ###################################################### Arguments ######################################################
 # fmt: off
-DATASET_BASE_PATH = Path("/lustre/fsn1/projects/rech/icr/ufc43hj/datasets/DiabeticRetinopathy/train")
+DATASET_BASE_PATH = Path("/projects/static2dynamic/datasets/DiabeticRetinopathy/prepared_dataset/train")
 EXTENSION         = "jpeg"
-DEBUG             = False
+DEBUG             = True
 CHECK_ONLY        = False
 TRANSFORMS        = ["RandomHorizontalFlip", "RandomVerticalFlip", "RandomRotationSquareSymmetry"]
 AUG_SUBDIR_PATH   = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
-N_THREADS         = 16
+N_THREADS         = 32
 # fmt: on
 
 
@@ -63,7 +63,8 @@ if __name__ == "__main__":
     print(f"Found {len(subdirs_names)} subdirectories: {subdirs_names}", flush=True)
 
     # get all base files to augment
-    all_files = list(DATASET_BASE_PATH.glob(f"**/*.{EXTENSION}", recurse_symlinks=True))
+    print(f"Searching for files with extension '{EXTENSION}' in '{DATASET_BASE_PATH}' ...", flush=True)
+    all_files = list(DATASET_BASE_PATH.rglob(f"*.{EXTENSION}", recurse_symlinks=True))
     print(f"Found {len(all_files)} base files in total", flush=True)
     in_parent_dir = len(subdirs_names) != 0
 
