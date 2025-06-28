@@ -1,38 +1,30 @@
+# ruff: noqa: E402 # pylint: disable=wrong-import-position
+print("Loading imports...", flush=True)
 import random
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PIL import Image
 from rich.traceback import install
-from tqdm.rich import tqdm
+from tqdm import tqdm
 
 sys.path.insert(0, Path(__file__).resolve().parents[1].as_posix())
 from GaussianProxy.utils.misc import generate_all_augs
 
-install()
-
 ###################################################### Arguments ######################################################
-DATASET_BASE_PATH = Path("/projects/static2dynamic/datasets/Jurkat/rgb_images_all_cell_cycles")
-EXTENSION = "jpg"
-DEBUG = False
-CHECK_ONLY = False
-TRANSFORMS = ["RandomHorizontalFlip", "RandomVerticalFlip", "RandomRotationSquareSymmetry"]
-AUG_SUBDIR_PATH = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
-# AUG_SUBDIR_PATH = Path("/localtmp/tboyer/augmented_imagenet_n01917289")  # HARD-CODED!
-
-######################################################### Info ########################################################
-print(f"Augmenting base dataset located at {DATASET_BASE_PATH}", flush=True)
-print(f"Augmented dataset will be saved at {AUG_SUBDIR_PATH}", flush=True)
-print(f"Using the following transforms: {TRANSFORMS}", flush=True)
-print("DEBUG:", DEBUG, flush=True)
-print("CHECK_ONLY:", CHECK_ONLY, flush=True)
-inpt = input("Proceed? (y/[n])")
-if inpt.lower() != "y":
-    print("Exiting")
-    sys.exit(0)
+# fmt: off
+DATASET_BASE_PATH = Path("/lustre/fsn1/projects/rech/icr/ufc43hj/datasets/DiabeticRetinopathy/train")
+EXTENSION         = "jpeg"
+DEBUG             = False
+CHECK_ONLY        = False
+TRANSFORMS        = ["RandomHorizontalFlip", "RandomVerticalFlip", "RandomRotationSquareSymmetry"]
+AUG_SUBDIR_PATH   = DATASET_BASE_PATH.with_name(DATASET_BASE_PATH.name + "_hard_augmented")
+N_THREADS         = 16
+# fmt: on
 
 
+####################################################### Helpers #######################################################
 def ending(path: Path, n: int):
     return Path(*path.parts[-n:])
 
@@ -49,23 +41,35 @@ def augment_save_one_file(base_file: Path, aug_subdir_path: Path, in_parent_dir:
         # save (or not)
         if not DEBUG:
             aug.save(this_aug_save_path)
-        else:
-            print(f"Would have saved augmentation {i} of {ending(base_file, 3)} to {ending(this_aug_save_path, 3)}")
 
 
+######################################################### Main ########################################################
 if __name__ == "__main__":
+    install()
+
+    print(f"Augmenting base dataset located at: {DATASET_BASE_PATH}", flush=True)
+    print(f"Augmented dataset will be saved at: {AUG_SUBDIR_PATH}", flush=True)
+    print(f"Using the following transforms:     {TRANSFORMS}", flush=True)
+    print("DEBUG:                             ", DEBUG, flush=True)
+    print("CHECK_ONLY:                        ", CHECK_ONLY, flush=True)
+    print("N_THREADS:                         ", N_THREADS, flush=True)
+    inpt = input("Proceed? (y/[n])")
+    if inpt.lower() != "y":
+        print("Exiting")
+        sys.exit(0)
+
     # get names of subdirs / timestamps
     subdirs_names = [x.name for x in DATASET_BASE_PATH.iterdir() if x.is_dir()]
-    print(f"Found {len(subdirs_names)} subdirectories: {subdirs_names}")
+    print(f"Found {len(subdirs_names)} subdirectories: {subdirs_names}", flush=True)
 
     # get all base files to augment
     all_files = list(DATASET_BASE_PATH.glob(f"**/*.{EXTENSION}", recurse_symlinks=True))
-    print(f"Found {len(all_files)} base files in total")
+    print(f"Found {len(all_files)} base files in total", flush=True)
     in_parent_dir = len(subdirs_names) != 0
 
     # create augmented subdirs in a adjacent dir to the base dataset one
     if not CHECK_ONLY:
-        input(f"Saving augmented images at {AUG_SUBDIR_PATH}: proceed? (y/[n])")
+        inpt = input(f"Saving augmented images at {AUG_SUBDIR_PATH}: proceed? (y/[n])")
         if inpt.lower() != "y":
             print("Exiting")
             sys.exit(0)
@@ -76,12 +80,12 @@ if __name__ == "__main__":
             AUG_SUBDIR_PATH.mkdir(parents=True, exist_ok=True)
 
         # augment and save to disk
+        if DEBUG:
+            print("DEBUG MODE: only testing 30 random images")
+            all_files = random.sample(all_files, 30)
         pbar = tqdm(total=len(all_files), desc="Saving augmented images")
 
-        with ProcessPoolExecutor() as executor:
-            if DEBUG:
-                print("DEBUG MODE: only testing 30 random images")
-                all_files = random.sample(all_files, 30)
+        with ThreadPoolExecutor(N_THREADS) as executor:
             futures = {
                 executor.submit(augment_save_one_file, file, AUG_SUBDIR_PATH, in_parent_dir): file for file in all_files
             }
@@ -89,7 +93,7 @@ if __name__ == "__main__":
                 try:
                     future.result()
                 except Exception as e:
-                    raise Exception(f"Error processing file {futures[future]}") from e
+                    raise RuntimeError(f"Error processing file {futures[future]}") from e
                 pbar.update()
 
         pbar.close()
