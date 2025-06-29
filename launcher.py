@@ -148,6 +148,8 @@ def main(cfg: Config) -> None:
         )
         if cfg.slurm.total_job_time is not None:
             executor.update_parameters(slurm_time=cfg.slurm.total_job_time)
+        if cfg.slurm.job_launch_delay is not None:
+            executor.update_parameters(additional_parameters={"begin": f"now+{cfg.slurm.job_launch_delay}"})
 
     # CL overrides
     overrides = hydra_cfg.overrides.task

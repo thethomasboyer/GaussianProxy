@@ -29,6 +29,7 @@ class Slurm:
     account: str
     max_num_requeue: int
     partition: str | None
+    job_launch_delay: str | None = None
 
     def __post_init__(self):
         valid_qos_values = ["dev", "t3", "t4"]
