@@ -995,8 +995,9 @@ class TimeDiffusion:
         Test model memorization by:
 
         - resuing generated samples from `_metrics_computation`
-        - computing the closest (generated, true) pair by similarity, for each generated image
-        - plotting the distribution of these n closest similarities
+        - computing the closest (generated, true) pair by similarity, for each generated image,
+        8x augmenting each true image
+        - plotting the distribution of these closest similarities
         - TODO: showing the p < n closest pairs
 
         All computations are forcefully performed on fp32 for numerical precision.
@@ -1005,7 +1006,7 @@ class TimeDiffusion:
 
         Everything is distributed.
 
-        TODO: currently this func is *very* dumbly underoptimal as it keeps track of *all* similarities.
+        # TODO: also log closest image pairs!
         """
         # Checks
         assert self.fully_ordered_train_ds is not None and self.fully_ordered_test_ds is not None, (
@@ -1082,10 +1083,12 @@ class TimeDiffusion:
         else:
             metrics: list[str] = eval_strat.metrics
 
-        all_sims = {  # all_sims[metric_name][gen_img_idx, true_img_idx, aug_true_img_idx] = similarity_value
+        BEST_VAL = {"cosine": 0, "L2": float("inf")}
+
+        worst_sims = {  # worst_sims[metric_name][gen_img_idx] = worst recorded similarity value
             metric_name: torch.full(
-                (this_proc_nb_generated_samples, len(true_ds), 8),  # 8 is the number of augmentations
-                float("NaN"),
+                (this_proc_nb_generated_samples,),
+                BEST_VAL[metric_name],
                 device=self.accelerator.device,
                 dtype=torch.float32,  # compute in full precision
             )
@@ -1116,7 +1119,6 @@ class TimeDiffusion:
             gen_end = gen_start + len(gen_img)
 
             gen_img = gen_img.to(self.accelerator.device)  # (B_gen, C, H, W)
-            B_gen = gen_img.shape[0]
             # reshape tensors for comparisons on flattened images
             gen_img = gen_img.flatten(1)  # (B_gen, C*H*W)
             if "cosine" in metrics:
@@ -1141,14 +1143,9 @@ class TimeDiffusion:
             )
             true_pbar.refresh()
 
-            for true_img_batch_idx, true_img_batch_output in enumerate(true_dl):
+            for true_img_batch_output in true_dl:
                 true_img_batch = true_img_batch_output["images"]  # times is useless here
                 true_img_batch = true_img_batch.to(self.accelerator.device)  # (B_true, C, H, W)
-
-                true_start = true_img_batch_idx * eval_strat.batch_size
-                true_end = true_start + len(true_img_batch)
-
-                B_true = true_img_batch.shape[0]
 
                 # also take into account the augmentations!
                 true_img_batch_with_augs = []
@@ -1167,12 +1164,16 @@ class TimeDiffusion:
                         cosine_sims_values = (  # (B_gen, B_true*8)
                             gen_img_normalized @ true_img_batch_with_augs_normalized.T  # pylint: disable=possibly-used-before-assignment # pyright: ignore[reportPossiblyUnboundVariable]
                         )
-                        cosine_sims_values = cosine_sims_values.view(B_gen, B_true, 8)  # (B_gen, B_true, 8)
-                        all_sims["cosine"][gen_start:gen_end, true_start:true_end, :] = cosine_sims_values
+                        worst_cosines_sims_on_this_batch = cosine_sims_values.max(dim=1).values  # (B_gen,)
+                        new_worst_values = torch.maximum(
+                            worst_sims["cosine"][gen_start:gen_end], worst_cosines_sims_on_this_batch
+                        )
+                        worst_sims["cosine"][gen_start:gen_end] = new_worst_values
                     elif metric_name == "L2":
                         dists = torch.cdist(gen_img, true_img_batch_with_augs)  # (B_gen, B_true*8)
-                        dists = dists.view(B_gen, B_true, 8)  # (B_gen, B_true, 8)
-                        all_sims["L2"][gen_start:gen_end, true_start:true_end, :] = dists
+                        worst_dists_on_this_batch = dists.min(dim=1).values  # (B_gen,)
+                        new_worst_values = torch.minimum(worst_sims["L2"][gen_start:gen_end], worst_dists_on_this_batch)
+                        worst_sims["L2"][gen_start:gen_end] = new_worst_values
                     else:
                         self.logger.error(f"Unknown metric: {metric_name}; continuing")
 
@@ -1182,18 +1183,6 @@ class TimeDiffusion:
             gen_pbar.update()
 
         gen_pbar.close()
-
-        # compute worst values
-        # worst_values[metric_name][gen_img_idx] = worst_similarity_value
-        # TODO: operate on this tensor only and ditch useless all_sims...
-        MAX_OR_MIN = {
-            "cosine": torch.max,
-            "L2": torch.min,
-        }
-        worst_values = {
-            metric_name: MAX_OR_MIN[metric_name](all_sims[metric_name].flatten(1), dim=1).values
-            for metric_name in metrics
-        }
 
         base_save_path = tmp_save_folder / f"{eval_strat.name}_step_{self.global_optimization_step}"
         base_save_path.mkdir(parents=True, exist_ok=True)
@@ -1205,7 +1194,7 @@ class TimeDiffusion:
         )
         torch.save(
             {
-                "worst_values": {k: t.cpu() for k, t in worst_values.items()},
+                "worst_values": {k: t.cpu() for k, t in worst_sims.items()},
             },
             save_path,
         )
@@ -1235,15 +1224,13 @@ class TimeDiffusion:
                 plt.grid()
                 sns.histplot(x=worst_values[metric_name].flatten().numpy(), bins=300)
                 plt.title(f"nb_samples_generated = {tot_nb_generated_samples} = {worst_values[metric_name].numel():,}")
-                plt.suptitle(f"Distribution of *worst* {metric_name} similarities")
+                plt.suptitle(f"Distribution of worst {metric_name} similarities")
                 plt.xlim(0, 1)
                 plt.tight_layout()
                 self.accelerator.log(
                     {f"evaluation/{eval_strat.name}/worst_{metric_name}_hist": wandb.Image(fig)},
                     step=self.global_optimization_step,
                 )
-
-            # TODO: also log closest image pairs!
 
         self.accelerator.wait_for_everyone()
 
