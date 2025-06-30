@@ -355,13 +355,15 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ContinuousTimeImageDataset,
             )
-        case "ependymal_context" | "ependymal_cutout":
+        case name if name.startswith("ependymal_"):
             ds_params = DatasetParams(
                 file_extension="png",
                 key_transform=int,
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ImageDataset,
             )
+            if "fully_ordered" in name:
+                ds_params.dataset_class = ContinuousTimeImageDataset
         case name if name.startswith("BBBC021_"):
             ds_params = DatasetParams(
                 file_extension="png",
