@@ -67,7 +67,7 @@ def main(cfg: Config) -> None:
         project_dir=this_run_folder.as_posix(),
     )
 
-    accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=1200))  # 20 minutes before NCCL timeout
+    accelerator_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=7200))  # 2 hours before NCCL timeout
 
     accelerator = Accelerator(
         gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
