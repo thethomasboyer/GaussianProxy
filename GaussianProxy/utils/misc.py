@@ -229,15 +229,11 @@ def save_eval_artifacts_log_to_wandb(
         5,
     ), f"Expected 4D or 5D tensor, got {tensors_to_save.ndim}D with shape {tensors_to_save.shape}"
 
-    # 1. Select elements to be saved & logged (at random, but keeping the original order)
-    actual_nb_elems_to_save = min(max_nb_to_save_and_log, len(tensors_to_save))
-    # choose actual_nb_elems_to_save at random & in order
-    shuffled_idxes = torch.randperm(len(tensors_to_save))
-    sel_idxes = shuffled_idxes[:actual_nb_elems_to_save].sort().values
-    sel_to_save = tensors_to_save[sel_idxes]
+    # 1. Only the `max_nb_to_save_and_log` first elements are saved & logged
+    sel_to_save = tensors_to_save[:max_nb_to_save_and_log]
     if captions is None:
         captions = [None] * len(tensors_to_save)
-    sel_captions = [captions[i] for i in sel_idxes]
+    sel_captions = captions[:max_nb_to_save_and_log]
 
     # 2. Save some raw images / trajectories to disk (all processes)
     if split_name is not None:
