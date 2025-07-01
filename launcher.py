@@ -517,7 +517,11 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     hydra_cfg = HydraConfig.get()
     this_experiment_folder = Path(hydra_cfg.run.dir)
     this_experiment_folder.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Copying code and config to {this_experiment_folder}")
+
+    parents = Path(*this_experiment_folder.parts[:-2])
+    project = this_experiment_folder.parts[-2]
+    run = this_experiment_folder.parts[-1]
+    logger.info(f"Copying code and config to {parents}/{bold(project)}/{bold(run)}")
 
     # 3. Get git hash of current state of affairs
     repo = Repo.init(this_experiment_folder)
@@ -619,7 +623,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
                     code_diff = _get_specific_diffs(repo, prev_commit.hexsha, new_commit.hexsha, CODE_FOLDER_NAME)
                     logger.info(f"Code diff:\n{code_diff}")
 
-            confirmation = input(f"Proceed with launch for run {bold(this_experiment_folder.name)}? (y/[n]): ")
+            confirmation = input(f"\n=> Proceed with launch for run {bold(this_experiment_folder.name)}? (y/[n]): ")
             if confirmation != "y":
                 do_launch = False
             else:
