@@ -2003,7 +2003,7 @@ class TimeDiffusion:
                 input1=true_datasets_to_compare_with[task],
                 input2=gen_samples_input.as_posix(),
                 cuda=True,
-                batch_size=eval_strat.batch_size * 8,
+                batch_size=eval_strat.batch_size * 4,
                 isc=False,
                 fid=True,
                 prc=True,
