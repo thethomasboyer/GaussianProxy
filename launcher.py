@@ -492,14 +492,15 @@ def _format_code_changes_summary(summary: dict[str, int]) -> str:
         return "No code changes detected."
 
     # Count total changes
-    total_changes = sum(summary.values())
+    total_changes = sum(summary.values()) // 2
     total_files = len(summary)
 
     lines = [
         f"Code changes summary: {total_changes} line{'s' if total_changes != 1 else ''} changed in {total_files} file{'s' if total_files != 1 else ''}"
     ]
     for file, count in summary.items():
-        lines.append(f"  - {file}: {count} line{'s' if count != 1 else ''} changed")
+        lines_changed = count // 2
+        lines.append(f"  - {file}: {lines_changed} line{'s' if lines_changed != 1 else ''} changed")
 
     return "\n".join(lines)
 
@@ -608,7 +609,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
     if cfg.debug:
         try:
             logger.info(
-                f"Proceeding with launch for debug run {bold(this_experiment_folder.name)} in {CONFIRMATION_TIME_LAUNCH_DEBUG_SEC} seconds"
+                f"Proceeding with launch for debug run {bold(project)}/{bold(run)} in {CONFIRMATION_TIME_LAUNCH_DEBUG_SEC} seconds"
             )
             time.sleep(CONFIRMATION_TIME_LAUNCH_DEBUG_SEC)
             do_launch = True
@@ -623,7 +624,7 @@ def prepare_and_confirm_launch(cfg: Config, hydra_cfg: HydraConf, logger: Logger
                     code_diff = _get_specific_diffs(repo, prev_commit.hexsha, new_commit.hexsha, CODE_FOLDER_NAME)
                     logger.info(f"Code diff:\n{code_diff}")
 
-            confirmation = input(f"\n=> Proceed with launch for run {bold(this_experiment_folder.name)}? (y/[n]): ")
+            confirmation = input(f"\n   => Proceed with launch for run {bold(project)}/{bold(run)}? (y/[n]): ")
             if confirmation != "y":
                 do_launch = False
             else:
