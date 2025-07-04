@@ -136,6 +136,7 @@ class InvertedRegeneration(EvaluationStrategy):
     nb_video_times_in_parallel: int
     nb_video_timesteps: int
     n_rows_displayed: int
+    nb_inversion_diffusion_timesteps: int | None = None
 
 
 @dataclass(kw_only=True)

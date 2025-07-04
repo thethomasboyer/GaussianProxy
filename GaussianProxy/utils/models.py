@@ -62,7 +62,8 @@ class VideoTimeEncoding(ModelMixin, ConfigMixin):
             - `time`: `int | float` | `Tensor`
 
         The video time to encode. Assumed to be unique for each batch if `float` or `int`,
-        else the batch size is inferred from the passed `Tensor` shape (and `batch_size` must be `None` in this case).
+        else the batch size is inferred from the passed `Tensor` shape, expected to be 1D
+        (and `batch_size` must be `None` in this case).
 
             - `batch_size`: `int | None`
 

@@ -45,5 +45,8 @@ class InferenceConfig:
     # Profiling
     profiling: ProfileConfig
 
+    # Debug
+    debug: bool = False
+
     # Temp Dir
     tmpdir_location: str

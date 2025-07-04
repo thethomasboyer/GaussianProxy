@@ -1252,7 +1252,6 @@ class TimeDiffusion:
     ):
         """
         A quick visualization test that generates a (small) batch of videos, both on train and test starting data.
-        Starting data *must* be of time zero.
 
         Two steps are performed on the 2 batches:
             1. Perform inversion to obtain the starting Gaussian
@@ -1305,7 +1304,7 @@ class TimeDiffusion:
             if self.cfg.dataset.fully_ordered:
                 assert batch_continuous_times is not None
                 inversion_video_time = inference_video_time_encoding.forward(batch_continuous_times)
-            else:  # everybody is indeed as video time 0
+            else:  # everybody is indeed at video time 0
                 inversion_video_time = inference_video_time_encoding.forward(0, batch.shape[0])
 
             inverted_gauss = batch
@@ -1355,9 +1354,19 @@ class TimeDiffusion:
             if self.accelerator.is_main_process:
                 video_time_pbar.refresh()
 
-            for video_time in torch.linspace(0, 1, self.cfg.evaluation.nb_video_timesteps):
+            video_times = np.linspace(  # (nb_video_timesteps, batch size)
+                batch_continuous_times.numpy(force=True)
+                if batch_continuous_times is not None
+                else np.zeros(batch.shape[0]),
+                1,
+                self.cfg.evaluation.nb_video_timesteps,
+                endpoint=True,
+            )
+            video_times = torch.tensor(video_times, device=self.accelerator.device)
+
+            for video_time in video_times:
                 image = inverted_gauss.clone()
-                video_time_enc = inference_video_time_encoding.forward(video_time.item(), batch.shape[0])
+                video_time_enc = inference_video_time_encoding.forward(video_time)
 
                 for t in inference_scheduler.timesteps:
                     model_output = self._net_pred(image, t, video_time_enc, eval_net)  # pyright: ignore[reportArgumentType]

@@ -16,6 +16,7 @@ import colorlog
 import imageio
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import scipy.stats as stats
 import torch
 import torch_fidelity
@@ -54,10 +55,7 @@ from GaussianProxy.conf.training_conf import (
     SimilarityWithTrainData,
     SimpleGeneration,
 )
-from GaussianProxy.utils.data import (
-    BaseDataset,
-    remove_flips_and_rotations_from_transforms,
-)
+from GaussianProxy.utils.data import BaseContinuousTimeDataset, BaseDataset, remove_flips_and_rotations_from_transforms
 from GaussianProxy.utils.misc import (
     generate_all_augs,
     get_evenly_spaced_timesteps,
@@ -102,7 +100,10 @@ def get_distrib_logger(inference_conf: InferenceConfig) -> MultiProcessAdapter:
             style="%",
         )
     )
-    term_handler.setLevel(logging.INFO)
+    if inference_conf.debug:
+        term_handler.setLevel(logging.DEBUG)
+    else:
+        term_handler.setLevel(logging.INFO)
 
     log_file_path = inference_conf.output_dir / "logs.log"
     log_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +211,7 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     logger.info(f"Loaded dynamic:\n{dynamic}")
 
     ###############################################################################################
-    #                                     Load Starting Images
+    #                               Miscellaneous common needed things
     ###############################################################################################
     assert cfg.dataset.dataset_params is not None
 
@@ -219,18 +220,12 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
     subdirs.sort(key=cfg.dataset.dataset_params.sorting_func)
 
-    # I reuse the Dataset class from the training script to load the images consistently,
-    # but without augmentations to only start on truly true data
-    starting_samples = list(subdirs[0].glob(f"*.{cfg.dataset.dataset_params.file_extension}"))
-    kept_transforms = remove_flips_and_rotations_from_transforms(cfg.dataset.transforms)[0]
-    starting_ds = cfg.dataset.dataset_params.dataset_class(
-        starting_samples,
-        kept_transforms,
-        cfg.dataset.expected_initial_data_range,
-    )
-    logger.debug(f"Built dataset from {subdirs[0]}:\n{starting_ds}")
-    logger.info(f"Using transforms:\n{kept_transforms}")
-    logger.info(f"from initial range {cfg.dataset.expected_initial_data_range}")
+    ### Evenly-spaced timesteps are assumed to be the actual empirical timesteps; must change this if it changes in training code
+    # TODO: actually save the timesteps used in training (well, if discrete...)
+    # TODO: allow generating at non-empirical timesteps
+    empirical_timesteps = get_evenly_spaced_timesteps(len(subdirs))
+    logger.info(f"Empirical timesteps: {[round(ts, 3) for ts in empirical_timesteps]} from {len(subdirs)} subdirs")
+    timesteps2classnames: dict[float, str] = dict(zip(empirical_timesteps, [s.name for s in subdirs], strict=True))
 
     ###############################################################################################
     #                                       Inference passes
@@ -256,34 +251,14 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
             raise RuntimeError("Only MetricsComputation is supported in distributed mode")
         # run the evaluation strategy
         if type(eval_strat) is SimpleGeneration:
-            simple_gen(
-                cfg,
-                eval_strat,
-                net,
-                video_time_encoder,
-                dynamic,
-                pbar_manager,
-                logger,
-            )
+            simple_gen(cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger, timesteps2classnames)
         elif type(eval_strat) is ForwardNoising:
             forward_noising(
-                cfg,
-                eval_strat,
-                net,
-                video_time_encoder,
-                dynamic,
-                pbar_manager,
-                logger,
+                cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger, timesteps2classnames
             )
         elif type(eval_strat) is ForwardNoisingLinearScaling:
             forward_noising_linear_scaling(
-                cfg,
-                eval_strat,
-                net,
-                video_time_encoder,
-                dynamic,
-                pbar_manager,
-                logger,
+                cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger, timesteps2classnames
             )
         elif type(eval_strat) is InvertedRegeneration:
             inverted_regeneration(
@@ -294,16 +269,11 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 dynamic,
                 pbar_manager,
                 logger,
+                timesteps2classnames,
             )
         elif type(eval_strat) is IterativeInvertedRegeneration:
             iterative_inverted_regeneration(
-                cfg,
-                eval_strat,
-                net,
-                video_time_encoder,
-                dynamic,
-                pbar_manager,
-                logger,
+                cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger, timesteps2classnames
             )
         elif type(eval_strat) is SimilarityWithTrainData:
             similarity_with_train_data(
@@ -318,15 +288,6 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 cfg.dataset.data_shape,  # pyright: ignore[reportArgumentType]
             )
         elif type(eval_strat) is MetricsComputation:
-            ### Evenly-spaced timesteps are assumed to be the actual empirical timesteps; must change this if it changes in training code
-            # TODO: allow generating at non-empirical timesteps
-            empirical_timesteps = get_evenly_spaced_timesteps(len(subdirs))
-            logger.info(
-                f"Empirical timesteps: {[round(ts, 3) for ts in empirical_timesteps]} from {len(subdirs)} subdirs"
-            )
-            timesteps2classnames: dict[float, str] = dict(
-                zip(empirical_timesteps, [s.name for s in subdirs], strict=True)
-            )
             ### We need the full datasets/loaders for this method
             training_run_folder = cfg.output_dir.parent
             # use the original training config in <training_run_folder>/my_conf to know if the training was with unpaired data
@@ -352,7 +313,9 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
                 training_was_with_unpaired_data,
             )
         elif type(eval_strat) is InversionRegenerationOnly:
-            inversion_and_regeneration_only(cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger)
+            inversion_and_regeneration_only(
+                cfg, eval_strat, net, video_time_encoder, dynamic, pbar_manager, logger, timesteps2classnames
+            )
         else:
             raise ValueError(f"Unknown evaluation strategy {eval_strat}")
 
@@ -373,7 +336,12 @@ def get_training_boolean_value(filepath: Path, key: str):
                 ):
                     for kw in node.value.keywords:
                         if kw.arg == key and isinstance(kw.value, ast.Constant):
-                            return kw.value.value
+                            if not isinstance(kw.value.value, bool):
+                                raise ValueError(
+                                    f"Expected {key} to be a boolean, got {kw.value.value} of type {type(kw.value.value)}"
+                                )
+                            else:
+                                return kw.value.value
     # Default to False if key is not found
     raise AttributeError(f"Could not find attribute {key} in the `training=Training(...)` assignement in {filepath}")
 
@@ -386,11 +354,10 @@ def simple_gen(
     dynamic: DDIMScheduler,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
+    timesteps2classnames: dict[float, str],
 ):
     """
     Just simple generations.
-
-    `batch` is ignored!
     """
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
@@ -402,7 +369,9 @@ def simple_gen(
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 1. Get the starting batch
-    shape = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype).shape
+    shape = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames)[
+        0
+    ].shape
 
     # 2. Generate the time encodings
     eval_video_times = torch.rand(shape[0], device=cfg.device, dtype=cfg.dtype)
@@ -714,6 +683,7 @@ def forward_noising(
     dynamic: DDIMScheduler,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
+    timesteps2classnames: dict[float, str],
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
@@ -725,7 +695,9 @@ def forward_noising(
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 0.5. Get the starting batch
-    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+    batch, _ = get_starting_batch(
+        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+    )
 
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
@@ -853,6 +825,7 @@ def forward_noising_linear_scaling(
     dynamic: DDIMScheduler,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
+    timesteps2classnames: dict[float, str],
 ):
     # -2. Checks
     if eval_strat.nb_video_times_in_parallel != 1:
@@ -870,7 +843,9 @@ def forward_noising_linear_scaling(
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 0.5. Get the starting batch
-    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+    batch, _ = get_starting_batch(
+        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+    )
 
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
@@ -990,6 +965,7 @@ def inversion_and_regeneration_only(
     dynamic: DDIMScheduler,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
+    timesteps2classnames: dict[float, str],
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
@@ -1003,7 +979,9 @@ def inversion_and_regeneration_only(
     inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 0.5. Get the starting batch
-    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+    batch, _ = get_starting_batch(
+        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+    )
 
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
@@ -1093,6 +1071,7 @@ def inverted_regeneration(
     dynamic: DDIMScheduler,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
+    timesteps2classnames: dict[float, str],
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
@@ -1102,11 +1081,17 @@ def inverted_regeneration(
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+    logger.debug(f"Using scheduler:\n{inference_scheduler}")
+    if eval_strat.nb_inversion_diffusion_timesteps is None:
+        eval_strat.nb_inversion_diffusion_timesteps = eval_strat.nb_diffusion_timesteps
     inverted_scheduler: DDIMInverseScheduler = DDIMInverseScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
-    inverted_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
+    inverted_scheduler.set_timesteps(eval_strat.nb_inversion_diffusion_timesteps)
+    logger.debug(f"Using inverted scheduler:\n{inverted_scheduler}")
 
     # 0.5. Get the starting batch
-    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+    batch, starting_video_time = get_starting_batch(
+        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+    )
 
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
@@ -1154,8 +1139,8 @@ def inverted_regeneration(
     )
 
     # 3. Generate the trajectory from it
-    # the generation is parallelized along video time, but this
-    # useful if small inference batch size only
+    # the generation is parallelized along video time, but this is useful
+    # only if a small inference batch size is used
     video = []
     nb_vid_batches = ceil(eval_strat.nb_video_timesteps / eval_strat.nb_video_times_in_parallel)
 
@@ -1167,7 +1152,16 @@ def inverted_regeneration(
     )
     video_time_pbar.refresh()
 
-    video_times = torch.linspace(0, 1, eval_strat.nb_video_timesteps, device=cfg.device, dtype=cfg.dtype)
+    video_times = np.linspace(  # (nb_video_timesteps,) or (nb_video_timesteps, nb_generated_samples)
+        starting_video_time.numpy(force=True) if isinstance(starting_video_time, Tensor) else starting_video_time,
+        1,
+        eval_strat.nb_video_timesteps,
+        endpoint=True,
+    )
+    video_times = torch.tensor(video_times, device=cfg.device, dtype=cfg.dtype)
+    if video_times.ndim == 0:
+        video_times = video_times.repeat_interleave(eval_strat.nb_generated_samples, dim=1)
+    # video_times is now of shape (nb_video_timesteps, nb_generated_samples)
 
     for vid_batch_idx in range(nb_vid_batches):
         diff_time_pbar = pbar_manager.counter(
@@ -1180,16 +1174,18 @@ def inverted_regeneration(
 
         start = vid_batch_idx * eval_strat.nb_video_times_in_parallel
         end = (vid_batch_idx + 1) * eval_strat.nb_video_times_in_parallel
-        video_time_batch = video_times[start:end]
-        logger.debug(f"Processing video times from {start} to {start + len(video_time_batch)}")
-        # at this point video_time_batch is at most cfg.nb_video_times_in_parallel long;
-        # we need to duplicate the video_time_encoding to match the actual batch size!
-        video_time_enc = video_time_encoder.forward(video_time_batch)
-        video_time_enc = video_time_enc.repeat_interleave(eval_strat.nb_generated_samples, dim=0)
+        video_time_batch = video_times[start:end]  # (nb_video_times_in_parallel, nb_generated_samples)
+        logger.debug(
+            f"Processing video times from {start + 1} to {start + video_time_batch.shape[0]} out of {eval_strat.nb_video_timesteps}"
+        )
+        video_time_enc = []
+        for video_time in video_time_batch:
+            video_time_enc.append(video_time_encoder.forward(video_time))  # this only takes 1D tensors!
+        video_time_enc = torch.cat(video_time_enc)
+        # video_time_enc: (nb_video_times_in_parallel * nb_generated_samples, tim_embed_dim)
 
-        image = torch.cat([inverted_gauss.clone() for _ in range(len(video_time_batch))])
-        # shape: (len(video_time_batch)*batch_size, channels, height, width),
-        # torch.where len(video_time_batch) = cfg.nb_video_times_in_parallel for at least all but the last batch
+        image = torch.cat([inverted_gauss.clone() for _ in range(video_time_batch.shape[0])])
+        # shape: (nb_video_times_in_parallel * nb_generated_samples, channels, height, width)
 
         for t in inference_scheduler.timesteps:
             model_output: torch.Tensor = net.forward(
@@ -1208,11 +1204,11 @@ def inverted_regeneration(
     video_time_pbar.close()
 
     # video is a list of ceil(nb_video_timesteps / nb_video_times_in_parallel) elements, each of shape
-    # (len(video_time_batch) * batch_size, channels, hight, width)
+    # (nb_video_times_in_parallel * nb_generated_samples, channels, height, width)
     video = torch.cat(video)  # (nb_video_timesteps * nb_generated_samples, channels, height, width)
     video = video.split(eval_strat.nb_generated_samples)
     video = torch.stack(video)
-    # save_images_or_videos expects (video_time, batch_size, channels, height, width)
+    # save_images_or_videos expects (video_time, nb_generated_samples, channels, height, width)
     expected_video_shape = (
         eval_strat.nb_video_timesteps,
         eval_strat.nb_generated_samples,
@@ -1252,6 +1248,7 @@ def iterative_inverted_regeneration(
     dynamic: DDIMScheduler,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
+    timesteps2classnames: dict[float, str],
 ):
     """
     This strategy performs iteratively:
@@ -1279,7 +1276,9 @@ def iterative_inverted_regeneration(
     logger.debug(f"Using inverted scheduler config: {inverted_scheduler.config}")
 
     # 0.5. Get the starting batch
-    batch = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype)
+    batch, _ = get_starting_batch(
+        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+    )
 
     # 1. Save the to-be noised images
     save_grid_of_images_or_videos(
@@ -2138,8 +2137,58 @@ def get_starting_batch(
     dataset_path: Path | str,
     device: torch.device | str,
     dtype: torch.dtype | str,
-) -> Tensor:
+    timesteps2classnames: dict[float, str],
+):
     # build the starting dataset
+    if cfg.dataset.fully_ordered:
+        return _get_starting_batch_continuous(cfg, eval_strat, logger, device, dtype, timesteps2classnames)
+    else:
+        return _get_starting_batch_discrete(cfg, eval_strat, logger, dataset_path, device, dtype)
+
+
+def _get_starting_batch_continuous(
+    cfg: InferenceConfig,
+    eval_strat: InvertedRegeneration | SimpleGeneration | ForwardNoising | InversionRegenerationOnly,
+    logger: MultiProcessAdapter,
+    device: torch.device | str,
+    dtype: torch.dtype | str,
+    timesteps2classnames: dict[float, str],
+) -> tuple[Tensor, Tensor]:
+    assert cfg.dataset.dataset_params is not None
+    assert cfg.dataset.path_to_single_parquet is not None
+    # build the starting dataset
+    df = pd.read_parquet(cfg.dataset.path_to_single_parquet)
+    # ensure no augmentations here
+    kept_transforms = remove_flips_and_rotations_from_transforms(cfg.dataset.transforms)[0]
+    starting_ds: BaseContinuousTimeDataset = cfg.dataset.dataset_params.dataset_class(
+        df,
+        kept_transforms,
+        cfg.dataset.expected_initial_data_range,
+    )
+    logger.info(f"Built dataset:\n{starting_ds}")
+    logger.info(f"Using transforms:\n{kept_transforms}")
+
+    # get the starting batch
+    all_train_files_discrete_time_0 = starting_ds.df[starting_ds.df["true_label"] == timesteps2classnames[0]]
+    logger.info(f"Using discrete-time-0 DataFrame:\n{all_train_files_discrete_time_0}")
+    sampled_train_files_time0 = all_train_files_discrete_time_0.sample(eval_strat.nb_generated_samples)
+    ds_output = starting_ds.__getitems__(sampled_train_files_time0.index.to_list())  # pyright: ignore[reportArgumentType]
+    starting_batch: Tensor = torch.stack([out.tensor for out in ds_output]).to(device, dtype)  # pyright: ignore[reportCallIssue, reportArgumentType]
+    starting_times = torch.tensor([out.time for out in ds_output], device=device, dtype=dtype)  # pyright: ignore[reportArgumentType]
+    logger.info(
+        f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype} at times {starting_times}"
+    )
+    return starting_batch, starting_times
+
+
+def _get_starting_batch_discrete(
+    cfg: InferenceConfig,
+    eval_strat: InvertedRegeneration | SimpleGeneration | ForwardNoising | InversionRegenerationOnly,
+    logger: MultiProcessAdapter,
+    dataset_path: Path | str,
+    device: torch.device | str,
+    dtype: torch.dtype | str,
+) -> tuple[Tensor, float]:
     assert cfg.dataset.dataset_params is not None
 
     database_path = Path(cfg.dataset.path)
@@ -2187,7 +2236,8 @@ def get_starting_batch(
 
     starting_batch: Tensor = torch.stack(tensors).to(device, dtype)  # pyright: ignore[reportCallIssue, reportArgumentType]
     logger.debug(f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype}")
-    return starting_batch
+
+    return starting_batch, 0
 
 
 def clean_inference_strategy_folder(
