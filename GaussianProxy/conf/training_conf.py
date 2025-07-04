@@ -210,7 +210,7 @@ class Checkpointing:
     chckpt_base_path: Path
 
 
-@dataclass
+@dataclass(kw_only=True)
 class DDIMSchedulerConfig:
     num_train_timesteps: int
     prediction_type: str  # 'epsilon' or 'v_prediction'
@@ -225,8 +225,8 @@ class DDIMSchedulerConfig:
     beta_start: float = 0.0001
     beta_end: float = 0.02
     beta_schedule: str = "linear"
-    timestep_spacing: str = "trailing"
-    rescale_betas_zero_snr: bool = True
+    timestep_spacing: str
+    rescale_betas_zero_snr: bool
 
 
 @dataclass
