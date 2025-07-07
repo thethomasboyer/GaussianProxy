@@ -220,11 +220,18 @@ class ImageDataset(BaseDataset):
         return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
 
 
+class ImageDataset1D(BaseDataset):
+    """Just a dataset loading 1-channel images."""
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        return torch.from_numpy(np.array(Image.open(path))).unsqueeze(0)
+
+
 class ImageDataset_1D_to_3D(BaseDataset):
     """
-    Just a dataset loading 1D images, duplicating them to 3D.
+    Just a dataset loading 1-channel images, duplicating them to 3-channels.
 
-    Only used to compute DINO encodings.
+    Typically used to compute image encodings, and some metrics.
     """
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
@@ -250,6 +257,13 @@ class ContinuousTimeImageDataset(BaseContinuousTimeDataset):
 
     def _raw_image_loader(self, path: str | Path) -> Tensor:
         return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
+
+
+class ContinuousTimeImageDataset1D(BaseContinuousTimeDataset):
+    """Just a continuous time dataset loading 1-channel images."""
+
+    def _raw_image_loader(self, path: str | Path) -> Tensor:
+        return torch.from_numpy(np.array(Image.open(path))).unsqueeze(0)
 
 
 class RandomRotationSquareSymmetry(Transform):
@@ -336,10 +350,10 @@ def setup_dataloaders(
                 file_extension="png" if "brightfield" in name else "jpg",
                 key_transform=str,
                 sorting_func=lambda subdir: phase_order_dict[subdir.name],
-                dataset_class=ImageDataset,
+                dataset_class=ImageDataset1D if "brightfield" in name else ImageDataset,
             )
             if "fully_ordered" in name:
-                ds_params.dataset_class = ContinuousTimeImageDataset
+                ds_params.dataset_class = ContinuousTimeImageDataset1D
         case "diabetic_retinopathy":
             ds_params = DatasetParams(
                 file_extension="jpeg",
@@ -432,10 +446,10 @@ def setup_dataloaders(
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
     if issubclass(ds_params.dataset_class, BaseContinuousTimeDataset):
-        logger.error(
-            "Loaded a fully ordered config; forcefully passing *ImageDataset* for the discrete datasets instantiation (it might not suit!)"
-        )
-        ds_params_discrete = dataclass_replace(ds_params, dataset_class=ImageDataset)
+        if "Jurkat_brightfield" in cfg.dataset.name:
+            ds_params_discrete = dataclass_replace(ds_params, dataset_class=ImageDataset1D)
+        else:
+            ds_params_discrete = dataclass_replace(ds_params, dataset_class=ImageDataset)
     else:
         ds_params_discrete = ds_params
 

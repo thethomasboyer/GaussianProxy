@@ -187,6 +187,8 @@ def main(cfg: Config) -> None:
         fully_ordered_train_ds,
         fully_ordered_test_ds,
     ) = setup_dataloaders(cfg, accelerator, num_workers, logger, this_run_folder, chckpt_save_path, cfg.debug)
+    if fully_ordered_train_ds is not None:
+        logger.info(f"Using continuous time datasets (train/test):\n{fully_ordered_train_ds}\n{fully_ordered_test_ds}")
 
     # ------------------------------------ Debug -------------------------------------
     if cfg.debug:

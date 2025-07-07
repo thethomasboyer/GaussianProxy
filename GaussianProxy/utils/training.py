@@ -49,6 +49,8 @@ from GaussianProxy.utils.data import (
     BaseDataset,
     ContinuousTimeImageDataset,
     ImageDataset,
+    ImageDataset1D,
+    ImageDataset_1D_to_3D,
     TimeKey,
     continuous_ds_collate_fn,
     remove_flips_and_rotations_from_transforms,
@@ -825,6 +827,7 @@ class TimeDiffusion:
                 )
 
             elif eval_strat.name == "InvertedRegeneration":
+                eval_strat: InvertedRegeneration
                 if self.cfg.dataset.fully_ordered:
                     # TODO: put this logic (sample images per true time label) into its own BaseContinuousTimeDataset method because it's usefull
                     # train
@@ -832,33 +835,39 @@ class TimeDiffusion:
                     all_train_files_time0 = self.fully_ordered_train_ds.df[
                         self.fully_ordered_train_ds.df["true_label"] == self.timesteps_floats_to_names[0]
                     ]
-                    sampled_train_files_time0 = all_train_files_time0.sample(self.cfg.training.train_batch_size)
+                    sampled_train_files_time0 = all_train_files_time0.sample(eval_strat.nb_generated_samples)
                     ds_output = self.fully_ordered_train_ds.__getitems__(sampled_train_files_time0.index.to_list())  # pyright: ignore[reportArgumentType]
                     train_batch_time0 = torch.stack([out.tensor for out in ds_output]).to(self.accelerator.device)
                     train_batch_continuous_times = torch.tensor(
                         [out.time for out in ds_output], device=self.accelerator.device
                     )
-                    self.logger.debug(f"Using times: {train_batch_continuous_times[:16]} for train starting samples")
+                    self.logger.debug(
+                        f"Using times: {train_batch_continuous_times} for train starting samples; shape: {train_batch_continuous_times.shape}"
+                    )
+                    self.logger.debug(f"Using images for train starting samples of shape: {train_batch_time0.shape}")
                     # test
                     assert self.fully_ordered_test_ds is not None
                     all_test_files_time0 = self.fully_ordered_test_ds.df[
                         self.fully_ordered_test_ds.df["true_label"] == self.timesteps_floats_to_names[0]
                     ]
-                    sampled_test_files_time0 = all_test_files_time0.sample(self.cfg.evaluation.batch_size)
+                    sampled_test_files_time0 = all_test_files_time0.sample(eval_strat.nb_generated_samples)
                     ds_output = self.fully_ordered_test_ds.__getitems__(sampled_test_files_time0.index.to_list())  # pyright: ignore[reportArgumentType]
                     test_batch_time0 = torch.stack([out.tensor for out in ds_output]).to(self.accelerator.device)
                     test_batch_continuous_times = torch.tensor(
                         [out.time for out in ds_output], device=self.accelerator.device
                     )
-                    self.logger.debug(f"Using times: {test_batch_continuous_times[:16]} for test starting samples")
+                    self.logger.debug(
+                        f"Using times: {test_batch_continuous_times} for test starting samples; shape: {test_batch_continuous_times.shape}"
+                    )
+                    self.logger.debug(f"Using images for train starting samples of shape: {test_batch_time0.shape}")
                 else:
                     # get first batches of train and test time-0 dataloaders
                     # train
                     train_dl_time0 = raw_train_dataloaders[0]
-                    train_batch_time0: Tensor = next(iter(train_dl_time0))[: self.cfg.training.train_batch_size]
-                    while train_batch_time0.shape[0] != self.cfg.training.train_batch_size:
+                    train_batch_time0: Tensor = next(iter(train_dl_time0))[: eval_strat.nb_generated_samples]
+                    while train_batch_time0.shape[0] != eval_strat.nb_generated_samples:
                         train_batch_time0 = torch.cat([train_batch_time0, next(iter(train_dl_time0))])
-                        train_batch_time0 = train_batch_time0[: self.cfg.training.train_batch_size]
+                        train_batch_time0 = train_batch_time0[: eval_strat.nb_generated_samples]
                     train_batch_time0 = train_batch_time0.to(self.accelerator.device)  # train dls are not prepared
                     # test
                     test_dl_time0 = list(test_dataloaders.values())[0]
@@ -869,13 +878,13 @@ class TimeDiffusion:
                 # common checks
                 assert (
                     expected_shape := (
-                        self.cfg.training.train_batch_size,
+                        eval_strat.nb_generated_samples,
                         *self.data_shape,
                     )
                 ) == train_batch_time0.shape, f"Expected shape {expected_shape}, got {train_batch_time0.shape}"
                 assert (
                     expected_shape := (
-                        self.cfg.evaluation.batch_size,
+                        eval_strat.nb_generated_samples,
                         *self.data_shape,
                     )
                 ) == test_batch_time0.shape, f"Expected shape {expected_shape}, got {test_batch_time0.shape}"
@@ -2178,6 +2187,9 @@ class TimeDiffusion:
         true_datasets_to_compare_with: dict[str, BaseDataset] = {}
         # TODO: clean this mess when the dataset params is moved into the config (see TODO in data.py)
         dataset_class: type[BaseDataset] = type(train_dataloaders[0].dataset)  # pyright: ignore[reportAssignmentType]
+        if dataset_class == ImageDataset1D:
+            dataset_class = ImageDataset_1D_to_3D  # load 1 channem samples as 3 channels for metrics computation
+
         common_suffix = train_dataloaders[0].dataset.samples[0].suffix  # pyright: ignore[reportAttributeAccessIssue]
 
         # Use the correct image processing ([0; 255] uint8) for metrics computation
@@ -2273,7 +2285,7 @@ class TimeDiffusion:
             few_samples_indexes = random.sample(range(len(dataset)), 5)
             few_samples = dataset.__getitems__(few_samples_indexes)
             for sample_idx, sample in enumerate(few_samples):
-                pil_img = Image.fromarray(sample.permute(1, 2, 0).numpy())
+                pil_img = Image.fromarray(sample.permute(1, 2, 0).squeeze().numpy())
                 orig_filename = dataset.samples[few_samples_indexes[sample_idx]].name
                 out_dir = metrics_computation_folder / "few_true_samples_for_processing_check" / time
                 out_dir.mkdir(parents=True, exist_ok=True)

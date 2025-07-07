@@ -200,7 +200,12 @@ def sample_with_replacement(
 
 
 ACCEPTED_ARTIFACTS_NAMES_FOR_LOGGING = Literal[
-    "trajectories", "inversions", "starting_samples", "regenerations", "simple_generations", "noised_samples"
+    "trajectories",
+    "inversions",
+    "starting_samples",
+    "regenerations",
+    "simple_generations",
+    "noised_samples",
 ]
 
 
@@ -230,7 +235,7 @@ def save_eval_artifacts_log_to_wandb(
     ), f"Expected 4D or 5D tensor, got {tensors_to_save.ndim}D with shape {tensors_to_save.shape}"
 
     # 1. Only the `max_nb_to_save_and_log` first elements are saved & logged
-    sel_to_save = tensors_to_save[:max_nb_to_save_and_log]
+    sel_to_save = tensors_to_save[:max_nb_to_save_and_log].clone()
     if captions is None:
         captions = [None] * len(tensors_to_save)
     sel_captions = captions[:max_nb_to_save_and_log]
@@ -265,11 +270,14 @@ def save_eval_artifacts_log_to_wandb(
     # 3. Log to W&B (main process only)
     if sel_to_save.shape[tensors_to_save.ndim - 3] == 1:
         # transform 1-channel images into fake 3-channel RGB images for compatibility
-        logger.debug(f"Adding fake channels trajectories to contain 3 channels at dim {tensors_to_save.ndim - 3}")
+        logger.debug(
+            f"Adding 2 'zeros' GB channels at dim {tensors_to_save.ndim - 3} to obtain a 3-channels trajectories"
+        )
         sel_to_save = torch.cat(
             [sel_to_save, torch.zeros_like(sel_to_save), torch.zeros_like(sel_to_save)],
             dim=-3,
         )
+        logger.debug(f"Resulting shape: {sel_to_save.shape}")
     elif sel_to_save.shape[tensors_to_save.ndim - 3] == 4:
         # transform 4-channel images into 3-channel RGB images for compatibility
         logger.debug(f"Composing RGB images from 4-channel images at dim {tensors_to_save.ndim - 3}")
@@ -414,7 +422,12 @@ def save_images_for_metrics_compute(
     file_extension: str,
     process_idx: int | None = None,
 ):
-    """Saves [-1;1] tensors to [0; 255] uint8 images in the given folder."""
+    """
+    Saves [-1;1] tensors to [0; 255] uint8 3 channels images in the given folder.
+
+    TODO(if bottleneck): make this non-blocking and check all results at once
+    at very end of all generations in main `_metrics_computation` func.
+    """
     # Checks
     assert images.ndim == 4, f"Expected 4D tensor, got {images.shape}"
     assert images.dtype == torch.float32, f"Expected float32 tensor, got {images.dtype}"
@@ -425,8 +438,11 @@ def save_images_for_metrics_compute(
         print(f"Expected [-1;1] range, got {images.min()} to {images.max()}")
     normalized_imgs = normalize_elements_for_logging(images, ["-1_1 raw"])["-1_1 raw"]
 
-    def _save_image_wrapper(img: ndarray, img_idx: int):
-        pil_img = Image.fromarray(img.transpose(1, 2, 0))
+    def _save_image_wrapper(img: ndarray):
+        img = img.transpose(1, 2, 0)  # channel last
+        if img.shape[2] == 1:  # save images as 3 channels for metrics computation
+            img = np.tile(img, (1, 1, 3))  # (H, W, 3)
+        pil_img = Image.fromarray(img)
         tmpst = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         if process_idx is not None:
             filename = f"proc_{process_idx}_{tmpst}.{file_extension}"
@@ -436,7 +452,10 @@ def save_images_for_metrics_compute(
         pil_img.save(save_folder / filename)
 
     with ThreadPoolExecutor() as executor:
-        executor.map(_save_image_wrapper, normalized_imgs, range(len(normalized_imgs)))
+        futures = [executor.submit(_save_image_wrapper, img) for img in normalized_imgs]
+
+        for future in as_completed(futures):
+            future.result()  # raises
 
 
 def verify_model_configs(
@@ -592,7 +611,11 @@ def hard_augment_dataset_all_square_symmetries(
     logger: MultiProcessAdapter,
     files_ext: str,
     max_workers: int | None = None,
-    augmentations: list[type] | list[str] = (RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry),  # type: ignore[reportArgumentType]
+    augmentations: list[type] | list[str] = (
+        RandomHorizontalFlip,
+        RandomVerticalFlip,
+        RandomRotationSquareSymmetry,
+    ),  # type: ignore[reportArgumentType]
 ):
     """
     Save ("in-place") the n augmented versions of each image in the given `dataset_path`.
