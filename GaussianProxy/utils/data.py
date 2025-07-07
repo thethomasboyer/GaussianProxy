@@ -214,14 +214,28 @@ class NumpyDataset(BaseDataset):
 
 
 class ImageDataset(BaseDataset):
-    """Just a dataset loading images, and moving the channel dim last."""
+    """Just a dataset loading images."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
         return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
 
 
+class ImageDataset_1D_to_3D(BaseDataset):
+    """
+    Just a dataset loading 1D images, duplicating them to 3D.
+
+    Only used to compute DINO encodings.
+    """
+
+    def _raw_file_loader(self, path: str | Path) -> Tensor:
+        arr_1D = np.array(Image.open(path))  # (H, W)
+        assert arr_1D.ndim == 2, f"Expected 2D array, got {arr_1D.ndim}D array at {path}"
+        arr_3D = np.tile(arr_1D[:, :, np.newaxis], (1, 1, 3))  # (H, W, 3)
+        return torch.from_numpy(arr_3D).permute(2, 0, 1)
+
+
 class TIFFDataset(BaseDataset):
-    """Just a dataset loading TIFF images, and moving the channel dim last."""
+    """Just a dataset loading TIFF images."""
 
     def _raw_file_loader(self, path: str | Path) -> Tensor:
         array = tifffile.imread(path)
@@ -232,7 +246,7 @@ class TIFFDataset(BaseDataset):
 
 
 class ContinuousTimeImageDataset(BaseContinuousTimeDataset):
-    """Just a dataset loading images, and moving the channel dim last."""
+    """Just a continuous time dataset loading images."""
 
     def _raw_image_loader(self, path: str | Path) -> Tensor:
         return torch.from_numpy(np.array(Image.open(path))).permute(2, 0, 1)
@@ -307,7 +321,7 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ContinuousTimeImageDataset,
             )
-        case "Jurkat":
+        case name if name.startswith("Jurkat"):
             phase_order = (
                 "G1",
                 "S",
@@ -319,28 +333,13 @@ def setup_dataloaders(
             )
             phase_order_dict = {phase: index for index, phase in enumerate(phase_order)}
             ds_params = DatasetParams(
-                file_extension="jpg",
+                file_extension="png" if "brightfield" in name else "jpg",
                 key_transform=str,
                 sorting_func=lambda subdir: phase_order_dict[subdir.name],
                 dataset_class=ImageDataset,
             )
-        case "Jurkat_fully_ordered_dinov2_regs_giant_ds_preproc":
-            phase_order = (
-                "G1",
-                "S",
-                "G2",
-                "Prophase",
-                "Metaphase",
-                "Anaphase",
-                "Telophase",
-            )
-            phase_order_dict = {phase: index for index, phase in enumerate(phase_order)}
-            ds_params = DatasetParams(
-                file_extension="jpg",
-                key_transform=str,
-                sorting_func=lambda subdir: phase_order_dict[subdir.name],
-                dataset_class=ContinuousTimeImageDataset,
-            )
+            if "fully_ordered" in name:
+                ds_params.dataset_class = ContinuousTimeImageDataset
         case "diabetic_retinopathy":
             ds_params = DatasetParams(
                 file_extension="jpeg",

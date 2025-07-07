@@ -18,6 +18,9 @@ import attrs
 import colorlog
 from rich.traceback import install
 
+sys.path.append(".")
+from GaussianProxy.utils.data import ImageDataset, ImageDataset_1D_to_3D
+
 
 # Logging
 def get_logger(log_file_path: Path) -> logging.Logger:
@@ -55,7 +58,7 @@ def get_logger(log_file_path: Path) -> logging.Logger:
 #######################################################################################################################
 ######################################################## Utils ########################################################
 #######################################################################################################################
-def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
+def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int, dataset_type: type[BaseDataset]):
     # Checks
     assert dataset.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
 
@@ -65,7 +68,7 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
     # Globally speaking, we would like to predict the time using the *same transformations* than those used in the data loading of the generative model.
     # The (random) augmentations however must be discarded!
     #
-    # *But* we also would like to use DINO's preprocessor...
+    # *But* we also would like to use DINO's preprocessor..(?)
     transforms_to_remove = [RandomCrop, RandomHorizontalFlip, RandomVerticalFlip, RandomRotationSquareSymmetry]
     logger.debug(f"\nRemoving transforms:{['.'.join([c.__module__, c.__name__]) for c in transforms_to_remove]}")
 
@@ -76,7 +79,7 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
     logger.warning(f"\nNow using transforms: {used_transforms}")
 
     all_samples = list(Path(dataset.path).rglob(f"*.{dataset.dataset_params.file_extension}", recurse_symlinks=True))
-    ds = ImageDataset(all_samples, dataset.transforms, dataset.expected_initial_data_range)  # pyright: ignore[reportAssignmentType]
+    ds = dataset_type(all_samples, dataset.transforms, dataset.expected_initial_data_range)  # pyright: ignore[reportAssignmentType]
     logger.info(f"Instantiated dataset: {ds}")
 
     # Custom data loading:
@@ -118,7 +121,6 @@ def adapt_dataset_get_dataloader(dataset: DataSet, batch_size: int):
         pin_memory=True,
         collate_fn=collate_with_paths,
         prefetch_factor=2,
-        persistent_workers=True,
     )
 
     return dl
@@ -133,6 +135,7 @@ def save_encodings(
     save_name: str,
     batch_size: int,
     recompute_encodings: Literal["no-overwrite", "force-overwrite"],
+    dataset_type: type[BaseDataset],
 ):
     # Checks
     assert dataset.dataset_params is not None, "Dataset parameters must be defined in the dataset instance"
@@ -149,12 +152,13 @@ def save_encodings(
 
     logger.info(f"Saving new encodings to {base_save_path / save_name}")
     # Dataloader
-    dataloader = adapt_dataset_get_dataloader(dataset, batch_size)
+    dataloader = adapt_dataset_get_dataloader(dataset, batch_size, dataset_type)
 
     # Model
     logger.info(f"Loading model {model_name} on device {device}...")
     processor = AutoImageProcessor.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name).to(device)  # pyright: ignore[reportArgumentType]
+    logger.debug("done")
 
     # Run
     rows: list[dict] = []
@@ -1248,6 +1252,7 @@ class Params:
     spline_continuation_range: float
     nb_times_spline_eval: int
     test_split_frac: float | None = None
+    dataset_type: type[BaseDataset] = ImageDataset
 
 
 if __name__ == "__main__":
@@ -1255,12 +1260,11 @@ if __name__ == "__main__":
     ################################################### Parameters ####################################################
     ###################################################################################################################
     install(show_locals=True, width=200)
-    sys.path.append(".")
     # Attention: we *might or might not* use our datasets' pipeline as DINO has its own preprocessing pipeline.
     # ruff: noqa: F401
     # pylint: disable=unused-import
     from my_conf.dataset.BBBC021.BBBC021_196_docetaxel_inference import (
-        BBBC021_196_docetaxel_inference as bbbc021_ds,
+        dataset as bbbc021_ds,
     )
     from my_conf.dataset.biotine.biotine_png_128_inference import dataset as biotine_ds
     from my_conf.dataset.ChromaLive6h.chromalive6h_3ch_png_inference import dataset as chromalive_ds
@@ -1269,6 +1273,7 @@ if __name__ == "__main__":
     )
     from my_conf.dataset.ependymal_context.ependymal_context_inference import dataset as ependymal_context_ds
     from my_conf.dataset.ependymal_cutout.ependymal_cutout_inference import dataset as ependymal_cutout_ds
+    from my_conf.dataset.Jurkat.Jurkat_brightfield_inference import dataset as jurkat_brightfield_ds
     from my_conf.dataset.Jurkat.Jurkat_inference import Jurkat_inference as jurkat_ds
     from my_conf.dataset.NASH_fibrosis.NASH_fibrosis_inference import dataset as NASH_fibrosis_ds
     from my_conf.dataset.NASH_steatosis.NASH_steatosis_inference import dataset as NASH_steatosis_ds
@@ -1301,7 +1306,6 @@ if __name__ == "__main__":
     this_run_save_path = base_save_dir / encoding_scheme
     this_run_save_path.mkdir(parents=True, exist_ok=True)
     logger = get_logger(this_run_save_path / "logs.log")
-    logger.debug("")
     logger.info("-" * 120)
     logger.info("Starting new run")
     logger.info("=> Parameters:")
@@ -1352,12 +1356,12 @@ if __name__ == "__main__":
     from transformers.models.auto.modeling_auto import AutoModel
 
     from GaussianProxy.conf.training_conf import DataSet
-    from GaussianProxy.utils.data import ImageDataset, RandomRotationSquareSymmetry
+    from GaussianProxy.utils.data import BaseDataset, RandomRotationSquareSymmetry
     from GaussianProxy.utils.misc import get_evenly_spaced_timesteps
 
     # ruff: enable: E402
     torch.set_grad_enabled(False)
-    logger.info("done")
+    logger.debug("done")
 
     # Process each dataset iteratively
     for ds in params.datasets:
@@ -1393,6 +1397,7 @@ if __name__ == "__main__":
                 encodings_filename,
                 params.batch_size,
                 params.recompute_encodings,
+                params.dataset_type,
             )
             if df_or_None is None:
                 load_existing_encodings = True
@@ -1456,7 +1461,7 @@ if __name__ == "__main__":
         )
         uniq_labs, counts = np.unique(labels, return_counts=True)
         logger.info(
-            f"Total number of samples: {len(cls_tokens)} | labels: {uniq_labs} | counts: {counts} | size of encodings: {cls_tokens.shape[1]}"
+            f"Total number of (train) samples: {len(cls_tokens)} | labels: {uniq_labs} | counts: {counts} | size of encodings: {cls_tokens.shape[1]}"
         )
 
         # plot embeddings stats
