@@ -267,30 +267,37 @@ def save_eval_artifacts_log_to_wandb(
         main_process_only=False,
     )
 
-    # 3. Log to W&B (main process only)
-    if sel_to_save.shape[tensors_to_save.ndim - 3] == 1:
-        # transform 1-channel images into fake 3-channel RGB images for compatibility
-        logger.debug(
-            f"Adding 2 'zeros' GB channels at dim {tensors_to_save.ndim - 3} to obtain a 3-channels trajectories"
-        )
-        sel_to_save = torch.cat(
-            [sel_to_save, torch.zeros_like(sel_to_save), torch.zeros_like(sel_to_save)],
-            dim=-3,
-        )
-        logger.debug(f"Resulting shape: {sel_to_save.shape}")
-    elif sel_to_save.shape[tensors_to_save.ndim - 3] == 4:
-        # transform 4-channel images into 3-channel RGB images for compatibility
-        logger.debug(f"Composing RGB images from 4-channel images at dim {tensors_to_save.ndim - 3}")
-        logger.debug("WARNING: the 4th channel is discarded")
-        sel_to_save = sel_to_save[:, :3]  # TODO: actually compose from 4 channels
-    else:
-        assert sel_to_save.shape[tensors_to_save.ndim - 3] == 3, (
-            f"Expected 1, 3 or 4 channels, got {sel_to_save.shape[tensors_to_save.ndim - 3]} in total shape {sel_to_save.shape}"
-        )
-
-    # normalize images / videos for logging
+    # 2.5 Normalize images / videos for logging
     normalized_elements_for_logging = normalize_elements_for_logging(sel_to_save, logging_normalization)
 
+    # 2.6 Adapt to non-RGB images
+    for norm_method, normed_imgs in normalized_elements_for_logging.items():
+        if normed_imgs.shape[tensors_to_save.ndim - 3] == 1:
+            # transform 1-channel images into fake 3-channel RGB images for compatibility
+            logger.debug(
+                f"Adding 2 'zeros' GB channels at dim {normed_imgs.ndim - 3} to obtain a 3-channels trajectories"
+            )
+            normed_imgs = np.concatenate(
+                [
+                    normed_imgs,
+                    np.zeros_like(normed_imgs),
+                    np.zeros_like(normed_imgs),
+                ],
+                axis=-3,
+            )
+            logger.debug(f"Resulting shape: {normed_imgs.shape}")
+        elif normed_imgs.shape[tensors_to_save.ndim - 3] == 4:
+            # transform 4-channel images into 3-channel RGB images for compatibility
+            logger.debug(f"Composing RGB images from 4-channel images at dim {tensors_to_save.ndim - 3}")
+            logger.debug("WARNING: the 4th channel is discarded")
+            normed_imgs = normed_imgs[:, :3]  # TODO: actually compose from 4 channels
+        else:
+            assert normed_imgs.shape[tensors_to_save.ndim - 3] == 3, (
+                f"Expected 1, 3 or 4 channels, got {normed_imgs.shape[tensors_to_save.ndim - 3]} in total shape {normed_imgs.shape}"
+            )
+        normalized_elements_for_logging[norm_method] = normed_imgs
+
+    # 3. Log to W&B (main process only)
     # videos case
     if tensors_to_save.ndim == 5:
         assert artifact_name == "trajectories", (
@@ -373,7 +380,7 @@ def normalize_elements_for_logging(elems: Tensor, logging_normalization: list[st
                 norm_elems = elems.clone() - elems.amin(dim=per_image_norm_dims, keepdim=True)
                 norm_elems /= norm_elems.amax(dim=per_image_norm_dims, keepdim=True)
             case "image 5perc-95perc":
-                norm_elems = elems.clone().cpu().numpy()  # torch does allow quantile computation over multiple dims
+                norm_elems = elems.clone().cpu().numpy()  # torch doesn't allow quantile computation over multiple dims
                 norm_elems -= np.percentile(norm_elems, 5, axis=per_image_norm_dims, keepdims=True)
                 norm_elems /= np.percentile(norm_elems, 95, axis=per_image_norm_dims, keepdims=True)
             case "video min-max":
