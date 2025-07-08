@@ -227,7 +227,7 @@ class ImageDataset1D(BaseDataset):
         return torch.from_numpy(np.array(Image.open(path))).unsqueeze(0)
 
 
-class ImageDataset_1D_to_3D(BaseDataset):
+class ImageDataset1Dto3D(BaseDataset):
     """
     Just a dataset loading 1-channel images, duplicating them to 3-channels.
 
@@ -264,6 +264,16 @@ class ContinuousTimeImageDataset1D(BaseContinuousTimeDataset):
 
     def _raw_image_loader(self, path: str | Path) -> Tensor:
         return torch.from_numpy(np.array(Image.open(path))).unsqueeze(0)
+
+
+class ContinuousTimeImageDataset1Dto3D(BaseContinuousTimeDataset):
+    """Just a continuous time dataset loading 1-channel images, duplicating them to 3-channels."""
+
+    def _raw_image_loader(self, path: str | Path) -> Tensor:
+        arr_1D = np.array(Image.open(path))  # (H, W)
+        assert arr_1D.ndim == 2, f"Expected 2D array, got {arr_1D.ndim}D array at {path}"
+        arr_3D = np.tile(arr_1D[:, :, np.newaxis], (1, 1, 3))  # (H, W, 3)
+        return torch.from_numpy(arr_3D).permute(2, 0, 1)
 
 
 class RandomRotationSquareSymmetry(Transform):

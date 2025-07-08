@@ -48,9 +48,11 @@ from GaussianProxy.utils.data import (
     BaseContinuousTimeDatasetReturnValue,
     BaseDataset,
     ContinuousTimeImageDataset,
+    ContinuousTimeImageDataset1D,
+    ContinuousTimeImageDataset1Dto3D,
     ImageDataset,
     ImageDataset1D,
-    ImageDataset_1D_to_3D,
+    ImageDataset1Dto3D,
     TimeKey,
     continuous_ds_collate_fn,
     remove_flips_and_rotations_from_transforms,
@@ -1047,10 +1049,11 @@ class TimeDiffusion:
         self.logger.debug(
             f"Kept transforms: {kept_transforms}, removed transforms: {removed_transforms}",
         )
-        self.logger.warning(
-            "Forcefully using a `ContinuousTimeImageDataset` for the true dataset in `_similarity_with_train_data`"
-        )
-        true_ds = ContinuousTimeImageDataset(
+        if isinstance(self.fully_ordered_train_ds, ContinuousTimeImageDataset1D):
+            dataset_type = ContinuousTimeImageDataset1Dto3D
+        else:
+            dataset_type = ContinuousTimeImageDataset
+        true_ds = dataset_type(
             all_samples,
             kept_transforms,  # no augs, they will be manually performed
             self.cfg.dataset.expected_initial_data_range,
@@ -2173,7 +2176,7 @@ class TimeDiffusion:
         train_dataloaders: dict[float, DataLoader],
         test_dataloaders: dict[float, DataLoader],
         metrics_computation_folder: Path,
-    ):
+    ) -> dict[str, BaseDataset]:
         """
         Return the true datasets to compare against for metrics computation, in [0; 255] uint8 tensors like saved generated images.
 
@@ -2188,7 +2191,7 @@ class TimeDiffusion:
         # TODO: clean this mess when the dataset params is moved into the config (see TODO in data.py)
         dataset_class: type[BaseDataset] = type(train_dataloaders[0].dataset)  # pyright: ignore[reportAssignmentType]
         if dataset_class == ImageDataset1D:
-            dataset_class = ImageDataset_1D_to_3D  # load 1 channem samples as 3 channels for metrics computation
+            dataset_class = ImageDataset1Dto3D  # load 1 channem samples as 3 channels for metrics computation
 
         common_suffix = train_dataloaders[0].dataset.samples[0].suffix  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -2250,18 +2253,26 @@ class TimeDiffusion:
             ]
 
         # Finally instantiate the datasets
-        for time_name, all_files in all_true_files_per_time.items():
-            true_datasets_to_compare_with[time_name] = dataset_class(
-                samples=all_files,
-                transforms=metrics_compute_transforms,
-            )
+        if self.debug:
+            self.logger.debug("Instantiating small true datasets to compare with for metrics computation")
+            for time_name, all_files in all_true_files_per_time.items():
+                true_datasets_to_compare_with[time_name] = dataset_class(
+                    samples=all_files[:50],  # only 50 samples for debug
+                    transforms=metrics_compute_transforms,
+                )
+        else:
+            for time_name, all_files in all_true_files_per_time.items():
+                true_datasets_to_compare_with[time_name] = dataset_class(
+                    samples=all_files,
+                    transforms=metrics_compute_transforms,
+                )
 
         # Check that datasets are well-formed
         for time_name, dataset in true_datasets_to_compare_with.items():
             assert len(dataset) > 0, (
                 f"No samples found for time {time_name} when creating true dataset to compare with for metrics computation"
             )
-            if (
+            if not self.debug and (
                 isinstance(eval_strat.nb_samples_to_gen_per_time, str)
                 and "aug" in eval_strat.nb_samples_to_gen_per_time
             ):

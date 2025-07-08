@@ -19,7 +19,7 @@ import colorlog
 from rich.traceback import install
 
 sys.path.append(".")
-from GaussianProxy.utils.data import ImageDataset, ImageDataset_1D_to_3D
+from GaussianProxy.utils.data import ImageDataset, ImageDataset1Dto3D
 
 
 # Logging
