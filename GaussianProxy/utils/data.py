@@ -452,6 +452,13 @@ def setup_dataloaders(
                 sorting_func=lambda subdir: int(subdir.name),
                 dataset_class=ContinuousTimeImageDataset,
             )
+        case name if name.startswith("deepcycle"):
+            ds_params = DatasetParams(
+                file_extension="tif",
+                key_transform=str,
+                sorting_func=lambda subdir: int(subdir.name[1]),
+                dataset_class=ContinuousTimeImageDataset1D,
+            )
         case _:
             raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 

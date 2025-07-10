@@ -1,0 +1,19 @@
+name: deepcycle_fully_ordered
+path:
+path_to_single_parquet:
+data_shape: [1, 128, 128]
+transforms:
+  _target_: torchvision.transforms.transforms.Compose
+  transforms:
+    - _target_: torchvision.transforms.ConvertImageDtype # this also scales to [0; 1]
+      dtype: ${torch_dtype:float32} # passed dtype must be accessible as a "torch" attribute
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.5]
+      std: [0.5]
+    - _target_: torchvision.transforms.RandomHorizontalFlip
+    - _target_: torchvision.transforms.RandomVerticalFlip
+    - _target_: GaussianProxy.utils.data.RandomRotationSquareSymmetry
+expected_initial_data_range: [0, 255]
+expected_dtype: torch.uint8
+selected_dists:
+fully_ordered: true
