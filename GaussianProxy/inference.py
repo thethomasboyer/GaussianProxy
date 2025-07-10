@@ -23,9 +23,11 @@ import torch_fidelity
 from accelerate import Accelerator, DistributedType
 from accelerate.logging import MultiProcessAdapter
 from accelerate.utils import InitProcessGroupKwargs
+from diffusers.configuration_utils import ConfigMixin
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddim_inverse import DDIMInverseScheduler
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from enlighten import Manager, get_manager
 from numpy import ndarray
 from PIL import Image
@@ -129,6 +131,10 @@ HARD_AUGMENTATION_FACTORS = {  # TODO: remove this and use 2 ** len(augmentation
 }
 
 
+class SchedulersCommonClass(SchedulerMixin, ConfigMixin):
+    pass
+
+
 def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     ###############################################################################################
     #                                          Accelerator
@@ -146,16 +152,16 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     ###############################################################################################
     #                                          Check paths
     ###############################################################################################
+    # where to load the model/schedulers from
     project_path = cfg.root_experiments_path / cfg.project_name
     assert project_path.exists(), f"Project path {project_path} does not exist."
-
     run_path = project_path / cfg.run_name
     assert run_path.exists(), f"Run path {run_path} does not exist."
     logger.info(f"run path: {run_path}")
 
+    # where to write the outputs to
     cfg.output_dir.mkdir(exist_ok=True, parents=True)
     logger.info(f"output dir: {cfg.output_dir}")
-
     ###############################################################################################
     #                                          Load Model
     ###############################################################################################
@@ -187,28 +193,39 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
 
     # dynamic
     orig_dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(run_path / "saved_model" / "dynamic")
+    logger.debug(f"Loaded original dynamic from {run_path / 'saved_model' / 'dynamic'}:\n{orig_dynamic}")
 
-    if cfg.scheduler_config is not None:
-        logger.info(f"Loading scheduler from {cfg.scheduler_config}")
-        dynamic: DDIMScheduler = DDIMScheduler.from_pretrained(cfg.scheduler_config)
-        # show the diff between the two configs
-        all_attrs = set(orig_dynamic.config.keys()) | set(dynamic.config.keys())
-        msg = ""
-        for attr in all_attrs:
-            orig_val = getattr(orig_dynamic.config, attr, None)
-            chosen_val = getattr(dynamic.config, attr, None)
-            if orig_val != chosen_val and not attr.startswith("_"):
-                msg += f"'{attr}': {orig_val} -> {chosen_val}\n"
-        if len(msg) != 0:
-            logger.info("Diff between original -and> chosen dynamic:\n" + msg)
-        else:
-            logger.info("No config difference between original and loaded dynamic")
+    dynamic_type = DDIMScheduler
+    dynamic: SchedulersCommonClass
 
+    if cfg.scheduler_type is not None:
+        logger.info(f"Using a {cfg.scheduler_type} scheduler")
+        dynamic_type = cfg.scheduler_type
+
+    if cfg.scheduler_config_path is not None:
+        logger.info(f"Loading scheduler config from {cfg.scheduler_config_path}")
+        dynamic = dynamic_type.from_pretrained(cfg.scheduler_config_path)  # pyright: ignore[reportAssignmentType]
+    elif cfg.import_orig_config:
+        logger.info("Loading scheduler config from the original dynamic")
+        dynamic = dynamic_type.from_config(orig_dynamic.config)  # pyright: ignore[reportAssignmentType, reportAttributeAccessIssue]
     else:
-        logger.info(f"Loading dynamic from {run_path / 'saved_model' / 'dynamic'}")
-        dynamic = orig_dynamic
+        logger.info(f"Using the default {dynamic_type} config")
+        dynamic = dynamic_type()  # pyright: ignore[reportAssignmentType]
 
-    logger.info(f"Loaded dynamic:\n{dynamic}")
+    # show the diff between the two configs
+    all_attrs = set(orig_dynamic.config.keys()) | set(dynamic.config.keys())
+    msg = ""
+    for attr in all_attrs:
+        orig_val = getattr(orig_dynamic.config, attr, None)
+        chosen_val = getattr(dynamic.config, attr, None)
+        if orig_val != chosen_val and not attr.startswith("_"):
+            msg += f"'{attr}': {orig_val} -> {chosen_val}\n"
+    if len(msg) != 0:
+        logger.info("Diff between original -and> chosen dynamic:\n" + msg)
+    else:
+        logger.info("No config difference between original and loaded dynamic")
+
+    logger.info(f"Using dynamic:\n{dynamic}")
 
     ###############################################################################################
     #                               Miscellaneous common needed things
@@ -218,7 +235,16 @@ def main(cfg: InferenceConfig, logger: MultiProcessAdapter) -> None:
     database_path = Path(cfg.dataset.path)
     logger.info(f"Using dataset {cfg.dataset.name} from {database_path}")
     subdirs: list[Path] = [e for e in database_path.iterdir() if e.is_dir() and not e.name.startswith(".")]
+    logger.info(f"Found {len(subdirs)} subdirectories in {database_path}: {[s.name for s in subdirs]}")
+
+    # use only selected_dists
+    if cfg.dataset.selected_dists is not None:
+        sel_subdirs_as_str = [str(i) for i in cfg.dataset.selected_dists]
+        subdirs = [s for s in subdirs if s.name in sel_subdirs_as_str]
+        logger.info(f"Filtered subdirs by selected_dists {cfg.dataset.selected_dists}: {subdirs}")
+
     subdirs.sort(key=cfg.dataset.dataset_params.sorting_func)
+    logger.info(f"Sorted subdirs: {[s.name for s in subdirs]}")
 
     ### Evenly-spaced timesteps are assumed to be the actual empirical timesteps; must change this if it changes in training code
     # TODO: actually save the timesteps used in training (well, if discrete...)
@@ -351,7 +377,7 @@ def simple_gen(
     eval_strat: SimpleGeneration,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
@@ -362,16 +388,15 @@ def simple_gen(
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
     clean_inference_strategy_folder(base_save_path, logger)
-    logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
     inference_scheduler.set_timesteps(eval_strat.nb_diffusion_timesteps)
 
     # 1. Get the starting batch
-    shape = get_starting_batch(cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames)[
-        0
-    ].shape
+    shape = get_starting_batch(
+        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames, base_save_path
+    )[0].shape
 
     # 2. Generate the time encodings
     eval_video_times = torch.rand(shape[0], device=cfg.device, dtype=cfg.dtype)
@@ -417,7 +442,7 @@ def similarity_with_train_data(
     eval_strat: SimilarityWithTrainData,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     subdirs: list[Path],
     logger: MultiProcessAdapter,
@@ -441,7 +466,6 @@ def similarity_with_train_data(
     # -1. Prepare output directory & change models to fp16
     base_save_path = cfg.output_dir / eval_strat.name
     clean_inference_strategy_folder(base_save_path, logger)
-    logger.debug(f"Saving outputs to {base_save_path}")
 
     if cfg.dtype != torch.float32:
         logger.warning(
@@ -680,7 +704,7 @@ def forward_noising(
     eval_strat: ForwardNoising,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
@@ -688,7 +712,6 @@ def forward_noising(
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
     clean_inference_strategy_folder(base_save_path, logger)
-    logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup scheduler
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -696,7 +719,14 @@ def forward_noising(
 
     # 0.5. Get the starting batch
     batch, _ = get_starting_batch(
-        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+        cfg,
+        eval_strat,
+        logger,
+        cfg.dataset.path,
+        cfg.device,
+        cfg.dtype,
+        timesteps2classnames,
+        base_save_path,
     )
 
     # 1. Save the to-be noised images
@@ -822,7 +852,7 @@ def forward_noising_linear_scaling(
     eval_strat: ForwardNoisingLinearScaling,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
@@ -836,7 +866,6 @@ def forward_noising_linear_scaling(
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
     clean_inference_strategy_folder(base_save_path, logger)
-    logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup scheduler
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -844,7 +873,14 @@ def forward_noising_linear_scaling(
 
     # 0.5. Get the starting batch
     batch, _ = get_starting_batch(
-        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+        cfg,
+        eval_strat,
+        logger,
+        cfg.dataset.path,
+        cfg.device,
+        cfg.dtype,
+        timesteps2classnames,
+        base_save_path,
     )
 
     # 1. Save the to-be noised images
@@ -962,7 +998,7 @@ def inversion_and_regeneration_only(
     eval_strat: InversionRegenerationOnly,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
@@ -970,7 +1006,6 @@ def inversion_and_regeneration_only(
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
     clean_inference_strategy_folder(base_save_path, logger)
-    logger.debug(f"Saving outputs to {base_save_path}")
 
     # 0. Setup schedulers
     inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(dynamic.config)  # pyright: ignore[reportAssignmentType]
@@ -980,7 +1015,14 @@ def inversion_and_regeneration_only(
 
     # 0.5. Get the starting batch
     batch, _ = get_starting_batch(
-        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+        cfg,
+        eval_strat,
+        logger,
+        cfg.dataset.path,
+        cfg.device,
+        cfg.dtype,
+        timesteps2classnames,
+        base_save_path,
     )
 
     # 1. Save the to-be noised images
@@ -1068,14 +1110,14 @@ def inverted_regeneration(
     eval_strat: InvertedRegeneration,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
 ):
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    logger.debug(f"Saving outputs to {base_save_path}")
+
     clean_inference_strategy_folder(base_save_path, logger)
 
     # 0. Setup schedulers
@@ -1090,7 +1132,14 @@ def inverted_regeneration(
 
     # 0.5. Get the starting batch
     batch, starting_video_time = get_starting_batch(
-        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+        cfg,
+        eval_strat,
+        logger,
+        cfg.dataset.path,
+        cfg.device,
+        cfg.dtype,
+        timesteps2classnames,
+        base_save_path,
     )
 
     # 1. Save the to-be noised images
@@ -1159,8 +1208,8 @@ def inverted_regeneration(
         endpoint=True,
     )
     video_times = torch.tensor(video_times, device=cfg.device, dtype=cfg.dtype)
-    if video_times.ndim == 0:
-        video_times = video_times.repeat_interleave(eval_strat.nb_generated_samples, dim=1)
+    if video_times.ndim == 1:
+        video_times = video_times.unsqueeze(1).repeat(1, eval_strat.nb_generated_samples)
     # video_times is now of shape (nb_video_timesteps, nb_generated_samples)
 
     for vid_batch_idx in range(nb_vid_batches):
@@ -1245,7 +1294,7 @@ def iterative_inverted_regeneration(
     eval_strat: IterativeInvertedRegeneration,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     pbar_manager: Manager,
     logger: MultiProcessAdapter,
     timesteps2classnames: dict[float, str],
@@ -1260,7 +1309,7 @@ def iterative_inverted_regeneration(
     """
     # -1. Prepare output directory
     base_save_path = cfg.output_dir / eval_strat.name
-    logger.debug(f"Saving outputs to {base_save_path}")
+
     clean_inference_strategy_folder(base_save_path, logger)
 
     # 0. Setup schedulers
@@ -1277,7 +1326,14 @@ def iterative_inverted_regeneration(
 
     # 0.5. Get the starting batch
     batch, _ = get_starting_batch(
-        cfg, eval_strat, logger, cfg.dataset.path, cfg.device, cfg.dtype, timesteps2classnames
+        cfg,
+        eval_strat,
+        logger,
+        cfg.dataset.path,
+        cfg.device,
+        cfg.dtype,
+        timesteps2classnames,
+        base_save_path,
     )
 
     # 1. Save the to-be noised images
@@ -1414,7 +1470,7 @@ def metrics_computation(
     eval_strat: MetricsComputation,
     net: UNet2DConditionModel,
     video_time_encoder: VideoTimeEncoding,
-    dynamic: DDIMScheduler,
+    dynamic: SchedulersCommonClass,
     timesteps: list[float],
     timesteps2classnames: dict[float, str],
     pbar_manager: Manager,
@@ -2138,10 +2194,13 @@ def get_starting_batch(
     device: torch.device | str,
     dtype: torch.dtype | str,
     timesteps2classnames: dict[float, str],
+    base_save_path: Path,
 ):
     # build the starting dataset
     if cfg.dataset.fully_ordered:
-        return _get_starting_batch_continuous(cfg, eval_strat, logger, device, dtype, timesteps2classnames)
+        return _get_starting_batch_continuous(
+            cfg, eval_strat, logger, device, dtype, timesteps2classnames, base_save_path
+        )
     else:
         return _get_starting_batch_discrete(cfg, eval_strat, logger, dataset_path, device, dtype)
 
@@ -2153,6 +2212,7 @@ def _get_starting_batch_continuous(
     device: torch.device | str,
     dtype: torch.dtype | str,
     timesteps2classnames: dict[float, str],
+    base_save_path: Path,
 ) -> tuple[Tensor, Tensor]:
     assert cfg.dataset.dataset_params is not None
     assert cfg.dataset.path_to_single_parquet is not None
@@ -2178,6 +2238,11 @@ def _get_starting_batch_continuous(
     logger.info(
         f"Using starting data of shape {starting_batch.shape} and type {starting_batch.dtype} at times {starting_times}"
     )
+    # write the file names to disk
+    with open(base_save_path / "starting_batch_file_names.txt", "w") as f:
+        for _, sample in sampled_train_files_time0.iterrows():
+            f.write(f"{sample['file_path']}\n")
+    # return
     return starting_batch, starting_times
 
 
@@ -2248,6 +2313,9 @@ def clean_inference_strategy_folder(
 
     Does not handle distribution!
     """
+    logger.info(f"Saving outputs to {folder.parts[-3]}/{folder.parts[-2]}/{folder.name}")
+
+    # clean the folder if it already exists
     if names_to_ignore is None:
         names_to_ignore = []
 
@@ -2258,7 +2326,8 @@ def clean_inference_strategy_folder(
         )
         inpt = input("Overwrite these files/folders (will exist otherwise)? (y/[n]) ")
         if inpt.lower() != "y":
-            raise RuntimeError("Refusing to proceed with a non-cleared folder.")
+            logger.warning("Refusing to proceed with a non-cleared folder.")
+            sys.exit(1)
         else:
             logger.info(f"Deleting files/folders: {[f.name for f in existing_problematic_files]}")
             for f in existing_problematic_files:
@@ -2266,6 +2335,16 @@ def clean_inference_strategy_folder(
                     shutil.rmtree(f)
                 else:
                     f.unlink()
+
+    # write the config to the folder
+    from my_conf import my_inference_conf
+
+    config_source_path = Path(my_inference_conf.__file__)
+    config_dest_path = folder / config_source_path.name
+    if config_dest_path.exists():
+        raise RuntimeError(f"Config file {config_dest_path} already exists in destination folder!")
+    shutil.copy2(config_source_path, config_dest_path)
+    logger.info(f"Copied config '{config_source_path.name}' from:\n{config_source_path}\nto:\n{config_dest_path}")
 
 
 if __name__ == "__main__":
@@ -2291,7 +2370,7 @@ if __name__ == "__main__":
         main(inference_conf, logger)
         profiler.stop()
 
-        # torch.savetorch.full profiling trace (very large)
+        # save full profiling trace (very large)
         if prof_conf.export_chrome_trace:
             logger.info("Saving profiling trace to profiling_trace.json...")
             profiler.export_chrome_trace("profiling_trace.json")
