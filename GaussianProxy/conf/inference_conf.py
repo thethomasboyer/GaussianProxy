@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from torch import dtype
 
 from GaussianProxy.conf.training_conf import DataSet, EvaluationStrategy
@@ -24,7 +25,9 @@ class InferenceConfig:
     run_name: str
 
     # Scheduler config
-    scheduler_config: Path | None
+    scheduler_config_path: Path | str | None = None
+    scheduler_type: type[SchedulerMixin] | None = None
+    import_orig_config: bool = True
 
     # Output directory (where to put the generated images / tensors)
     output_dir: Path
