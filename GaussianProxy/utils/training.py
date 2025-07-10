@@ -578,7 +578,7 @@ class TimeDiffusion:
     def _fit_one_batch(
         self,
         batch: Tensor,
-        time: float | Tensor,
+        time: int | float | Tensor,
     ):
         """
         Perform one training step on one batch at one timestep.
@@ -1748,9 +1748,9 @@ class TimeDiffusion:
         TODO: use torcheval.metrics? nothing else than FID for now...
         """
         ##### 0. Preparations
-        # Set precision flags
-        torch.set_float32_matmul_precision("highest")
-        torch.backends.cudnn.allow_tf32 = False
+        # Set precision flags: actually use default here otherwise metrics comp might be really long
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
 
         # duplicate the scheduler to not mess with the training one
         inference_scheduler: DDIMScheduler = DDIMScheduler.from_config(self.dynamic.config)  # pyright: ignore[reportAssignmentType]
